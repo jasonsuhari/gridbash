@@ -1,0 +1,14 @@
+[profiles.codex-fast]
+command = "codex"
+args = ["--model", "gpt-5.4-mini"]
+title = "Codex Fast"
+
+[profiles.claude-review]
+command = "claude"
+args = []
+title = "Claude Review"
+
+[profiles.git-worktree]
+command = "bash"
+args = ["--login", "-i"]
+title = "Git Bash"
