@@ -20,6 +20,28 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
 - Built-in launch profiles for common CLI coding agents.
 
+## Install With npm
+
+From this repo:
+
+```powershell
+npm install -g .
+```
+
+Then run it from anywhere:
+
+```powershell
+gridbash 2x3 --profile codex
+```
+
+Build a publishable npm tarball:
+
+```powershell
+npm pack
+```
+
+The package ships a Node command shim that launches the bundled Windows x64 `gridbash.exe`.
+
 ## Install From Source
 
 Install Rust first:

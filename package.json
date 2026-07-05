@@ -1,0 +1,47 @@
+{
+  "name": "gridbash",
+  "version": "0.1.0",
+  "description": "Fast, beautiful terminal grids for running lots of CLI agents at once.",
+  "license": "MIT",
+  "homepage": "https://github.com/jason/gridbash#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jason/gridbash.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jason/gridbash/issues"
+  },
+  "bin": {
+    "gridbash": "npm/bin/gridbash.js"
+  },
+  "files": [
+    "npm/bin/",
+    "README.md",
+    "LICENSE",
+    "config.example.toml"
+  ],
+  "scripts": {
+    "build": "cargo build --release",
+    "prepare": "node npm/scripts/prepare.js",
+    "test": "cargo test"
+  },
+  "keywords": [
+    "terminal",
+    "multiplexer",
+    "agents",
+    "codex",
+    "claude",
+    "tui",
+    "pty",
+    "conpty"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ]
+}
