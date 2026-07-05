@@ -4,7 +4,7 @@ version = "0.1.1"
 edition = "2024"
 description = "A fast, beautiful terminal grid for running many CLI agents."
 license = "MIT"
-repository = "https://github.com/jason/gridbash"
+repository = "https://github.com/jasonsuhari/gridbash"
 
 [dependencies]
 anyhow = "1.0"

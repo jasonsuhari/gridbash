@@ -54,7 +54,7 @@ winget install --id Rustlang.Rustup -e
 Build GridBash:
 
 ```powershell
-git clone https://github.com/jason/gridbash
+git clone https://github.com/jasonsuhari/gridbash
 cd gridbash
 cargo build --release
 ```
