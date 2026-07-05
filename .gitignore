@@ -1,4 +1,5 @@
 /target
+.worktrees/
 node_modules/
 npm-debug.log*
 npm/bin/win32-x64/gridbash.exe
