@@ -56,6 +56,8 @@ impl PtyPane {
             command_builder.arg(arg);
         }
         command_builder.cwd(cwd);
+        command_builder.env("TERM", "xterm-256color");
+        command_builder.env("COLORTERM", "truecolor");
 
         let child = pair
             .slave

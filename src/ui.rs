@@ -6,12 +6,14 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::{
-    app::{App, Mode},
-    layout::grid_rects,
-};
+use crate::app::{App, Mode};
 
-pub fn draw(frame: &mut Frame<'_>, app: &App) -> Vec<Rect> {
+pub struct DrawState {
+    pub grid_area: Rect,
+    pub pane_rects: Vec<Rect>,
+}
+
+pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -20,7 +22,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> Vec<Rect> {
 
     let grid_area = chunks[0];
     let status_area = chunks[1];
-    let rects = grid_rects(grid_area, app.grid(), app.panes().len());
+    let rects = app.pane_rects(grid_area);
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -56,7 +58,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> Vec<Rect> {
         };
 
         let title = format!(
-            " {} · {} · {} · {}{} ",
+            " {} | {} | {} | {}{} ",
             index + 1,
             pane.title(),
             pane.profile(),
@@ -72,11 +74,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> Vec<Rect> {
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
         render_screen(frame, inner, pane.screen());
+
+        if focused {
+            set_terminal_cursor(frame, inner, pane.screen());
+        }
     }
 
     let mode = match app.mode() {
         Mode::Normal => "NORMAL",
         Mode::Command => "COMMAND",
+        Mode::Grid => "GRID",
     };
     let broadcast = if app.broadcast() {
         "BROADCAST"
@@ -98,7 +105,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> Vec<Rect> {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" · "),
+        Span::raw(" | "),
         Span::styled(
             broadcast,
             Style::default().fg(if app.broadcast() {
@@ -107,18 +114,21 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> Vec<Rect> {
                 Color::Gray
             }),
         ),
-        Span::raw(" · "),
+        Span::raw(" | "),
         Span::raw(format!("{} selected", app.selected().len())),
-        Span::raw(" · "),
+        Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(" · Ctrl-q quit"),
+        Span::raw(" | Ctrl-g grid | Ctrl-q quit"),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(Color::Rgb(11, 15, 20))),
         status_area,
     );
 
-    rects
+    DrawState {
+        grid_area,
+        pane_rects: rects,
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -155,4 +165,19 @@ fn render_screen(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen) {
         ),
         area,
     );
+}
+
+fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let (row, column) = screen.cursor_position();
+    let x = area
+        .x
+        .saturating_add(column.min(area.width.saturating_sub(1)));
+    let y = area
+        .y
+        .saturating_add(row.min(area.height.saturating_sub(1)));
+    frame.set_cursor_position((x, y));
 }

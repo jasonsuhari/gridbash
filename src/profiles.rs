@@ -18,16 +18,72 @@ pub struct Profile {
     pub title: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LaunchCommand {
+    pub command: PathBuf,
+    pub args: Vec<String>,
+}
+
 impl Profile {
-    pub fn resolved_command(&self) -> Result<(PathBuf, Vec<String>)> {
+    pub fn resolved_command(&self) -> Result<LaunchCommand> {
         let exe = resolve_executable(&self.command)
             .ok_or_else(|| anyhow!("profile command not found on PATH: {}", self.command))?;
-        Ok((exe, self.args.clone()))
+        Ok(wrap_for_windows_script(exe, &self.args))
     }
 
     pub fn display_name(&self, key: &str) -> String {
         self.title.clone().unwrap_or_else(|| key.to_string())
     }
+}
+
+fn wrap_for_windows_script(command: PathBuf, args: &[String]) -> LaunchCommand {
+    let extension = command
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase());
+
+    match extension.as_deref() {
+        Some("cmd" | "bat") => LaunchCommand {
+            command: PathBuf::from("cmd.exe"),
+            args: vec![
+                "/d".into(),
+                "/s".into(),
+                "/c".into(),
+                quote_cmd_command(&command, args),
+            ],
+        },
+        Some("ps1") => LaunchCommand {
+            command: PathBuf::from("powershell.exe"),
+            args: [
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                command.to_string_lossy().to_string(),
+            ]
+            .into_iter()
+            .chain(args.iter().cloned())
+            .collect(),
+        },
+        _ => LaunchCommand {
+            command,
+            args: args.to_vec(),
+        },
+    }
+}
+
+fn quote_cmd_command(command: &Path, args: &[String]) -> String {
+    std::iter::once(command.to_string_lossy().to_string())
+        .chain(args.iter().cloned())
+        .map(|arg| {
+            if arg.contains([' ', '\t', '"', '&', '|', '<', '>', '^']) {
+                format!("\"{}\"", arg.replace('"', "\\\""))
+            } else {
+                arg
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn all_profiles(config: &Config) -> BTreeMap<String, Profile> {

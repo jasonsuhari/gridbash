@@ -9,6 +9,19 @@ pub struct GridSize {
     pub columns: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GridLayout {
+    size: GridSize,
+    row_weights: Vec<u16>,
+    column_weights: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Divider {
+    Row(usize),
+    Column(usize),
+}
+
 impl GridSize {
     pub fn parse(value: &str) -> Option<Self> {
         let normalized = value.trim().to_ascii_lowercase();
@@ -40,27 +53,125 @@ impl GridSize {
     }
 }
 
-pub fn grid_rects(area: Rect, grid: GridSize, count: usize) -> Vec<Rect> {
+impl GridLayout {
+    pub fn new(size: GridSize) -> Self {
+        Self {
+            size,
+            row_weights: vec![1000; size.rows],
+            column_weights: vec![1000; size.columns],
+        }
+    }
+
+    pub fn size(&self) -> GridSize {
+        self.size
+    }
+
+    pub fn rects(&self, area: Rect, count: usize) -> Vec<Rect> {
+        weighted_grid_rects(
+            area,
+            self.size,
+            &self.row_weights,
+            &self.column_weights,
+            count,
+        )
+    }
+
+    pub fn reset_equal(&mut self) {
+        self.row_weights.fill(1000);
+        self.column_weights.fill(1000);
+    }
+
+    pub fn divider_at(&self, area: Rect, x: u16, y: u16) -> Option<Divider> {
+        let column_widths = weighted_lengths(area.width, &self.column_weights);
+        let row_heights = weighted_lengths(area.height, &self.row_weights);
+
+        let mut cursor_x = area.x;
+        for (index, width) in column_widths
+            .iter()
+            .copied()
+            .enumerate()
+            .take(column_widths.len().saturating_sub(1))
+        {
+            cursor_x = cursor_x.saturating_add(width);
+            if x.abs_diff(cursor_x) <= 1 && y >= area.y && y < area.y.saturating_add(area.height) {
+                return Some(Divider::Column(index));
+            }
+        }
+
+        let mut cursor_y = area.y;
+        for (index, height) in row_heights
+            .iter()
+            .copied()
+            .enumerate()
+            .take(row_heights.len().saturating_sub(1))
+        {
+            cursor_y = cursor_y.saturating_add(height);
+            if y.abs_diff(cursor_y) <= 1 && x >= area.x && x < area.x.saturating_add(area.width) {
+                return Some(Divider::Row(index));
+            }
+        }
+
+        None
+    }
+
+    pub fn drag_divider(&mut self, divider: Divider, area: Rect, x: u16, y: u16) {
+        match divider {
+            Divider::Column(index) => drag_pair(
+                &mut self.column_weights,
+                index,
+                area.width,
+                x.saturating_sub(area.x),
+            ),
+            Divider::Row(index) => drag_pair(
+                &mut self.row_weights,
+                index,
+                area.height,
+                y.saturating_sub(area.y),
+            ),
+        }
+    }
+
+    pub fn adjust_focused(
+        &mut self,
+        pane_index: usize,
+        horizontal_delta: i16,
+        vertical_delta: i16,
+    ) {
+        let column = pane_index % self.size.columns;
+        let row = pane_index / self.size.columns;
+        adjust_weight(&mut self.column_weights, column, horizontal_delta);
+        adjust_weight(&mut self.row_weights, row, vertical_delta);
+    }
+}
+
+#[cfg(test)]
+fn grid_rects(area: Rect, grid: GridSize, count: usize) -> Vec<Rect> {
+    GridLayout::new(grid).rects(area, count)
+}
+
+fn weighted_grid_rects(
+    area: Rect,
+    grid: GridSize,
+    row_weights: &[u16],
+    column_weights: &[u16],
+    count: usize,
+) -> Vec<Rect> {
     let mut rects = Vec::with_capacity(count);
     if grid.rows == 0 || grid.columns == 0 {
         return rects;
     }
 
-    let width_base = area.width / grid.columns as u16;
-    let width_extra = area.width % grid.columns as u16;
-    let height_base = area.height / grid.rows as u16;
-    let height_extra = area.height % grid.rows as u16;
+    let column_widths = weighted_lengths(area.width, column_weights);
+    let row_heights = weighted_lengths(area.height, row_weights);
 
     let mut y = area.y;
-    for row in 0..grid.rows {
-        let row_height = height_base + u16::from((row as u16) < height_extra);
+    for row_height in row_heights {
         let mut x = area.x;
-        for column in 0..grid.columns {
+        for column_width in column_widths.iter().copied() {
             if rects.len() >= count {
                 break;
             }
 
-            let column_width = width_base + u16::from((column as u16) < width_extra);
             rects.push(Rect {
                 x,
                 y,
@@ -73,6 +184,64 @@ pub fn grid_rects(area: Rect, grid: GridSize, count: usize) -> Vec<Rect> {
     }
 
     rects
+}
+
+fn weighted_lengths(total: u16, weights: &[u16]) -> Vec<u16> {
+    if weights.is_empty() {
+        return Vec::new();
+    }
+
+    let weight_total = weights
+        .iter()
+        .map(|weight| *weight as u32)
+        .sum::<u32>()
+        .max(1);
+    let mut lengths = Vec::with_capacity(weights.len());
+    let mut used = 0_u16;
+
+    for (index, weight) in weights.iter().enumerate() {
+        let remaining_slots = weights.len() - index;
+        let length = if remaining_slots == 1 {
+            total.saturating_sub(used)
+        } else {
+            let raw = ((*weight as u32 * total as u32) / weight_total) as u16;
+            raw.max(1).min(
+                total
+                    .saturating_sub(used)
+                    .saturating_sub((remaining_slots - 1) as u16),
+            )
+        };
+
+        lengths.push(length);
+        used = used.saturating_add(length);
+    }
+
+    lengths
+}
+
+fn drag_pair(weights: &mut [u16], index: usize, total_pixels: u16, target_pixels: u16) {
+    if index + 1 >= weights.len() || total_pixels == 0 {
+        return;
+    }
+
+    let lengths = weighted_lengths(total_pixels, weights);
+    let before_pixels = lengths.iter().take(index).copied().sum::<u16>();
+    let pair_pixels = lengths[index].saturating_add(lengths[index + 1]).max(2);
+    let local_target = target_pixels
+        .saturating_sub(before_pixels)
+        .clamp(1, pair_pixels.saturating_sub(1));
+    let pair_weight = weights[index].saturating_add(weights[index + 1]).max(2);
+    let left_weight = ((local_target as u32 * pair_weight as u32) / pair_pixels as u32) as u16;
+    weights[index] = left_weight.max(100);
+    weights[index + 1] = pair_weight.saturating_sub(weights[index]).max(100);
+}
+
+fn adjust_weight(weights: &mut [u16], index: usize, delta: i16) {
+    let Some(weight) = weights.get_mut(index) else {
+        return;
+    };
+
+    *weight = (*weight as i32 + delta as i32 * 50).clamp(100, 5000) as u16;
 }
 
 pub fn pane_at(rects: &[Rect], x: u16, y: u16) -> Option<usize> {
@@ -119,5 +288,16 @@ mod tests {
         assert_eq!(rects.len(), 6);
         assert_eq!(rects[0].height + rects[3].height, 40);
         assert_eq!(rects[0].width + rects[1].width + rects[2].width, 100);
+    }
+
+    #[test]
+    fn weighted_layout_allows_custom_columns() {
+        let mut layout = GridLayout::new(GridSize {
+            rows: 1,
+            columns: 2,
+        });
+        layout.drag_divider(Divider::Column(0), Rect::new(0, 0, 100, 10), 70, 0);
+        let rects = layout.rects(Rect::new(0, 0, 100, 10), 2);
+        assert!(rects[0].width > rects[1].width);
     }
 }

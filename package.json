@@ -1,6 +1,6 @@
 {
   "name": "gridbash",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Fast, beautiful terminal grids for running lots of CLI agents at once.",
   "license": "MIT",
   "homepage": "https://github.com/jason/gridbash#readme",

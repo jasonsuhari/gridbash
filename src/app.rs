@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 use crate::{
     cli::{Cli, GridMode},
     config::Config,
-    layout::{GridSize, PaneId, pane_at},
+    layout::{Divider, GridLayout, GridSize, PaneId, pane_at},
     profiles::{available_profiles, find_profile},
     pty::{PtyEvent, PtyPane},
     ui,
@@ -33,16 +33,19 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 pub enum Mode {
     Normal,
     Command,
+    Grid,
 }
 
 pub struct App {
     cli: Cli,
     config: Config,
-    grid: GridSize,
+    layout: GridLayout,
+    grid_area: Rect,
     panes: Vec<PtyPane>,
     focus: usize,
     selected: BTreeSet<usize>,
     rects: Vec<Rect>,
+    drag_divider: Option<Divider>,
     mode: Mode,
     broadcast: bool,
     command_filter: String,
@@ -60,11 +63,13 @@ impl App {
         Ok(Self {
             cli,
             config,
-            grid,
+            layout: GridLayout::new(grid),
+            grid_area: Rect::default(),
             panes: Vec::new(),
             focus: 0,
             selected: BTreeSet::new(),
             rects: Vec::new(),
+            drag_divider: None,
             mode: Mode::Normal,
             broadcast: false,
             command_filter: String::new(),
@@ -88,7 +93,7 @@ impl App {
         let pane_count = self
             .cli
             .count
-            .unwrap_or_else(|| self.grid.count())
+            .unwrap_or_else(|| self.layout.size().count())
             .clamp(1, 100);
         let cwd = self
             .cli
@@ -105,14 +110,14 @@ impl App {
 
     fn spawn_pane(&mut self, index: usize, profile_name: &str, cwd: PathBuf) -> Result<()> {
         let profile = find_profile(&self.config, profile_name)?;
-        let (command, args) = profile.resolved_command()?;
+        let launch = profile.resolved_command()?;
         let title = format!("{} {}", profile.display_name(profile_name), index + 1);
         let pane = PtyPane::spawn(
             PaneId(index),
             profile_name,
             title,
-            &command,
-            &args,
+            &launch.command,
+            &launch.args,
             &cwd,
             self.event_tx.clone(),
         )?;
@@ -126,7 +131,9 @@ impl App {
             self.decay_activity();
 
             terminal.draw(|frame| {
-                self.rects = ui::draw(frame, self);
+                let draw_state = ui::draw(frame, self);
+                self.grid_area = draw_state.grid_area;
+                self.rects = draw_state.pane_rects;
             })?;
             self.sync_pane_sizes();
 
@@ -195,6 +202,13 @@ impl App {
                     };
                     return Ok(false);
                 }
+                KeyCode::Char('g') => {
+                    self.mode = Mode::Grid;
+                    self.status =
+                        "grid mode: drag dividers | h/l width | j/k height | = reset | Esc done"
+                            .into();
+                    return Ok(false);
+                }
                 KeyCode::Char('a') => {
                     self.selected = (0..self.panes.len()).collect();
                     self.status = format!("selected {} panes", self.selected.len());
@@ -207,6 +221,7 @@ impl App {
         match self.mode {
             Mode::Normal => self.handle_normal_key(key),
             Mode::Command => self.handle_command_key(key),
+            Mode::Grid => self.handle_grid_key(key),
         }
     }
 
@@ -275,6 +290,12 @@ impl App {
                     .join(" ");
                 self.status = format!("profiles: {summary}");
             }
+            KeyCode::Char('g') => {
+                self.mode = Mode::Grid;
+                self.command_filter.clear();
+                self.status =
+                    "grid mode: drag dividers | h/l width | j/k height | = reset | Esc done".into();
+            }
             KeyCode::Char(ch) => {
                 self.command_filter.push(ch);
                 self.status = format!("command filter: {}", self.command_filter);
@@ -290,7 +311,70 @@ impl App {
         Ok(false)
     }
 
+    fn handle_grid_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = Mode::Normal;
+                self.drag_divider = None;
+                self.status = "normal mode".into();
+            }
+            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                return Ok(true);
+            }
+            KeyCode::Char('=') | KeyCode::Char('0') => {
+                self.layout.reset_equal();
+                self.status = "grid reset to equal rows/columns".into();
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.layout.adjust_focused(self.focus, -1, 0);
+                self.status = "focused column narrowed".into();
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.layout.adjust_focused(self.focus, 1, 0);
+                self.status = "focused column widened".into();
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.layout.adjust_focused(self.focus, 0, 1);
+                self.status = "focused row heightened".into();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.layout.adjust_focused(self.focus, 0, -1);
+                self.status = "focused row shortened".into();
+            }
+            KeyCode::Tab => self.focus_next(),
+            KeyCode::BackTab => self.focus_previous(),
+            _ => {}
+        }
+        Ok(false)
+    }
+
     fn handle_mouse(&mut self, kind: MouseEventKind, x: u16, y: u16, modifiers: KeyModifiers) {
+        if self.mode == Mode::Grid {
+            match kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if let Some(divider) = self.layout.divider_at(self.grid_area, x, y) {
+                        self.drag_divider = Some(divider);
+                        self.layout.drag_divider(divider, self.grid_area, x, y);
+                        self.status = "dragging grid divider".into();
+                        return;
+                    }
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    if let Some(divider) = self.drag_divider {
+                        self.layout.drag_divider(divider, self.grid_area, x, y);
+                        self.status = "resized grid".into();
+                        return;
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.drag_divider = None;
+                    self.status = "grid resize committed".into();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         let Some(index) = pane_at(&self.rects, x, y) else {
             return;
         };
@@ -378,8 +462,8 @@ impl App {
         };
     }
 
-    pub fn grid(&self) -> GridSize {
-        self.grid
+    pub fn pane_rects(&self, area: Rect) -> Vec<Rect> {
+        self.layout.rects(area, self.panes.len())
     }
 
     pub fn panes(&self) -> &[PtyPane] {

@@ -13,6 +13,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Ctrl-click to toggle pane selection.
 - Shift-click to select a range.
 - `Ctrl-b` toggles selected broadcast mode.
+- `Ctrl-g` opens spreadsheet-style grid resize mode.
 - `Ctrl-a` selects every pane.
 - `Esc` opens command mode.
 - `Ctrl-q` exits.
@@ -107,11 +108,26 @@ gridbash 3x4 --profile codex --cwd C:\Users\Jason\Documents\GitHub\fluent
 | Drag left mouse | Add panes to selection |
 | Tab / Shift-Tab | Move focus |
 | Ctrl-b | Toggle selected broadcast mode |
+| Ctrl-g | Enter grid resize mode |
 | Ctrl-a | Select all panes |
 | Ctrl-q | Quit |
 | Esc | Toggle command mode |
 
 When broadcast is on, typing goes to selected panes only. If nothing is selected, input goes to the focused pane.
+
+## Grid Resize Mode
+
+Press `Ctrl-g` to enter GRID mode. Drag row or column dividers like a spreadsheet table, or use keyboard controls:
+
+| Input | Action |
+| --- | --- |
+| Drag divider | Resize adjacent rows/columns |
+| h / Left | Narrow focused column |
+| l / Right | Widen focused column |
+| k / Up | Shorten focused row |
+| j / Down | Heighten focused row |
+| = or 0 | Reset equal grid |
+| Esc | Return to normal terminal input |
 
 ## Profiles
 
