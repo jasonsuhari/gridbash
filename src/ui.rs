@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
+use vt100::Cell;
 
 use crate::app::{App, Mode};
 
@@ -146,15 +147,8 @@ fn render_screen(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen) {
         return;
     }
 
-    let contents = screen.contents();
-    let lines = contents
-        .lines()
-        .rev()
-        .take(area.height as usize)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|line| Line::from(line.to_string()))
+    let lines = (0..area.height)
+        .map(|row| render_screen_row(screen, row, area.width))
         .collect::<Vec<_>>();
 
     frame.render_widget(
@@ -165,6 +159,145 @@ fn render_screen(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen) {
         ),
         area,
     );
+}
+
+fn render_screen_row<'a>(screen: &vt100::Screen, row: u16, width: u16) -> Line<'a> {
+    let mut spans = Vec::new();
+    let mut current_style: Option<Style> = None;
+    let mut current_text = String::new();
+
+    for column in 0..width {
+        let Some(cell) = screen.cell(row, column) else {
+            push_cell_text(
+                &mut spans,
+                &mut current_style,
+                &mut current_text,
+                Style::default(),
+                " ",
+            );
+            continue;
+        };
+
+        if cell.is_wide_continuation() {
+            continue;
+        }
+
+        let text = if cell.has_contents() {
+            cell.contents()
+        } else {
+            " "
+        };
+        push_cell_text(
+            &mut spans,
+            &mut current_style,
+            &mut current_text,
+            cell_style(cell),
+            text,
+        );
+    }
+
+    flush_span(&mut spans, &mut current_style, &mut current_text);
+    Line::from(spans)
+}
+
+fn push_cell_text<'a>(
+    spans: &mut Vec<Span<'a>>,
+    current_style: &mut Option<Style>,
+    current_text: &mut String,
+    style: Style,
+    text: &str,
+) {
+    if current_style.is_some_and(|active| active == style) {
+        current_text.push_str(text);
+        return;
+    }
+
+    flush_span(spans, current_style, current_text);
+    *current_style = Some(style);
+    current_text.push_str(text);
+}
+
+fn flush_span<'a>(
+    spans: &mut Vec<Span<'a>>,
+    current_style: &mut Option<Style>,
+    current_text: &mut String,
+) {
+    if current_text.is_empty() {
+        return;
+    }
+
+    spans.push(Span::styled(
+        std::mem::take(current_text),
+        current_style.take().unwrap_or_default(),
+    ));
+}
+
+fn cell_style(cell: &Cell) -> Style {
+    let mut style = Style::default()
+        .fg(vt_color(cell.fgcolor(), Color::Rgb(230, 237, 243)))
+        .bg(vt_color(cell.bgcolor(), Color::Rgb(11, 15, 20)));
+
+    if cell.bold() {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if cell.dim() {
+        style = style.add_modifier(Modifier::DIM);
+    }
+    if cell.italic() {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if cell.underline() {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
+    if cell.inverse() {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
+
+    style
+}
+
+fn vt_color(color: vt100::Color, default: Color) -> Color {
+    match color {
+        vt100::Color::Default => default,
+        vt100::Color::Idx(index) => indexed_color(index),
+        vt100::Color::Rgb(red, green, blue) => Color::Rgb(red, green, blue),
+    }
+}
+
+fn indexed_color(index: u8) -> Color {
+    match index {
+        0 => Color::Black,
+        1 => Color::Red,
+        2 => Color::Green,
+        3 => Color::Yellow,
+        4 => Color::Blue,
+        5 => Color::Magenta,
+        6 => Color::Cyan,
+        7 => Color::Gray,
+        8 => Color::DarkGray,
+        9 => Color::LightRed,
+        10 => Color::LightGreen,
+        11 => Color::LightYellow,
+        12 => Color::LightBlue,
+        13 => Color::LightMagenta,
+        14 => Color::LightCyan,
+        15 => Color::White,
+        16..=231 => {
+            let index = index - 16;
+            let red = ansi_cube_channel(index / 36);
+            let green = ansi_cube_channel((index / 6) % 6);
+            let blue = ansi_cube_channel(index % 6);
+            Color::Rgb(red, green, blue)
+        }
+        232..=255 => {
+            let gray = 8 + (index - 232) * 10;
+            Color::Rgb(gray, gray, gray)
+        }
+    }
+}
+
+fn ansi_cube_channel(value: u8) -> u8 {
+    if value == 0 { 0 } else { 55 + value * 40 }
 }
 
 fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen) {

@@ -26,6 +26,8 @@ pub struct PtyPane {
     parser: Parser,
     title: String,
     profile: String,
+    rows: u16,
+    cols: u16,
     pub active: bool,
     pub exited: bool,
     bytes_seen: u64,
@@ -84,6 +86,8 @@ impl PtyPane {
             parser: Parser::new(24, 80, 10_000),
             title,
             profile: profile_name.to_string(),
+            rows: 24,
+            cols: 80,
             active: false,
             exited: false,
             bytes_seen: 0,
@@ -119,6 +123,10 @@ impl PtyPane {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+        if self.rows == rows && self.cols == cols {
+            return Ok(());
+        }
+
         self.parser.screen_mut().set_size(rows, cols);
         self.master
             .resize(PtySize {
@@ -127,7 +135,10 @@ impl PtyPane {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .context("failed to resize PTY")
+            .context("failed to resize PTY")?;
+        self.rows = rows;
+        self.cols = cols;
+        Ok(())
     }
 
     pub fn poll_exit(&mut self) {
@@ -142,6 +153,21 @@ impl PtyPane {
 
     pub fn bytes_seen(&self) -> u64 {
         self.bytes_seen
+    }
+
+    pub fn terminate(&mut self) {
+        if self.exited {
+            return;
+        }
+
+        let _ = self.child.kill();
+        self.exited = true;
+    }
+}
+
+impl Drop for PtyPane {
+    fn drop(&mut self) {
+        self.terminate();
     }
 }
 
@@ -171,4 +197,75 @@ fn spawn_reader(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env,
+        path::Path,
+        thread,
+        time::{Duration, Instant},
+    };
+
+    use super::*;
+
+    #[test]
+    #[ignore = "Windows ConPTY smoke test requires an interactive console; run manually when debugging PTY I/O"]
+    fn spawned_pty_receives_output_and_input() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let cwd = env::current_dir().expect("current dir");
+        let mut pane = PtyPane::spawn(
+            PaneId(0),
+            "cmd",
+            "cmd".to_string(),
+            Path::new("cmd.exe"),
+            &[
+                "/d".to_string(),
+                "/q".to_string(),
+                "/v:on".to_string(),
+                "/c".to_string(),
+                "set /p GRIDBASH_IN= & echo GRIDBASH_READY:!GRIDBASH_IN!".to_string(),
+            ],
+            &cwd,
+            event_tx,
+        )
+        .expect("spawn cmd pty");
+
+        pane.write(b"typed-input\r").expect("write input to pty");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut raw_output = Vec::new();
+        while Instant::now() < deadline {
+            while let Ok(event) = event_rx.try_recv() {
+                match event {
+                    PtyEvent::Output { bytes, .. } => {
+                        pane.process_output(&bytes);
+                        raw_output.extend(bytes);
+                    }
+                    PtyEvent::Exited { .. } => pane.exited = true,
+                }
+            }
+
+            let raw_text = String::from_utf8_lossy(&raw_output);
+            if raw_text.contains("GRIDBASH_READY:typed-input")
+                && pane
+                    .screen()
+                    .contents()
+                    .contains("GRIDBASH_READY:typed-input")
+            {
+                pane.terminate();
+                return;
+            }
+
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        pane.terminate();
+        panic!(
+            "PTY did not round-trip output/input; raw output was: {:?}; screen was: {:?}",
+            String::from_utf8_lossy(&raw_output),
+            pane.screen().contents()
+        );
+    }
 }

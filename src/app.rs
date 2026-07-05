@@ -84,6 +84,7 @@ impl App {
         self.spawn_initial_panes()?;
 
         let mut terminal = setup_terminal(!self.cli.no_mouse)?;
+        self.sync_initial_pane_sizes(&terminal)?;
         let result = self.run_loop(&mut terminal);
         teardown_terminal(&mut terminal, !self.cli.no_mouse)?;
         result
@@ -235,23 +236,11 @@ impl App {
             }
             KeyCode::Tab => self.focus_next(),
             KeyCode::BackTab => self.focus_previous(),
-            KeyCode::Enter => self.route_input(b"\r")?,
-            KeyCode::Backspace => self.route_input(&[0x7f])?,
-            KeyCode::Char(ch) => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    if let Some(byte) = control_byte(ch) {
-                        self.route_input(&[byte])?;
-                    }
-                } else {
-                    let mut buf = [0; 4];
-                    self.route_input(ch.encode_utf8(&mut buf).as_bytes())?;
+            _ => {
+                if let Some(bytes) = terminal_key_bytes(key) {
+                    self.route_input(&bytes)?;
                 }
             }
-            KeyCode::Left => self.route_input(b"\x1b[D")?,
-            KeyCode::Right => self.route_input(b"\x1b[C")?,
-            KeyCode::Up => self.route_input(b"\x1b[A")?,
-            KeyCode::Down => self.route_input(b"\x1b[B")?,
-            _ => {}
         }
         Ok(false)
     }
@@ -503,6 +492,14 @@ impl App {
             }
         }
     }
+
+    fn sync_initial_pane_sizes(&mut self, terminal: &Tui) -> Result<()> {
+        let size = terminal.size().context("failed to read terminal size")?;
+        self.grid_area = Rect::new(0, 0, size.width, size.height.saturating_sub(1));
+        self.rects = self.pane_rects(self.grid_area);
+        self.sync_pane_sizes();
+        Ok(())
+    }
 }
 
 fn resolve_grid(cli: &Cli) -> Result<GridSize> {
@@ -543,6 +540,57 @@ fn control_byte(ch: char) -> Option<u8> {
             '_' => Some(0x1f),
             _ => None,
         }
+    }
+}
+
+fn terminal_key_bytes(key: KeyEvent) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        bytes.push(0x1b);
+    }
+
+    match key.code {
+        KeyCode::Enter => bytes.push(b'\r'),
+        KeyCode::Backspace => bytes.push(0x7f),
+        KeyCode::Delete => bytes.extend_from_slice(b"\x1b[3~"),
+        KeyCode::Insert => bytes.extend_from_slice(b"\x1b[2~"),
+        KeyCode::Home => bytes.extend_from_slice(b"\x1b[H"),
+        KeyCode::End => bytes.extend_from_slice(b"\x1b[F"),
+        KeyCode::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
+        KeyCode::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
+        KeyCode::Left => bytes.extend_from_slice(b"\x1b[D"),
+        KeyCode::Right => bytes.extend_from_slice(b"\x1b[C"),
+        KeyCode::Up => bytes.extend_from_slice(b"\x1b[A"),
+        KeyCode::Down => bytes.extend_from_slice(b"\x1b[B"),
+        KeyCode::F(number) => bytes.extend_from_slice(function_key_sequence(number)?),
+        KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            bytes.push(control_byte(ch)?);
+        }
+        KeyCode::Char(ch) => {
+            let mut buffer = [0; 4];
+            bytes.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
+        }
+        _ => return None,
+    }
+
+    Some(bytes)
+}
+
+fn function_key_sequence(number: u8) -> Option<&'static [u8]> {
+    match number {
+        1 => Some(b"\x1bOP"),
+        2 => Some(b"\x1bOQ"),
+        3 => Some(b"\x1bOR"),
+        4 => Some(b"\x1bOS"),
+        5 => Some(b"\x1b[15~"),
+        6 => Some(b"\x1b[17~"),
+        7 => Some(b"\x1b[18~"),
+        8 => Some(b"\x1b[19~"),
+        9 => Some(b"\x1b[20~"),
+        10 => Some(b"\x1b[21~"),
+        11 => Some(b"\x1b[23~"),
+        12 => Some(b"\x1b[24~"),
+        _ => None,
     }
 }
 
