@@ -1,10 +1,13 @@
 mod app;
 mod cli;
+mod composer;
 mod config;
 mod layout;
 mod profiles;
 mod pty;
+mod setup;
 mod ui;
+mod vibe;
 
 use anyhow::Result;
 use clap::Parser;

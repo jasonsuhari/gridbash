@@ -58,10 +58,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             ""
         };
 
+        let folder = app.pane_folder(index).unwrap_or("-");
         let title = format!(
-            " {} | {} | {} | {}{} ",
+            " {} | {} | {} | {} | {}{} ",
             index + 1,
             pane.title(),
+            folder,
             pane.profile(),
             format_bytes(pane.bytes_seen()),
             badge

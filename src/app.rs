@@ -2,7 +2,6 @@ use std::{
     collections::BTreeSet,
     env,
     io::{self, Stdout},
-    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -20,10 +19,12 @@ use tokio::sync::mpsc;
 
 use crate::{
     cli::{Cli, GridMode},
+    composer::Composer,
     config::Config,
     layout::{GridLayout, GridSize, PaneId},
     profiles::{available_profiles, find_profile},
     pty::{PtyEvent, PtyPane},
+    setup::{LaunchPlan, PaneLaunchSpec},
     ui,
 };
 
@@ -32,7 +33,7 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 pub struct App {
     cli: Cli,
     config: Config,
-    cwd: PathBuf,
+    launch_plan: Option<LaunchPlan>,
     profile_names: Vec<String>,
     target_profile_index: usize,
     layout: GridLayout,
@@ -50,14 +51,20 @@ pub struct App {
 
 impl App {
     pub fn new(cli: Cli, config: Config) -> Result<Self> {
-        let grid = resolve_grid(&cli)?;
+        let launch_plan = resolve_direct_launch_plan(&cli, &config)?;
+        let grid = launch_plan
+            .as_ref()
+            .map(|plan| plan.grid)
+            .unwrap_or(GridSize {
+                rows: 2,
+                columns: 3,
+            });
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let profile_name = resolve_profile_name(&cli, &config);
-        find_profile(&config, &profile_name)?;
-        let cwd = cli
-            .cwd
-            .clone()
-            .unwrap_or(env::current_dir().context("failed to resolve current directory")?);
+        let profile_name = launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.first())
+            .map(|pane| pane.profile_name.clone())
+            .unwrap_or_else(|| resolve_profile_name(&cli, &config));
         let mut profile_names = available_profile_names(&config);
         if !profile_names.iter().any(|name| name == &profile_name) {
             profile_names.push(profile_name.clone());
@@ -70,7 +77,7 @@ impl App {
         Ok(Self {
             cli,
             config,
-            cwd,
+            launch_plan,
             profile_names,
             target_profile_index,
             layout: GridLayout::new(grid),
@@ -89,43 +96,64 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        self.spawn_initial_panes()?;
-
         let mut terminal = setup_terminal()?;
-        self.sync_initial_pane_sizes(&terminal)?;
-        let result = self.run_loop(&mut terminal);
+        let result = self.run_in_terminal(&mut terminal);
         teardown_terminal(&mut terminal)?;
         result
     }
 
-    fn spawn_initial_panes(&mut self) -> Result<()> {
-        let pane_count = self
-            .cli
-            .count
-            .unwrap_or_else(|| self.layout.size().count())
-            .clamp(1, 100);
-        let cwd = self.cwd.clone();
-        let profile_name = self.target_profile_name().to_string();
+    fn run_in_terminal(&mut self, terminal: &mut Tui) -> Result<()> {
+        if self.launch_plan.is_none() {
+            let current_dir = env::current_dir().context("failed to resolve current directory")?;
+            let mut composer = Composer::new(&self.config, current_dir);
+            let Some(plan) =
+                composer.run(terminal, &mut self.config, self.cli.config.as_deref())?
+            else {
+                return Ok(());
+            };
+            self.set_launch_plan(plan);
+        }
 
-        for index in 0..pane_count {
-            self.spawn_pane(index, &profile_name, cwd.clone())?;
+        self.spawn_initial_panes()?;
+        self.sync_initial_pane_sizes(terminal)?;
+        self.run_loop(terminal)
+    }
+
+    fn set_launch_plan(&mut self, plan: LaunchPlan) {
+        self.layout = GridLayout::new(plan.grid);
+        self.launch_plan = Some(plan);
+    }
+
+    fn spawn_initial_panes(&mut self) -> Result<()> {
+        let plan = self
+            .launch_plan
+            .clone()
+            .ok_or_else(|| anyhow!("no launch plan selected"))?;
+        self.layout = GridLayout::new(plan.grid);
+        self.panes.clear();
+
+        for (index, spec) in plan.panes.iter().enumerate() {
+            self.spawn_pane_spec(index, spec, 0)?;
         }
 
         Ok(())
     }
 
-    fn spawn_pane(&mut self, index: usize, profile_name: &str, cwd: PathBuf) -> Result<()> {
-        let profile = find_profile(&self.config, profile_name)?;
-        let launch = profile.resolved_command()?;
-        let title = format!("{} {}", profile.display_name(profile_name), index + 1);
+    fn spawn_pane_spec(
+        &mut self,
+        index: usize,
+        spec: &PaneLaunchSpec,
+        generation: u64,
+    ) -> Result<()> {
+        let launch = spec.resolved_command()?;
         let pane = PtyPane::spawn(
             PaneId(index),
-            0,
-            profile_name,
-            title,
+            generation,
+            &spec.profile_name,
+            spec.title.clone(),
             &launch.command,
             &launch.args,
-            &cwd,
+            &spec.cwd,
             self.event_tx.clone(),
         )?;
         self.panes.push(pane);
@@ -417,19 +445,34 @@ impl App {
 
     fn replace_pane(&mut self, index: usize, profile_name: &str) -> Result<()> {
         let profile = find_profile(&self.config, profile_name)?;
-        let launch = profile.resolved_command()?;
-        let title = format!("{} {}", profile.display_name(profile_name), index + 1);
+        let display_name = profile.display_name(profile_name);
+        let generation = self
+            .panes
+            .get(index)
+            .map(|pane| pane.generation().saturating_add(1))
+            .unwrap_or(0);
+        let current = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .cloned()
+            .ok_or_else(|| anyhow!("invalid pane index {index}"))?;
+        let spec = PaneLaunchSpec {
+            profile_name: profile_name.to_string(),
+            title: format!("{display_name} @ {}", current.folder_name),
+            command: profile,
+            cwd: current.cwd,
+            folder_name: current.folder_name,
+        };
+        let launch = spec.resolved_command()?;
         let mut pane = PtyPane::spawn(
             PaneId(index),
-            self.panes
-                .get(index)
-                .map(|pane| pane.generation().saturating_add(1))
-                .unwrap_or(0),
-            profile_name,
-            title,
+            generation,
+            &spec.profile_name,
+            spec.title.clone(),
             &launch.command,
             &launch.args,
-            &self.cwd,
+            &spec.cwd,
             self.event_tx.clone(),
         )?;
 
@@ -445,6 +488,11 @@ impl App {
                 .ok_or_else(|| anyhow!("invalid pane index {index}"))?,
             pane,
         );
+        if let Some(plan) = &mut self.launch_plan {
+            if let Some(target) = plan.panes.get_mut(index) {
+                *target = spec;
+            }
+        }
         Ok(())
     }
 
@@ -510,6 +558,13 @@ impl App {
         self.target_profile_name()
     }
 
+    pub fn pane_folder(&self, index: usize) -> Option<&str> {
+        self.launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .map(|pane| pane.folder_name.as_str())
+    }
+
     pub fn sync_pane_sizes(&mut self) {
         for (index, rect) in self.rects.iter().enumerate() {
             let Some(pane) = self.panes.get_mut(index) else {
@@ -550,6 +605,39 @@ fn resolve_grid(cli: &Cli) -> Result<GridSize> {
         rows: 2,
         columns: 3,
     })
+}
+
+fn resolve_direct_launch_plan(cli: &Cli, config: &Config) -> Result<Option<LaunchPlan>> {
+    if !uses_direct_launch(cli) {
+        return Ok(None);
+    }
+
+    let grid = resolve_grid(cli)?;
+    let profile_name = resolve_profile_name(cli, config);
+    let profile = find_profile(config, &profile_name)?;
+    let display_name = profile.display_name(&profile_name);
+    let cwd = cli
+        .cwd
+        .clone()
+        .unwrap_or(env::current_dir().context("failed to resolve current directory")?);
+    let pane_count = cli.count.unwrap_or_else(|| grid.count()).clamp(1, 100);
+
+    Ok(Some(LaunchPlan::legacy(
+        profile_name,
+        display_name,
+        profile,
+        cwd,
+        pane_count,
+        grid,
+    )))
+}
+
+fn uses_direct_launch(cli: &Cli) -> bool {
+    cli.grid.is_some()
+        || cli.count.is_some()
+        || cli.profile.is_some()
+        || cli.cwd.is_some()
+        || cli.layout == GridMode::Auto
 }
 
 fn resolve_profile_name(cli: &Cli, config: &Config) -> String {
