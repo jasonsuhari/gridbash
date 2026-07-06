@@ -77,11 +77,6 @@ impl GridLayout {
         )
     }
 
-    pub fn reset_equal(&mut self) {
-        self.row_weights.fill(1000);
-        self.column_weights.fill(1000);
-    }
-
     #[allow(dead_code)]
     pub fn divider_at(&self, area: Rect, x: u16, y: u16) -> Option<Divider> {
         let column_widths = weighted_lengths(area.width, &self.column_weights);
@@ -132,18 +127,6 @@ impl GridLayout {
                 y.saturating_sub(area.y),
             ),
         }
-    }
-
-    pub fn adjust_focused(
-        &mut self,
-        pane_index: usize,
-        horizontal_delta: i16,
-        vertical_delta: i16,
-    ) {
-        let column = pane_index % self.size.columns;
-        let row = pane_index / self.size.columns;
-        adjust_weight(&mut self.column_weights, column, horizontal_delta);
-        adjust_weight(&mut self.row_weights, row, vertical_delta);
     }
 }
 
@@ -238,14 +221,6 @@ fn drag_pair(weights: &mut [u16], index: usize, total_pixels: u16, target_pixels
     let left_weight = ((local_target as u32 * pair_weight as u32) / pair_pixels as u32) as u16;
     weights[index] = left_weight.max(100);
     weights[index + 1] = pair_weight.saturating_sub(weights[index]).max(100);
-}
-
-fn adjust_weight(weights: &mut [u16], index: usize, delta: i16) {
-    let Some(weight) = weights.get_mut(index) else {
-        return;
-    };
-
-    *weight = (*weight as i32 + delta as i32 * 50).clamp(100, 5000) as u16;
 }
 
 #[allow(dead_code)]

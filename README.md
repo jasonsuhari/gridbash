@@ -12,11 +12,11 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Up to 100 panes in one terminal process.
 - Configurable default terminal profile: Git Bash, PowerShell, cmd, agents, or custom.
 - Native host-terminal text selection with no mouse-capture mode.
-- Normal terminal keys pass through, including `Esc`, `Tab`, `Ctrl-a`, and `Ctrl-b`.
-- Modeless Alt shortcuts for pane focus, selection, broadcast, resize, and quit.
-- In-app terminal switching for focused or selected panes.
+- Normal terminal keys pass through to focused or broadcast panes.
+- Modeless Alt shortcuts for pane focus, selection, broadcast, settings, and quit.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
 - Built-in launch profiles for common CLI coding agents.
+- Guided orchestration composer for choosing folders, `vibe` auth profiles, and named setups.
 
 ## Install With npm
 
@@ -29,7 +29,7 @@ npm install -g .
 Then run it from anywhere:
 
 ```powershell
-gridbash 2x3 --profile codex
+gridbash
 ```
 
 Build a publishable npm tarball:
@@ -64,11 +64,13 @@ target\release\gridbash.exe
 
 ## Use
 
-Open the default 2x3 grid:
+Open the guided composer:
 
 ```powershell
 gridbash
 ```
+
+The composer starts with the directory you launched `gridbash` from. It lets you choose folders, select logged-in `vibe` profiles, preview the pane-to-folder assignment, and optionally save the setup by name. GridBash uses `vibe run <profile> --` under the hood for isolated Claude/Codex auth.
 
 Set the default terminal profile:
 
@@ -100,6 +102,21 @@ Start in a repo:
 gridbash 3x4 --profile codex --cwd C:\Users\Jason\Documents\GitHub\fluent
 ```
 
+Passing grid, count, profile, or cwd arguments bypasses the composer and uses the direct launch path.
+
+## Composer Controls
+
+| Input | Action |
+| --- | --- |
+| Up / Down | Move through choices |
+| Enter | Continue, preview, or launch |
+| Space | Toggle an agent profile |
+| a | Add a folder on the folder screen; select all ready agents on the agent screen |
+| d | Remove a selected folder |
+| s | Save the previewed setup by name and launch |
+| Esc | Go back |
+| q | Quit from the composer |
+
 ## Controls
 
 GridBash does not capture the mouse, so normal drag selection and copy behavior stays owned by your host terminal. App controls use Alt shortcuts and do not require switching modes.
@@ -107,35 +124,17 @@ GridBash does not capture the mouse, so normal drag selection and copy behavior 
 | Input | Action |
 | --- | --- |
 | Drag mouse | Select/copy terminal text in the host terminal |
-| Alt+1 through Alt+9 / Alt+0 | Focus pane 1 through 10 |
 | Alt+Left / Alt+Right | Focus previous / next pane |
 | Alt+Up / Alt+Down | Focus pane above / below |
-| Alt+s or Alt+Space | Toggle focused pane selection |
-| Alt+a | Select all panes |
-| Alt+c | Clear selection |
+| Alt+s | Toggle focused pane selection |
+| Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+b | Toggle selected broadcast mode |
-| Alt+p | Show detected profile summary |
-| Alt+t | Cycle target terminal profile forward |
-| Alt+Shift+t | Cycle target terminal profile backward |
-| Alt+Enter | Restart focused/selected panes with target profile |
-| Alt+d | Save target profile as the default terminal |
+| Alt+o | Open sample settings |
 | Alt+q | Quit |
 
 When broadcast is on, typing goes to selected panes only. If nothing is selected, input goes to the focused pane.
 
-Changing a pane's terminal restarts that pane, so shell state in that pane is discarded.
-
-## Grid Resizing
-
-Grid resizing is also modeless:
-
-| Input | Action |
-| --- | --- |
-| Alt+Shift+Left | Narrow focused column |
-| Alt+Shift+Right | Widen focused column |
-| Alt+Shift+Up | Shorten focused row |
-| Alt+Shift+Down | Heighten focused row |
-| Alt+r | Reset equal grid |
+The settings screen is currently a sample UI. Its switches, steppers, and choices can be changed, but they do not affect runtime behavior yet.
 
 ## Profiles
 
@@ -163,6 +162,13 @@ profile = "powershell"
 command = "codex"
 args = ["--model", "gpt-5.5"]
 title = "Codex Review"
+
+[setups.gridbash-swarm]
+agents = ["claude-1", "claude-2", "codex-2"]
+
+[[setups.gridbash-swarm.folders]]
+name = "gridbash"
+path = "C:\\Users\\Jason\\Documents\\GitHub\\gridbash"
 ```
 
 Then run:
