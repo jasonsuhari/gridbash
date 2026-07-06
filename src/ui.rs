@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
+use std::path::Path;
 use vt100::Cell;
 
 use crate::app::App;
@@ -58,14 +59,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             ""
         };
 
-        let title = format!(
-            " {} | {} | {} | {}{} ",
-            index + 1,
-            pane.title(),
-            pane.profile(),
-            format_bytes(pane.bytes_seen()),
-            badge
-        );
+        let title = format!(" {} | {}{} ", index + 1, folder_label(pane.cwd()), badge);
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -132,14 +126,18 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_000_000 {
-        format!("{:.1}MB", bytes as f64 / 1_000_000.0)
-    } else if bytes >= 1_000 {
-        format!("{:.1}KB", bytes as f64 / 1_000.0)
-    } else {
-        format!("{bytes}B")
+fn folder_label(cwd: &Path) -> String {
+    let mut label = cwd
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| cwd.display().to_string());
+
+    if !matches!(label.chars().last(), Some('/') | Some('\\')) {
+        label.push('/');
     }
+
+    label
 }
 
 fn render_screen(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen) {

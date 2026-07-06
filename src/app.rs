@@ -117,12 +117,9 @@ impl App {
     fn spawn_pane(&mut self, index: usize, profile_name: &str, cwd: PathBuf) -> Result<()> {
         let profile = find_profile(&self.config, profile_name)?;
         let launch = profile.resolved_command()?;
-        let title = format!("{} {}", profile.display_name(profile_name), index + 1);
         let pane = PtyPane::spawn(
             PaneId(index),
             0,
-            profile_name,
-            title,
             &launch.command,
             &launch.args,
             &cwd,
@@ -418,15 +415,12 @@ impl App {
     fn replace_pane(&mut self, index: usize, profile_name: &str) -> Result<()> {
         let profile = find_profile(&self.config, profile_name)?;
         let launch = profile.resolved_command()?;
-        let title = format!("{} {}", profile.display_name(profile_name), index + 1);
         let mut pane = PtyPane::spawn(
             PaneId(index),
             self.panes
                 .get(index)
                 .map(|pane| pane.generation().saturating_add(1))
                 .unwrap_or(0),
-            profile_name,
-            title,
             &launch.command,
             &launch.args,
             &self.cwd,

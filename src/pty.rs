@@ -1,6 +1,6 @@
 use std::{
     io::{Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
 };
@@ -32,22 +32,18 @@ pub struct PtyPane {
     child: Box<dyn Child + Send>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     parser: Parser,
-    title: String,
-    profile: String,
+    cwd: PathBuf,
     rows: u16,
     cols: u16,
     response_scan_tail: Vec<u8>,
     pub active: bool,
     pub exited: bool,
-    bytes_seen: u64,
 }
 
 impl PtyPane {
     pub fn spawn(
         id: PaneId,
         generation: u64,
-        profile_name: &str,
-        title: String,
         command: &Path,
         args: &[String],
         cwd: &Path,
@@ -95,14 +91,12 @@ impl PtyPane {
             child,
             writer,
             parser: Parser::new(24, 80, 10_000),
-            title,
-            profile: profile_name.to_string(),
+            cwd: cwd.to_path_buf(),
             rows: 24,
             cols: 80,
             response_scan_tail: Vec::new(),
             active: false,
             exited: false,
-            bytes_seen: 0,
         })
     }
 
@@ -114,12 +108,8 @@ impl PtyPane {
         self.generation
     }
 
-    pub fn title(&self) -> &str {
-        &self.title
-    }
-
-    pub fn profile(&self) -> &str {
-        &self.profile
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
     }
 
     pub fn screen(&self) -> &Screen {
@@ -128,7 +118,6 @@ impl PtyPane {
 
     pub fn process_output(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
-        self.bytes_seen = self.bytes_seen.saturating_add(bytes.len() as u64);
         self.active = true;
         self.answer_terminal_queries(bytes);
     }
@@ -166,10 +155,6 @@ impl PtyPane {
         if matches!(self.child.try_wait(), Ok(Some(_))) {
             self.exited = true;
         }
-    }
-
-    pub fn bytes_seen(&self) -> u64 {
-        self.bytes_seen
     }
 
     fn answer_terminal_queries(&mut self, bytes: &[u8]) {
@@ -289,8 +274,6 @@ mod tests {
         let mut pane = PtyPane::spawn(
             PaneId(0),
             0,
-            "cmd",
-            "cmd".to_string(),
             Path::new("cmd.exe"),
             &[
                 "/d".to_string(),

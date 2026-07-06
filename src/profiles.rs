@@ -30,10 +30,6 @@ impl Profile {
             .ok_or_else(|| anyhow!("profile command not found on PATH: {}", self.command))?;
         Ok(wrap_for_windows_script(exe, &self.args))
     }
-
-    pub fn display_name(&self, key: &str) -> String {
-        self.title.clone().unwrap_or_else(|| key.to_string())
-    }
 }
 
 fn wrap_for_windows_script(command: PathBuf, args: &[String]) -> LaunchCommand {
