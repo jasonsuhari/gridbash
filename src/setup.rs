@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -31,10 +34,10 @@ pub struct LaunchPlan {
 #[derive(Debug, Clone)]
 pub struct PaneLaunchSpec {
     pub profile_name: String,
-    pub title: String,
     pub command: Profile,
     pub cwd: PathBuf,
     pub folder_name: String,
+    pub worktree_name: Option<String>,
 }
 
 impl SavedSetup {
@@ -83,20 +86,20 @@ impl SetupFolder {
 impl LaunchPlan {
     pub fn legacy(
         profile_name: String,
-        display_name: String,
         command: Profile,
         cwd: PathBuf,
         count: usize,
         grid: GridSize,
     ) -> Self {
         let folder_name = folder_display_name(&cwd);
+        let worktree_name = git_worktree_name(&cwd);
         let panes = (0..count)
-            .map(|index| PaneLaunchSpec {
+            .map(|_| PaneLaunchSpec {
                 profile_name: profile_name.clone(),
-                title: format!("{display_name} {}", index + 1),
                 command: command.clone(),
                 cwd: cwd.clone(),
                 folder_name: folder_name.clone(),
+                worktree_name: worktree_name.clone(),
             })
             .collect();
 
@@ -116,6 +119,26 @@ pub fn folder_display_name(path: &Path) -> String {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| path.display().to_string())
+}
+
+pub fn git_worktree_name(path: &Path) -> Option<String> {
+    run_git(path, &["branch", "--show-current"])
+        .or_else(|| run_git(path, &["rev-parse", "--short", "HEAD"]).map(|hash| format!("@{hash}")))
+}
+
+fn run_git(path: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
 }
 
 pub fn sanitize_setup_name(value: &str) -> Option<String> {
@@ -143,7 +166,6 @@ pub fn sanitize_setup_name(value: &str) -> Option<String> {
 fn vibe_pane_spec(agent: &str, folder: &SetupFolder) -> PaneLaunchSpec {
     PaneLaunchSpec {
         profile_name: agent.to_string(),
-        title: agent.to_string(),
         command: Profile {
             command: "vibe".into(),
             args: vec!["run".into(), agent.into(), "--".into()],
@@ -151,6 +173,7 @@ fn vibe_pane_spec(agent: &str, folder: &SetupFolder) -> PaneLaunchSpec {
         },
         cwd: folder.path.clone(),
         folder_name: folder.name.clone(),
+        worktree_name: git_worktree_name(&folder.path),
     }
 }
 

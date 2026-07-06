@@ -287,8 +287,6 @@ impl App {
         let pane = PtyPane::spawn(
             PaneId(index),
             generation,
-            &spec.profile_name,
-            spec.title.clone(),
             &launch.command,
             &launch.args,
             &spec.cwd,
@@ -575,6 +573,13 @@ impl App {
             .map(|pane| pane.folder_name.as_str())
     }
 
+    pub fn pane_worktree(&self, index: usize) -> Option<&str> {
+        self.launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .and_then(|pane| pane.worktree_name.as_deref())
+    }
+
     pub fn sync_pane_sizes(&mut self) {
         for (index, rect) in self.rects.iter().enumerate() {
             let Some(pane) = self.panes.get_mut(index) else {
@@ -625,7 +630,6 @@ fn resolve_direct_launch_plan(cli: &Cli, config: &Config) -> Result<Option<Launc
     let grid = resolve_grid(cli)?;
     let profile_name = resolve_profile_name(cli, config);
     let profile = find_profile(config, &profile_name)?;
-    let display_name = profile.display_name(&profile_name);
     let cwd = cli
         .cwd
         .clone()
@@ -635,7 +639,6 @@ fn resolve_direct_launch_plan(cli: &Cli, config: &Config) -> Result<Option<Launc
 
     Ok(Some(LaunchPlan::legacy(
         profile_name,
-        display_name,
         profile,
         cwd,
         pane_count,
