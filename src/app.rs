@@ -224,8 +224,9 @@ impl App {
             rects: Vec::new(),
             broadcast: false,
             settings: SettingsState::default(),
-            status: "Alt+arrows move | Alt+s select | Alt+a all | Alt+b broadcast | Alt+o settings"
-                .into(),
+            status:
+                "Alt+arrows move | Alt+s select | Alt+a all/none | Alt+b broadcast | Alt+o settings"
+                    .into(),
             event_tx,
             event_rx,
             last_activity_decay: Instant::now(),
@@ -431,13 +432,17 @@ impl App {
                 };
                 Ok(Some(false))
             }
-            's' | ' ' => {
+            's' => {
                 toggle_selection(&mut self.selected, self.focus);
                 self.status = format!("selected {} panes", self.selected.len());
                 Ok(Some(false))
             }
             'a' => {
-                self.selected = (0..self.panes.len()).collect();
+                if self.selected.len() == self.panes.len() {
+                    self.selected.clear();
+                } else {
+                    self.selected = (0..self.panes.len()).collect();
+                }
                 self.status = format!("selected {} panes", self.selected.len());
                 Ok(Some(false))
             }

@@ -126,8 +126,8 @@ GridBash does not capture the mouse, so normal drag selection and copy behavior 
 | Drag mouse | Select/copy terminal text in the host terminal |
 | Alt+Left / Alt+Right | Focus previous / next pane |
 | Alt+Up / Alt+Down | Focus pane above / below |
-| Alt+s or Alt+Space | Toggle focused pane selection |
-| Alt+a | Select all panes |
+| Alt+s | Toggle focused pane selection |
+| Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+b | Toggle selected broadcast mode |
 | Alt+o | Open sample settings |
 | Alt+q | Quit |
