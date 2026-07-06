@@ -1,3 +1,7 @@
+[defaults]
+profile = "git-bash"
+mouse_mode = "select"
+
 [profiles.codex-fast]
 command = "codex"
 args = ["--model", "gpt-5.4-mini"]

@@ -9,11 +9,25 @@ mod ui;
 use anyhow::Result;
 use clap::Parser;
 
-use crate::{app::App, cli::Cli, config::Config, profiles::available_profiles};
+use crate::{
+    app::App,
+    cli::Cli,
+    config::Config,
+    profiles::{available_profiles, find_profile},
+};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let config = Config::load(cli.config.as_deref())?;
+    let mut config = Config::load(cli.config.as_deref())?;
+
+    if let Some(profile) = cli.set_default_profile.as_deref() {
+        find_profile(&config, profile)?;
+        config.set_default_profile(profile.to_string());
+        let path = config.save(cli.config.as_deref())?;
+        println!("default profile\t{profile}");
+        println!("config\t{}", path.display());
+        return Ok(());
+    }
 
     if cli.list_profiles {
         for (name, available) in available_profiles(&config) {

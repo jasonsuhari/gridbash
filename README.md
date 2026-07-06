@@ -10,8 +10,11 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 
 - Real PTY-backed panes through Windows ConPTY via `portable-pty`.
 - Up to 100 panes in one terminal process.
-- Ctrl-click to toggle pane selection.
-- Shift-click to select a range.
+- Configurable default terminal profile: Git Bash, PowerShell, cmd, agents, or custom.
+- Native host-terminal text selection by default.
+- `Ctrl-m` toggles pane mouse controls.
+- Ctrl-click toggles pane selection when pane mouse controls are enabled.
+- Shift-click selects a range when pane mouse controls are enabled.
 - `Ctrl-b` toggles selected broadcast mode.
 - `Ctrl-g` opens spreadsheet-style grid resize mode.
 - `Ctrl-a` selects every pane.
@@ -67,10 +70,16 @@ target\release\gridbash.exe
 
 ## Use
 
-Open the default 2x3 Git Bash grid:
+Open the default 2x3 grid:
 
 ```powershell
 gridbash
+```
+
+Set the default terminal profile:
+
+```powershell
+gridbash --set-default powershell
 ```
 
 Open a specific grid:
@@ -99,13 +108,17 @@ gridbash 3x4 --profile codex --cwd C:\Users\Jason\Documents\GitHub\fluent
 
 ## Controls
 
+By default, GridBash leaves mouse capture off so your host terminal can select and copy text normally. Press `Ctrl-m` to toggle pane mouse controls when you want click focus, pane selection, or grid divider dragging.
+
 | Input | Action |
 | --- | --- |
-| Click pane | Focus pane |
-| Ctrl-click pane | Toggle pane selection |
-| Shift-click pane | Select range from focused pane |
-| Right-click pane | Toggle pane selection |
-| Drag left mouse | Add panes to selection |
+| Drag mouse | Select/copy terminal text in the host terminal |
+| Ctrl-m | Toggle mouse text-selection / pane-control mode |
+| Click pane | Focus pane in pane-control mode |
+| Ctrl-click pane | Toggle pane selection in pane-control mode |
+| Shift-click pane | Select range from focused pane in pane-control mode |
+| Right-click pane | Toggle pane selection in pane-control mode |
+| Drag left mouse | Add panes to selection in pane-control mode |
 | Tab / Shift-Tab | Move focus |
 | Ctrl-b | Toggle selected broadcast mode |
 | Ctrl-g | Enter grid resize mode |
@@ -148,6 +161,10 @@ Optional config file:
 Example:
 
 ```toml
+[defaults]
+profile = "powershell"
+mouse_mode = "select"
+
 [profiles.review]
 command = "codex"
 args = ["--model", "gpt-5.5"]
@@ -158,6 +175,19 @@ Then run:
 
 ```powershell
 gridbash 2x4 --profile review
+```
+
+Default profile resolution order:
+
+```text
+--profile > GRIDBASH_PROFILE > [defaults].profile > git-bash
+```
+
+Mouse mode values:
+
+```text
+select   host terminal owns mouse selection/copying
+control  GridBash captures mouse for pane focus, pane selection, and grid resizing
 ```
 
 ## Design Goals

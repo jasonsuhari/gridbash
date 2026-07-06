@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     cli::{Cli, GridMode},
-    config::Config,
+    config::{Config, MouseMode},
     layout::{Divider, GridLayout, GridSize, PaneId, pane_at},
     profiles::{available_profiles, find_profile},
     pty::{PtyEvent, PtyPane},
@@ -39,6 +39,7 @@ pub enum Mode {
 pub struct App {
     cli: Cli,
     config: Config,
+    profile_name: String,
     layout: GridLayout,
     grid_area: Rect,
     panes: Vec<PtyPane>,
@@ -48,6 +49,8 @@ pub struct App {
     drag_divider: Option<Divider>,
     mode: Mode,
     broadcast: bool,
+    mouse_control: bool,
+    mouse_control_allowed: bool,
     command_filter: String,
     status: String,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
@@ -59,10 +62,21 @@ impl App {
     pub fn new(cli: Cli, config: Config) -> Result<Self> {
         let grid = resolve_grid(&cli)?;
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let profile_name = resolve_profile_name(&cli, &config);
+        find_profile(&config, &profile_name)?;
+        let mouse_control_allowed = !cli.no_mouse;
+        let mouse_control =
+            mouse_control_allowed && resolve_mouse_mode(&cli, &config) == MouseMode::Control;
+        let status = if mouse_control {
+            "mouse control on: click focus | Ctrl-click select | Ctrl-m text selection"
+        } else {
+            "mouse text selection on: drag to copy | Ctrl-m pane mouse | Tab focus"
+        };
 
         Ok(Self {
             cli,
             config,
+            profile_name,
             layout: GridLayout::new(grid),
             grid_area: Rect::default(),
             panes: Vec::new(),
@@ -72,8 +86,10 @@ impl App {
             drag_divider: None,
             mode: Mode::Normal,
             broadcast: false,
+            mouse_control,
+            mouse_control_allowed,
             command_filter: String::new(),
-            status: "Esc command mode | Ctrl-click select | Ctrl-b broadcast selected".into(),
+            status: status.into(),
             event_tx,
             event_rx,
             last_activity_decay: Instant::now(),
@@ -83,10 +99,10 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         self.spawn_initial_panes()?;
 
-        let mut terminal = setup_terminal(!self.cli.no_mouse)?;
+        let mut terminal = setup_terminal(self.mouse_control)?;
         self.sync_initial_pane_sizes(&terminal)?;
         let result = self.run_loop(&mut terminal);
-        teardown_terminal(&mut terminal, !self.cli.no_mouse)?;
+        teardown_terminal(&mut terminal, self.mouse_control)?;
         result
     }
 
@@ -101,9 +117,10 @@ impl App {
             .cwd
             .clone()
             .unwrap_or(env::current_dir().context("failed to resolve current directory")?);
+        let profile_name = self.profile_name.clone();
 
         for index in 0..pane_count {
-            self.spawn_pane(index, &self.cli.profile.clone(), cwd.clone())?;
+            self.spawn_pane(index, &profile_name, cwd.clone())?;
         }
 
         Ok(())
@@ -141,6 +158,11 @@ impl App {
             if event::poll(Duration::from_millis(16))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        if is_mouse_toggle(key) {
+                            self.toggle_mouse_control(terminal)?;
+                            continue;
+                        }
+
                         if self.handle_key(key)? {
                             break;
                         }
@@ -475,6 +497,10 @@ impl App {
         self.broadcast
     }
 
+    pub fn mouse_control(&self) -> bool {
+        self.mouse_control
+    }
+
     pub fn status(&self) -> &str {
         &self.status
     }
@@ -500,6 +526,25 @@ impl App {
         self.sync_pane_sizes();
         Ok(())
     }
+
+    fn toggle_mouse_control(&mut self, terminal: &mut Tui) -> Result<()> {
+        if !self.mouse_control_allowed {
+            self.status = "mouse capture disabled by --no-mouse".into();
+            return Ok(());
+        }
+
+        self.mouse_control = !self.mouse_control;
+        if self.mouse_control {
+            execute!(terminal.backend_mut(), EnableMouseCapture)?;
+            self.status =
+                "mouse control on: click focus | Ctrl-click select | Ctrl-m text selection".into();
+        } else {
+            execute!(terminal.backend_mut(), DisableMouseCapture)?;
+            self.status =
+                "mouse text selection on: drag to copy | Ctrl-m pane mouse | Tab focus".into();
+        }
+        Ok(())
+    }
 }
 
 fn resolve_grid(cli: &Cli) -> Result<GridSize> {
@@ -519,6 +564,24 @@ fn resolve_grid(cli: &Cli) -> Result<GridSize> {
         rows: 2,
         columns: 3,
     })
+}
+
+fn resolve_profile_name(cli: &Cli, config: &Config) -> String {
+    cli.profile
+        .clone()
+        .or_else(|| env::var("GRIDBASH_PROFILE").ok())
+        .or_else(|| config.defaults.profile.clone())
+        .unwrap_or_else(|| "git-bash".into())
+}
+
+fn resolve_mouse_mode(cli: &Cli, config: &Config) -> MouseMode {
+    cli.mouse_mode
+        .or(config.defaults.mouse_mode)
+        .unwrap_or_default()
+}
+
+fn is_mouse_toggle(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('m')
 }
 
 fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) {

@@ -91,6 +91,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     } else {
         "focused"
     };
+    let mouse = if app.mouse_control() {
+        "mouse:control"
+    } else {
+        "mouse:select"
+    };
     let status = Line::from(vec![
         Span::styled(
             " GridBash ",
@@ -118,8 +123,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
+        Span::styled(mouse, Style::default().fg(Color::LightCyan)),
+        Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(" | Ctrl-g grid | Ctrl-q quit"),
+        Span::raw(" | Ctrl-m mouse | Ctrl-g grid | Ctrl-q quit"),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(Color::Rgb(11, 15, 20))),
