@@ -14,12 +14,20 @@ use crate::layout::PaneId;
 
 #[derive(Debug, Clone)]
 pub enum PtyEvent {
-    Output { pane: PaneId, bytes: Vec<u8> },
-    Exited { pane: PaneId },
+    Output {
+        pane: PaneId,
+        generation: u64,
+        bytes: Vec<u8>,
+    },
+    Exited {
+        pane: PaneId,
+        generation: u64,
+    },
 }
 
 pub struct PtyPane {
     id: PaneId,
+    generation: u64,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -37,6 +45,7 @@ pub struct PtyPane {
 impl PtyPane {
     pub fn spawn(
         id: PaneId,
+        generation: u64,
         profile_name: &str,
         title: String,
         command: &Path,
@@ -77,10 +86,11 @@ impl PtyPane {
                 .take_writer()
                 .context("failed to open PTY writer")?,
         ));
-        spawn_reader(id, event_tx, reader);
+        spawn_reader(id, generation, event_tx, reader);
 
         Ok(Self {
             id,
+            generation,
             master: pair.master,
             child,
             writer,
@@ -98,6 +108,10 @@ impl PtyPane {
 
     pub fn id(&self) -> PaneId {
         self.id
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn title(&self) -> &str {
@@ -207,6 +221,7 @@ impl Drop for PtyPane {
 
 fn spawn_reader(
     pane: PaneId,
+    generation: u64,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     mut reader: Box<dyn Read + Send>,
 ) {
@@ -215,17 +230,18 @@ fn spawn_reader(
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
-                    let _ = event_tx.send(PtyEvent::Exited { pane });
+                    let _ = event_tx.send(PtyEvent::Exited { pane, generation });
                     break;
                 }
                 Ok(n) => {
                     let _ = event_tx.send(PtyEvent::Output {
                         pane,
+                        generation,
                         bytes: buffer[..n].to_vec(),
                     });
                 }
                 Err(_) => {
-                    let _ = event_tx.send(PtyEvent::Exited { pane });
+                    let _ = event_tx.send(PtyEvent::Exited { pane, generation });
                     break;
                 }
             }
@@ -272,6 +288,7 @@ mod tests {
         let cwd = env::current_dir().expect("current dir");
         let mut pane = PtyPane::spawn(
             PaneId(0),
+            0,
             "cmd",
             "cmd".to_string(),
             Path::new("cmd.exe"),

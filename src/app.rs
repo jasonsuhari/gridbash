@@ -32,7 +32,9 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 pub struct App {
     cli: Cli,
     config: Config,
-    profile_name: String,
+    cwd: PathBuf,
+    profile_names: Vec<String>,
+    target_profile_index: usize,
     layout: GridLayout,
     grid_area: Rect,
     panes: Vec<PtyPane>,
@@ -52,11 +54,25 @@ impl App {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let profile_name = resolve_profile_name(&cli, &config);
         find_profile(&config, &profile_name)?;
+        let cwd = cli
+            .cwd
+            .clone()
+            .unwrap_or(env::current_dir().context("failed to resolve current directory")?);
+        let mut profile_names = available_profile_names(&config);
+        if !profile_names.iter().any(|name| name == &profile_name) {
+            profile_names.push(profile_name.clone());
+        }
+        let target_profile_index = profile_names
+            .iter()
+            .position(|name| name == &profile_name)
+            .unwrap_or(0);
 
         Ok(Self {
             cli,
             config,
-            profile_name,
+            cwd,
+            profile_names,
+            target_profile_index,
             layout: GridLayout::new(grid),
             grid_area: Rect::default(),
             panes: Vec::new(),
@@ -64,7 +80,8 @@ impl App {
             selected: BTreeSet::new(),
             rects: Vec::new(),
             broadcast: false,
-            status: "mouse selects text | Alt+arrows focus | Alt+s select | Alt+b broadcast".into(),
+            status: "mouse selects text | Alt+t terminal | Alt+Enter apply | Alt+b broadcast"
+                .into(),
             event_tx,
             event_rx,
             last_activity_decay: Instant::now(),
@@ -87,12 +104,8 @@ impl App {
             .count
             .unwrap_or_else(|| self.layout.size().count())
             .clamp(1, 100);
-        let cwd = self
-            .cli
-            .cwd
-            .clone()
-            .unwrap_or(env::current_dir().context("failed to resolve current directory")?);
-        let profile_name = self.profile_name.clone();
+        let cwd = self.cwd.clone();
+        let profile_name = self.target_profile_name().to_string();
 
         for index in 0..pane_count {
             self.spawn_pane(index, &profile_name, cwd.clone())?;
@@ -107,6 +120,7 @@ impl App {
         let title = format!("{} {}", profile.display_name(profile_name), index + 1);
         let pane = PtyPane::spawn(
             PaneId(index),
+            0,
             profile_name,
             title,
             &launch.command,
@@ -150,13 +164,25 @@ impl App {
     fn drain_pty_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
-                PtyEvent::Output { pane, bytes } => {
-                    if let Some(target) = self.panes.iter_mut().find(|p| p.id() == pane) {
+                PtyEvent::Output {
+                    pane,
+                    generation,
+                    bytes,
+                } => {
+                    if let Some(target) = self
+                        .panes
+                        .iter_mut()
+                        .find(|p| p.id() == pane && p.generation() == generation)
+                    {
                         target.process_output(&bytes);
                     }
                 }
-                PtyEvent::Exited { pane } => {
-                    if let Some(target) = self.panes.iter_mut().find(|p| p.id() == pane) {
+                PtyEvent::Exited { pane, generation } => {
+                    if let Some(target) = self
+                        .panes
+                        .iter_mut()
+                        .find(|p| p.id() == pane && p.generation() == generation)
+                    {
                         target.exited = true;
                     }
                 }
@@ -196,6 +222,10 @@ impl App {
         let shifted = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
             KeyCode::Char(ch) => self.handle_alt_char(ch, shifted),
+            KeyCode::Enter => {
+                self.apply_target_profile();
+                Ok(Some(false))
+            }
             KeyCode::Left if shifted => {
                 self.layout.adjust_focused(self.focus, -1, 0);
                 self.status = "focused column narrowed".into();
@@ -240,7 +270,7 @@ impl App {
         }
     }
 
-    fn handle_alt_char(&mut self, ch: char, _shifted: bool) -> Result<Option<bool>> {
+    fn handle_alt_char(&mut self, ch: char, shifted: bool) -> Result<Option<bool>> {
         let lower = ch.to_ascii_lowercase();
         match lower {
             'q' => Ok(Some(true)),
@@ -279,6 +309,14 @@ impl App {
                 self.status = format!("profiles: {summary}");
                 Ok(Some(false))
             }
+            't' => {
+                self.cycle_target_profile(if shifted { -1 } else { 1 });
+                Ok(Some(false))
+            }
+            'd' => {
+                self.save_target_as_default();
+                Ok(Some(false))
+            }
             'r' => {
                 self.layout.reset_equal();
                 self.status = "grid reset to equal rows/columns".into();
@@ -315,6 +353,99 @@ impl App {
         } else {
             vec![self.focus.min(self.panes.len().saturating_sub(1))]
         }
+    }
+
+    fn target_profile_name(&self) -> &str {
+        self.profile_names
+            .get(self.target_profile_index)
+            .map(String::as_str)
+            .unwrap_or("git-bash")
+    }
+
+    fn cycle_target_profile(&mut self, delta: isize) {
+        if self.profile_names.is_empty() {
+            self.status = "no available profiles".into();
+            return;
+        }
+
+        let count = self.profile_names.len() as isize;
+        let current = self.target_profile_index as isize;
+        self.target_profile_index = (current + delta).rem_euclid(count) as usize;
+        self.status = format!(
+            "target terminal: {} | Alt+Enter apply | Alt+d default",
+            self.target_profile_name()
+        );
+    }
+
+    fn apply_target_profile(&mut self) {
+        let profile_name = self.target_profile_name().to_string();
+        let targets = self.restart_targets();
+        for index in &targets {
+            if let Err(error) = self.replace_pane(*index, &profile_name) {
+                self.status = format!("failed to launch {profile_name}: {error:#}");
+                return;
+            }
+        }
+
+        self.status = format!("restarted {} pane(s) with {profile_name}", targets.len());
+    }
+
+    fn save_target_as_default(&mut self) {
+        let profile_name = self.target_profile_name().to_string();
+        self.config.set_default_profile(profile_name.clone());
+        match self.config.save(self.cli.config.as_deref()) {
+            Ok(path) => {
+                self.status = format!("default terminal: {profile_name} ({})", path.display());
+            }
+            Err(error) => {
+                self.status = format!("failed to save default: {error:#}");
+            }
+        }
+    }
+
+    fn restart_targets(&self) -> Vec<usize> {
+        if self.selected.is_empty() {
+            vec![self.focus.min(self.panes.len().saturating_sub(1))]
+        } else {
+            self.selected
+                .iter()
+                .copied()
+                .filter(|index| *index < self.panes.len())
+                .collect()
+        }
+    }
+
+    fn replace_pane(&mut self, index: usize, profile_name: &str) -> Result<()> {
+        let profile = find_profile(&self.config, profile_name)?;
+        let launch = profile.resolved_command()?;
+        let title = format!("{} {}", profile.display_name(profile_name), index + 1);
+        let mut pane = PtyPane::spawn(
+            PaneId(index),
+            self.panes
+                .get(index)
+                .map(|pane| pane.generation().saturating_add(1))
+                .unwrap_or(0),
+            profile_name,
+            title,
+            &launch.command,
+            &launch.args,
+            &self.cwd,
+            self.event_tx.clone(),
+        )?;
+
+        if let Some(rect) = self.rects.get(index) {
+            let rows = rect.height.saturating_sub(2).max(1);
+            let cols = rect.width.saturating_sub(2).max(1);
+            pane.resize(rows, cols)?;
+        }
+
+        let _old = std::mem::replace(
+            self.panes
+                .get_mut(index)
+                .ok_or_else(|| anyhow!("invalid pane index {index}"))?,
+            pane,
+        );
+        Ok(())
     }
 
     fn focus_next(&mut self) {
@@ -375,6 +506,10 @@ impl App {
         &self.status
     }
 
+    pub fn target_profile(&self) -> &str {
+        self.target_profile_name()
+    }
+
     pub fn sync_pane_sizes(&mut self) {
         for (index, rect) in self.rects.iter().enumerate() {
             let Some(pane) = self.panes.get_mut(index) else {
@@ -423,6 +558,13 @@ fn resolve_profile_name(cli: &Cli, config: &Config) -> String {
         .or_else(|| env::var("GRIDBASH_PROFILE").ok())
         .or_else(|| config.defaults.profile.clone())
         .unwrap_or_else(|| "git-bash".into())
+}
+
+fn available_profile_names(config: &Config) -> Vec<String> {
+    available_profiles(config)
+        .into_iter()
+        .filter_map(|(name, available)| available.then_some(name))
+        .collect()
 }
 
 fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) {

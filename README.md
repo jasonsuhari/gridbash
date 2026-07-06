@@ -14,6 +14,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Native host-terminal text selection with no mouse-capture mode.
 - Normal terminal keys pass through, including `Esc`, `Tab`, `Ctrl-a`, and `Ctrl-b`.
 - Modeless Alt shortcuts for pane focus, selection, broadcast, resize, and quit.
+- In-app terminal switching for focused or selected panes.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
 - Built-in launch profiles for common CLI coding agents.
 
@@ -114,9 +115,15 @@ GridBash does not capture the mouse, so normal drag selection and copy behavior 
 | Alt+c | Clear selection |
 | Alt+b | Toggle selected broadcast mode |
 | Alt+p | Show detected profile summary |
+| Alt+t | Cycle target terminal profile forward |
+| Alt+Shift+t | Cycle target terminal profile backward |
+| Alt+Enter | Restart focused/selected panes with target profile |
+| Alt+d | Save target profile as the default terminal |
 | Alt+q | Quit |
 
 When broadcast is on, typing goes to selected panes only. If nothing is selected, input goes to the focused pane.
+
+Changing a pane's terminal restarts that pane, so shell state in that pane is discarded.
 
 ## Grid Resizing
 

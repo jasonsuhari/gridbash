@@ -113,6 +113,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
+        Span::styled(
+            format!("target:{}", app.target_profile()),
+            Style::default().fg(Color::LightCyan),
+        ),
+        Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(" | Alt+q quit"),
     ]);
