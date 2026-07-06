@@ -70,6 +70,12 @@ Open the default 2x3 grid:
 gridbash
 ```
 
+On first launch, if no default profile is configured, GridBash opens an animated setup screen and asks you to choose from the detected terminal profiles. The choice is saved to:
+
+```text
+%APPDATA%\GridBash\config.toml
+```
+
 Set the default terminal profile:
 
 ```powershell
@@ -142,7 +148,7 @@ Grid resizing is also modeless:
 Built-in profile keys:
 
 ```text
-git-bash powershell cmd codex claude gemini opencode aider amp goose copilot cursor
+git-bash pwsh powershell cmd codex claude gemini opencode aider amp goose copilot cursor
 ```
 
 GridBash resolves Windows `.exe` and `.cmd` shims before extensionless npm shims, so common Node-based CLIs launch correctly.

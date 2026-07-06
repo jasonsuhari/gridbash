@@ -24,11 +24,17 @@ pub struct LaunchCommand {
     pub args: Vec<String>,
 }
 
+pub const TERMINAL_PROFILE_NAMES: &[&str] = &["git-bash", "pwsh", "powershell", "cmd"];
+
 impl Profile {
     pub fn resolved_command(&self) -> Result<LaunchCommand> {
         let exe = resolve_executable(&self.command)
             .ok_or_else(|| anyhow!("profile command not found on PATH: {}", self.command))?;
         Ok(wrap_for_windows_script(exe, &self.args))
+    }
+
+    pub fn display_name(&self, key: &str) -> String {
+        self.title.clone().unwrap_or_else(|| key.to_string())
     }
 }
 
@@ -106,6 +112,19 @@ pub fn available_profiles(config: &Config) -> Vec<(String, bool)> {
         .collect()
 }
 
+pub fn terminal_profiles(config: &Config) -> Vec<(String, Profile)> {
+    let profiles = all_profiles(config);
+    TERMINAL_PROFILE_NAMES
+        .iter()
+        .filter_map(|name| {
+            profiles
+                .get(*name)
+                .cloned()
+                .map(|profile| ((*name).to_string(), profile))
+        })
+        .collect()
+}
+
 fn builtin_profiles() -> BTreeMap<String, Profile> {
     let mut profiles = BTreeMap::new();
     profiles.insert(
@@ -114,6 +133,14 @@ fn builtin_profiles() -> BTreeMap<String, Profile> {
             command: "bash".into(),
             args: vec!["--login".into(), "-i".into()],
             title: Some("Git Bash".into()),
+        },
+    );
+    profiles.insert(
+        "pwsh".into(),
+        Profile {
+            command: "pwsh".into(),
+            args: vec!["-NoLogo".into()],
+            title: Some("PowerShell 7".into()),
         },
     );
     profiles.insert(
