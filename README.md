@@ -11,16 +11,9 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Real PTY-backed panes through Windows ConPTY via `portable-pty`.
 - Up to 100 panes in one terminal process.
 - Configurable default terminal profile: Git Bash, PowerShell, cmd, agents, or custom.
-- Native host-terminal text selection by default.
-- `Ctrl-m` toggles pane mouse controls.
-- Ctrl-click toggles pane selection when pane mouse controls are enabled.
-- Shift-click selects a range when pane mouse controls are enabled.
-- `Ctrl-b` toggles selected broadcast mode.
-- `Ctrl-g` opens spreadsheet-style grid resize mode.
-- `Ctrl-a` selects every pane.
-- `Esc` opens command mode.
-- `Ctrl-q` exits.
-- Mouse and keyboard navigation.
+- Native host-terminal text selection with no mouse-capture mode.
+- Normal terminal keys pass through, including `Esc`, `Tab`, `Ctrl-a`, and `Ctrl-b`.
+- Modeless Alt shortcuts for pane focus, selection, broadcast, resize, and quit.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
 - Built-in launch profiles for common CLI coding agents.
 
@@ -108,39 +101,34 @@ gridbash 3x4 --profile codex --cwd C:\Users\Jason\Documents\GitHub\fluent
 
 ## Controls
 
-By default, GridBash leaves mouse capture off so your host terminal can select and copy text normally. Press `Ctrl-m` to toggle pane mouse controls when you want click focus, pane selection, or grid divider dragging.
+GridBash does not capture the mouse, so normal drag selection and copy behavior stays owned by your host terminal. App controls use Alt shortcuts and do not require switching modes.
 
 | Input | Action |
 | --- | --- |
 | Drag mouse | Select/copy terminal text in the host terminal |
-| Ctrl-m | Toggle mouse text-selection / pane-control mode |
-| Click pane | Focus pane in pane-control mode |
-| Ctrl-click pane | Toggle pane selection in pane-control mode |
-| Shift-click pane | Select range from focused pane in pane-control mode |
-| Right-click pane | Toggle pane selection in pane-control mode |
-| Drag left mouse | Add panes to selection in pane-control mode |
-| Tab / Shift-Tab | Move focus |
-| Ctrl-b | Toggle selected broadcast mode |
-| Ctrl-g | Enter grid resize mode |
-| Ctrl-a | Select all panes |
-| Ctrl-q | Quit |
-| Esc | Toggle command mode |
+| Alt+1 through Alt+9 / Alt+0 | Focus pane 1 through 10 |
+| Alt+Left / Alt+Right | Focus previous / next pane |
+| Alt+Up / Alt+Down | Focus pane above / below |
+| Alt+s or Alt+Space | Toggle focused pane selection |
+| Alt+a | Select all panes |
+| Alt+c | Clear selection |
+| Alt+b | Toggle selected broadcast mode |
+| Alt+p | Show detected profile summary |
+| Alt+q | Quit |
 
 When broadcast is on, typing goes to selected panes only. If nothing is selected, input goes to the focused pane.
 
-## Grid Resize Mode
+## Grid Resizing
 
-Press `Ctrl-g` to enter GRID mode. Drag row or column dividers like a spreadsheet table, or use keyboard controls:
+Grid resizing is also modeless:
 
 | Input | Action |
 | --- | --- |
-| Drag divider | Resize adjacent rows/columns |
-| h / Left | Narrow focused column |
-| l / Right | Widen focused column |
-| k / Up | Shorten focused row |
-| j / Down | Heighten focused row |
-| = or 0 | Reset equal grid |
-| Esc | Return to normal terminal input |
+| Alt+Shift+Left | Narrow focused column |
+| Alt+Shift+Right | Widen focused column |
+| Alt+Shift+Up | Shorten focused row |
+| Alt+Shift+Down | Heighten focused row |
+| Alt+r | Reset equal grid |
 
 ## Profiles
 
@@ -163,7 +151,6 @@ Example:
 ```toml
 [defaults]
 profile = "powershell"
-mouse_mode = "select"
 
 [profiles.review]
 command = "codex"
@@ -181,13 +168,6 @@ Default profile resolution order:
 
 ```text
 --profile > GRIDBASH_PROFILE > [defaults].profile > git-bash
-```
-
-Mouse mode values:
-
-```text
-select   host terminal owns mouse selection/copying
-control  GridBash captures mouse for pane focus, pane selection, and grid resizing
 ```
 
 ## Design Goals

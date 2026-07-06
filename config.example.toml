@@ -1,6 +1,5 @@
 [defaults]
 profile = "git-bash"
-mouse_mode = "select"
 
 [profiles.codex-fast]
 command = "codex"

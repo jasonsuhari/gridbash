@@ -7,7 +7,7 @@ use ratatui::{
 };
 use vt100::Cell;
 
-use crate::app::{App, Mode};
+use crate::app::App;
 
 pub struct DrawState {
     pub grid_area: Rect,
@@ -81,20 +81,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         }
     }
 
-    let mode = match app.mode() {
-        Mode::Normal => "NORMAL",
-        Mode::Command => "COMMAND",
-        Mode::Grid => "GRID",
-    };
     let broadcast = if app.broadcast() {
         "BROADCAST"
     } else {
         "focused"
-    };
-    let mouse = if app.mouse_control() {
-        "mouse:control"
-    } else {
-        "mouse:select"
     };
     let status = Line::from(vec![
         Span::styled(
@@ -106,7 +96,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         ),
         Span::raw(" "),
         Span::styled(
-            mode,
+            "LIVE",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -123,10 +113,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
-        Span::styled(mouse, Style::default().fg(Color::LightCyan)),
-        Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(" | Ctrl-m mouse | Ctrl-g grid | Ctrl-q quit"),
+        Span::raw(" | Alt+q quit"),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(Color::Rgb(11, 15, 20))),

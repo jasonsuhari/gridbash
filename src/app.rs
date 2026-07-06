@@ -9,8 +9,8 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -20,21 +20,14 @@ use tokio::sync::mpsc;
 
 use crate::{
     cli::{Cli, GridMode},
-    config::{Config, MouseMode},
-    layout::{Divider, GridLayout, GridSize, PaneId, pane_at},
+    config::Config,
+    layout::{GridLayout, GridSize, PaneId},
     profiles::{available_profiles, find_profile},
     pty::{PtyEvent, PtyPane},
     ui,
 };
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Normal,
-    Command,
-    Grid,
-}
 
 pub struct App {
     cli: Cli,
@@ -46,12 +39,7 @@ pub struct App {
     focus: usize,
     selected: BTreeSet<usize>,
     rects: Vec<Rect>,
-    drag_divider: Option<Divider>,
-    mode: Mode,
     broadcast: bool,
-    mouse_control: bool,
-    mouse_control_allowed: bool,
-    command_filter: String,
     status: String,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
@@ -64,14 +52,6 @@ impl App {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let profile_name = resolve_profile_name(&cli, &config);
         find_profile(&config, &profile_name)?;
-        let mouse_control_allowed = !cli.no_mouse;
-        let mouse_control =
-            mouse_control_allowed && resolve_mouse_mode(&cli, &config) == MouseMode::Control;
-        let status = if mouse_control {
-            "mouse control on: click focus | Ctrl-click select | Ctrl-m text selection"
-        } else {
-            "mouse text selection on: drag to copy | Ctrl-m pane mouse | Tab focus"
-        };
 
         Ok(Self {
             cli,
@@ -83,13 +63,8 @@ impl App {
             focus: 0,
             selected: BTreeSet::new(),
             rects: Vec::new(),
-            drag_divider: None,
-            mode: Mode::Normal,
             broadcast: false,
-            mouse_control,
-            mouse_control_allowed,
-            command_filter: String::new(),
-            status: status.into(),
+            status: "mouse selects text | Alt+arrows focus | Alt+s select | Alt+b broadcast".into(),
             event_tx,
             event_rx,
             last_activity_decay: Instant::now(),
@@ -99,10 +74,10 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         self.spawn_initial_panes()?;
 
-        let mut terminal = setup_terminal(self.mouse_control)?;
+        let mut terminal = setup_terminal()?;
         self.sync_initial_pane_sizes(&terminal)?;
         let result = self.run_loop(&mut terminal);
-        teardown_terminal(&mut terminal, self.mouse_control)?;
+        teardown_terminal(&mut terminal)?;
         result
     }
 
@@ -158,17 +133,9 @@ impl App {
             if event::poll(Duration::from_millis(16))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        if is_mouse_toggle(key) {
-                            self.toggle_mouse_control(terminal)?;
-                            continue;
-                        }
-
                         if self.handle_key(key)? {
                             break;
                         }
-                    }
-                    Event::Mouse(mouse) => {
-                        self.handle_mouse(mouse.kind, mouse.column, mouse.row, mouse.modifiers)
                     }
                     Event::Resize(_, _) => {}
                     Event::Paste(text) => self.route_input(text.as_bytes())?,
@@ -213,85 +180,95 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Char('q') => return Ok(true),
-                KeyCode::Char('b') => {
-                    self.broadcast = !self.broadcast;
-                    self.status = if self.broadcast {
-                        "broadcast selected: on".into()
-                    } else {
-                        "broadcast selected: off".into()
-                    };
-                    return Ok(false);
-                }
-                KeyCode::Char('g') => {
-                    self.mode = Mode::Grid;
-                    self.status =
-                        "grid mode: drag dividers | h/l width | j/k height | = reset | Esc done"
-                            .into();
-                    return Ok(false);
-                }
-                KeyCode::Char('a') => {
-                    self.selected = (0..self.panes.len()).collect();
-                    self.status = format!("selected {} panes", self.selected.len());
-                    return Ok(false);
-                }
-                _ => {}
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            if let Some(quit) = self.handle_app_key(key)? {
+                return Ok(quit);
             }
         }
 
-        match self.mode {
-            Mode::Normal => self.handle_normal_key(key),
-            Mode::Command => self.handle_command_key(key),
-            Mode::Grid => self.handle_grid_key(key),
-        }
-    }
-
-    fn handle_normal_key(&mut self, key: KeyEvent) -> Result<bool> {
-        match key.code {
-            KeyCode::Esc => {
-                self.mode = Mode::Command;
-                self.command_filter.clear();
-                self.status =
-                    "command mode: launch, profiles, select, broadcast, help, quit".into();
-            }
-            KeyCode::Tab => self.focus_next(),
-            KeyCode::BackTab => self.focus_previous(),
-            _ => {
-                if let Some(bytes) = terminal_key_bytes(key) {
-                    self.route_input(&bytes)?;
-                }
-            }
+        if let Some(bytes) = terminal_key_bytes(key) {
+            self.route_input(&bytes)?;
         }
         Ok(false)
     }
 
-    fn handle_command_key(&mut self, key: KeyEvent) -> Result<bool> {
+    fn handle_app_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+        let shifted = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            KeyCode::Esc => {
-                self.mode = Mode::Normal;
-                self.command_filter.clear();
-                self.status = "normal mode".into();
+            KeyCode::Char(ch) => self.handle_alt_char(ch, shifted),
+            KeyCode::Left if shifted => {
+                self.layout.adjust_focused(self.focus, -1, 0);
+                self.status = "focused column narrowed".into();
+                Ok(Some(false))
             }
-            KeyCode::Char('q') => return Ok(true),
-            KeyCode::Char('b') => {
+            KeyCode::Right if shifted => {
+                self.layout.adjust_focused(self.focus, 1, 0);
+                self.status = "focused column widened".into();
+                Ok(Some(false))
+            }
+            KeyCode::Up if shifted => {
+                self.layout.adjust_focused(self.focus, 0, -1);
+                self.status = "focused row shortened".into();
+                Ok(Some(false))
+            }
+            KeyCode::Down if shifted => {
+                self.layout.adjust_focused(self.focus, 0, 1);
+                self.status = "focused row heightened".into();
+                Ok(Some(false))
+            }
+            KeyCode::Left => {
+                self.focus_previous();
+                self.status = format!("focused pane {}", self.focus + 1);
+                Ok(Some(false))
+            }
+            KeyCode::Right => {
+                self.focus_next();
+                self.status = format!("focused pane {}", self.focus + 1);
+                Ok(Some(false))
+            }
+            KeyCode::Up => {
+                self.focus_in_grid(-1);
+                self.status = format!("focused pane {}", self.focus + 1);
+                Ok(Some(false))
+            }
+            KeyCode::Down => {
+                self.focus_in_grid(1);
+                self.status = format!("focused pane {}", self.focus + 1);
+                Ok(Some(false))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn handle_alt_char(&mut self, ch: char, _shifted: bool) -> Result<Option<bool>> {
+        let lower = ch.to_ascii_lowercase();
+        match lower {
+            'q' => Ok(Some(true)),
+            'b' => {
                 self.broadcast = !self.broadcast;
                 self.status = if self.broadcast {
                     "broadcast selected: on".into()
                 } else {
                     "broadcast selected: off".into()
                 };
+                Ok(Some(false))
             }
-            KeyCode::Char('c') => {
-                self.selected.clear();
-                self.status = "selection cleared".into();
+            's' | ' ' => {
+                toggle_selection(&mut self.selected, self.focus);
+                self.status = format!("selected {} panes", self.selected.len());
+                Ok(Some(false))
             }
-            KeyCode::Char('a') => {
+            'a' => {
                 self.selected = (0..self.panes.len()).collect();
                 self.status = format!("selected {} panes", self.selected.len());
+                Ok(Some(false))
             }
-            KeyCode::Char('p') => {
+            'c' => {
+                self.selected.clear();
+                self.status = "selection cleared".into();
+                Ok(Some(false))
+            }
+            'p' => {
                 let profiles = available_profiles(&self.config);
                 let summary = profiles
                     .iter()
@@ -300,125 +277,24 @@ impl App {
                     .collect::<Vec<_>>()
                     .join(" ");
                 self.status = format!("profiles: {summary}");
+                Ok(Some(false))
             }
-            KeyCode::Char('g') => {
-                self.mode = Mode::Grid;
-                self.command_filter.clear();
-                self.status =
-                    "grid mode: drag dividers | h/l width | j/k height | = reset | Esc done".into();
-            }
-            KeyCode::Char(ch) => {
-                self.command_filter.push(ch);
-                self.status = format!("command filter: {}", self.command_filter);
-            }
-            KeyCode::Backspace => {
-                self.command_filter.pop();
-                self.status = format!("command filter: {}", self.command_filter);
-            }
-            KeyCode::Tab | KeyCode::Down | KeyCode::Right => self.focus_next(),
-            KeyCode::BackTab | KeyCode::Up | KeyCode::Left => self.focus_previous(),
-            _ => {}
-        }
-        Ok(false)
-    }
-
-    fn handle_grid_key(&mut self, key: KeyEvent) -> Result<bool> {
-        match key.code {
-            KeyCode::Esc => {
-                self.mode = Mode::Normal;
-                self.drag_divider = None;
-                self.status = "normal mode".into();
-            }
-            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return Ok(true);
-            }
-            KeyCode::Char('=') | KeyCode::Char('0') => {
+            'r' => {
                 self.layout.reset_equal();
                 self.status = "grid reset to equal rows/columns".into();
+                Ok(Some(false))
             }
-            KeyCode::Char('h') | KeyCode::Left => {
-                self.layout.adjust_focused(self.focus, -1, 0);
-                self.status = "focused column narrowed".into();
-            }
-            KeyCode::Char('l') | KeyCode::Right => {
-                self.layout.adjust_focused(self.focus, 1, 0);
-                self.status = "focused column widened".into();
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
-                self.layout.adjust_focused(self.focus, 0, 1);
-                self.status = "focused row heightened".into();
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.layout.adjust_focused(self.focus, 0, -1);
-                self.status = "focused row shortened".into();
-            }
-            KeyCode::Tab => self.focus_next(),
-            KeyCode::BackTab => self.focus_previous(),
-            _ => {}
-        }
-        Ok(false)
-    }
-
-    fn handle_mouse(&mut self, kind: MouseEventKind, x: u16, y: u16, modifiers: KeyModifiers) {
-        if self.mode == Mode::Grid {
-            match kind {
-                MouseEventKind::Down(MouseButton::Left) => {
-                    if let Some(divider) = self.layout.divider_at(self.grid_area, x, y) {
-                        self.drag_divider = Some(divider);
-                        self.layout.drag_divider(divider, self.grid_area, x, y);
-                        self.status = "dragging grid divider".into();
-                        return;
-                    }
-                }
-                MouseEventKind::Drag(MouseButton::Left) => {
-                    if let Some(divider) = self.drag_divider {
-                        self.layout.drag_divider(divider, self.grid_area, x, y);
-                        self.status = "resized grid".into();
-                        return;
-                    }
-                }
-                MouseEventKind::Up(MouseButton::Left) => {
-                    self.drag_divider = None;
-                    self.status = "grid resize committed".into();
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        let Some(index) = pane_at(&self.rects, x, y) else {
-            return;
-        };
-
-        match kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                if modifiers.contains(KeyModifiers::CONTROL) {
-                    toggle_selection(&mut self.selected, index);
+            '1'..='9' | '0' => {
+                let Some(index) = pane_digit_index(lower) else {
+                    return Ok(Some(false));
+                };
+                if index < self.panes.len() {
                     self.focus = index;
-                    self.status = format!("selected {} panes", self.selected.len());
-                } else if modifiers.contains(KeyModifiers::SHIFT) {
-                    self.select_range(self.focus, index);
-                    self.focus = index;
-                    self.status = format!("selected {} panes", self.selected.len());
-                } else {
-                    self.focus = index;
-                    self.selected.clear();
                     self.status = format!("focused pane {}", index + 1);
                 }
+                Ok(Some(false))
             }
-            MouseEventKind::Down(MouseButton::Right) => {
-                toggle_selection(&mut self.selected, index);
-                self.focus = index;
-                self.status = format!("selected {} panes", self.selected.len());
-            }
-            MouseEventKind::Down(MouseButton::Middle) => {
-                self.broadcast = !self.broadcast;
-            }
-            MouseEventKind::Drag(MouseButton::Left) => {
-                self.selected.insert(index);
-                self.focus = index;
-            }
-            _ => {}
+            _ => Ok(None),
         }
     }
 
@@ -441,20 +317,6 @@ impl App {
         }
     }
 
-    fn select_range(&mut self, start: usize, end: usize) {
-        let (start, end) = if start <= end {
-            (start, end)
-        } else {
-            (end, start)
-        };
-
-        for index in start..=end {
-            if index < self.panes.len() {
-                self.selected.insert(index);
-            }
-        }
-    }
-
     fn focus_next(&mut self) {
         if self.panes.is_empty() {
             return;
@@ -473,6 +335,22 @@ impl App {
         };
     }
 
+    fn focus_in_grid(&mut self, row_delta: isize) {
+        if self.panes.is_empty() {
+            return;
+        }
+
+        let columns = self.layout.size().columns;
+        let candidate = if row_delta.is_negative() {
+            self.focus.saturating_sub(columns)
+        } else {
+            self.focus.saturating_add(columns)
+        };
+        if candidate < self.panes.len() {
+            self.focus = candidate;
+        }
+    }
+
     pub fn pane_rects(&self, area: Rect) -> Vec<Rect> {
         self.layout.rects(area, self.panes.len())
     }
@@ -489,16 +367,8 @@ impl App {
         &self.selected
     }
 
-    pub fn mode(&self) -> Mode {
-        self.mode
-    }
-
     pub fn broadcast(&self) -> bool {
         self.broadcast
-    }
-
-    pub fn mouse_control(&self) -> bool {
-        self.mouse_control
     }
 
     pub fn status(&self) -> &str {
@@ -524,25 +394,6 @@ impl App {
         self.grid_area = Rect::new(0, 0, size.width, size.height.saturating_sub(1));
         self.rects = self.pane_rects(self.grid_area);
         self.sync_pane_sizes();
-        Ok(())
-    }
-
-    fn toggle_mouse_control(&mut self, terminal: &mut Tui) -> Result<()> {
-        if !self.mouse_control_allowed {
-            self.status = "mouse capture disabled by --no-mouse".into();
-            return Ok(());
-        }
-
-        self.mouse_control = !self.mouse_control;
-        if self.mouse_control {
-            execute!(terminal.backend_mut(), EnableMouseCapture)?;
-            self.status =
-                "mouse control on: click focus | Ctrl-click select | Ctrl-m text selection".into();
-        } else {
-            execute!(terminal.backend_mut(), DisableMouseCapture)?;
-            self.status =
-                "mouse text selection on: drag to copy | Ctrl-m pane mouse | Tab focus".into();
-        }
         Ok(())
     }
 }
@@ -574,19 +425,17 @@ fn resolve_profile_name(cli: &Cli, config: &Config) -> String {
         .unwrap_or_else(|| "git-bash".into())
 }
 
-fn resolve_mouse_mode(cli: &Cli, config: &Config) -> MouseMode {
-    cli.mouse_mode
-        .or(config.defaults.mouse_mode)
-        .unwrap_or_default()
-}
-
-fn is_mouse_toggle(key: KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('m')
-}
-
 fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) {
     if !selected.insert(index) {
         selected.remove(&index);
+    }
+}
+
+fn pane_digit_index(ch: char) -> Option<usize> {
+    match ch {
+        '1'..='9' => Some(ch as usize - '1' as usize),
+        '0' => Some(9),
+        _ => None,
     }
 }
 
@@ -625,6 +474,9 @@ fn terminal_key_bytes(key: KeyEvent) -> Option<Vec<u8>> {
         KeyCode::Right => bytes.extend_from_slice(b"\x1b[C"),
         KeyCode::Up => bytes.extend_from_slice(b"\x1b[A"),
         KeyCode::Down => bytes.extend_from_slice(b"\x1b[B"),
+        KeyCode::Tab => bytes.push(b'\t'),
+        KeyCode::BackTab => bytes.extend_from_slice(b"\x1b[Z"),
+        KeyCode::Esc => bytes.push(0x1b),
         KeyCode::F(number) => bytes.extend_from_slice(function_key_sequence(number)?),
         KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
             bytes.push(control_byte(ch)?);
@@ -657,22 +509,16 @@ fn function_key_sequence(number: u8) -> Option<&'static [u8]> {
     }
 }
 
-fn setup_terminal(enable_mouse: bool) -> Result<Tui> {
+fn setup_terminal() -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
-    if enable_mouse {
-        execute!(stdout, EnableMouseCapture)?;
-    }
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend).context("failed to create terminal")
 }
 
-fn teardown_terminal(terminal: &mut Tui, enable_mouse: bool) -> Result<()> {
+fn teardown_terminal(terminal: &mut Tui) -> Result<()> {
     disable_raw_mode()?;
-    if enable_mouse {
-        execute!(terminal.backend_mut(), DisableMouseCapture)?;
-    }
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,

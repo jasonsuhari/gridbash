@@ -2,8 +2,6 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
-use crate::config::MouseMode;
-
 #[derive(Debug, Clone, Parser)]
 #[command(name = "gridbash")]
 #[command(about = "Fast, beautiful terminal grids for CLI agents")]
@@ -36,13 +34,9 @@ pub struct Cli {
     #[arg(long, default_value = "dark")]
     pub theme: String,
 
-    /// Disable mouse capture.
-    #[arg(long)]
+    /// Compatibility flag. GridBash no longer captures mouse input by default.
+    #[arg(long, hide = true)]
     pub no_mouse: bool,
-
-    /// Mouse behavior: select allows host-terminal text selection, control enables pane clicks.
-    #[arg(long, value_enum)]
-    pub mouse_mode: Option<MouseMode>,
 
     /// Print detected launch profiles and exit.
     #[arg(long)]

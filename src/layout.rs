@@ -16,6 +16,7 @@ pub struct GridLayout {
     column_weights: Vec<u16>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Divider {
     Row(usize),
@@ -81,6 +82,7 @@ impl GridLayout {
         self.column_weights.fill(1000);
     }
 
+    #[allow(dead_code)]
     pub fn divider_at(&self, area: Rect, x: u16, y: u16) -> Option<Divider> {
         let column_widths = weighted_lengths(area.width, &self.column_weights);
         let row_heights = weighted_lengths(area.height, &self.row_weights);
@@ -114,6 +116,7 @@ impl GridLayout {
         None
     }
 
+    #[allow(dead_code)]
     pub fn drag_divider(&mut self, divider: Divider, area: Rect, x: u16, y: u16) {
         match divider {
             Divider::Column(index) => drag_pair(
@@ -219,6 +222,7 @@ fn weighted_lengths(total: u16, weights: &[u16]) -> Vec<u16> {
     lengths
 }
 
+#[allow(dead_code)]
 fn drag_pair(weights: &mut [u16], index: usize, total_pixels: u16, target_pixels: u16) {
     if index + 1 >= weights.len() || total_pixels == 0 {
         return;
@@ -244,6 +248,7 @@ fn adjust_weight(weights: &mut [u16], index: usize, delta: i16) {
     *weight = (*weight as i32 + delta as i32 * 50).clamp(100, 5000) as u16;
 }
 
+#[allow(dead_code)]
 pub fn pane_at(rects: &[Rect], x: u16, y: u16) -> Option<usize> {
     rects.iter().position(|rect| {
         x >= rect.x

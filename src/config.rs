@@ -5,7 +5,6 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use clap::ValueEnum;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
@@ -23,23 +22,6 @@ pub struct Config {
 pub struct Defaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mouse_mode: Option<MouseMode>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-pub enum MouseMode {
-    /// Let the host terminal select/copy text with the mouse.
-    Select,
-    /// Capture mouse input for GridBash pane focusing and selection.
-    Control,
-}
-
-impl Default for MouseMode {
-    fn default() -> Self {
-        Self::Select
-    }
 }
 
 impl Config {
@@ -89,7 +71,7 @@ impl Config {
 
 impl Defaults {
     fn is_empty(&self) -> bool {
-        self.profile.is_none() && self.mouse_mode.is_none()
+        self.profile.is_none()
     }
 }
 
@@ -103,12 +85,10 @@ mod tests {
             r#"
             [defaults]
             profile = "powershell"
-            mouse_mode = "control"
             "#,
         )
         .expect("parse config");
 
         assert_eq!(config.defaults.profile.as_deref(), Some("powershell"));
-        assert_eq!(config.defaults.mouse_mode, Some(MouseMode::Control));
     }
 }
