@@ -28,6 +28,7 @@ pub struct PtyPane {
     profile: String,
     rows: u16,
     cols: u16,
+    response_scan_tail: Vec<u8>,
     pub active: bool,
     pub exited: bool,
     bytes_seen: u64,
@@ -88,6 +89,7 @@ impl PtyPane {
             profile: profile_name.to_string(),
             rows: 24,
             cols: 80,
+            response_scan_tail: Vec::new(),
             active: false,
             exited: false,
             bytes_seen: 0,
@@ -114,6 +116,7 @@ impl PtyPane {
         self.parser.process(bytes);
         self.bytes_seen = self.bytes_seen.saturating_add(bytes.len() as u64);
         self.active = true;
+        self.answer_terminal_queries(bytes);
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
@@ -153,6 +156,37 @@ impl PtyPane {
 
     pub fn bytes_seen(&self) -> u64 {
         self.bytes_seen
+    }
+
+    fn answer_terminal_queries(&mut self, bytes: &[u8]) {
+        let mut scan = Vec::with_capacity(self.response_scan_tail.len() + bytes.len());
+        scan.extend_from_slice(&self.response_scan_tail);
+        scan.extend_from_slice(bytes);
+
+        if contains_sequence(&scan, b"\x1b[5n") {
+            let _ = self.write(b"\x1b[0n");
+        }
+
+        let cursor_position_requests = count_sequence(&scan, b"\x1b[6n");
+        if cursor_position_requests > 0 {
+            let (row, column) = self.parser.screen().cursor_position();
+            let response = format!(
+                "\x1b[{};{}R",
+                row.saturating_add(1),
+                column.saturating_add(1)
+            );
+            for _ in 0..cursor_position_requests {
+                let _ = self.write(response.as_bytes());
+            }
+        }
+
+        if contains_sequence(&scan, b"\x1b[c") || contains_sequence(&scan, b"\x1b[0c") {
+            let _ = self.write(b"\x1b[?1;2c");
+        }
+
+        const MAX_QUERY_LEN: usize = 5;
+        let tail_start = scan.len().saturating_sub(MAX_QUERY_LEN - 1);
+        self.response_scan_tail = scan[tail_start..].to_vec();
     }
 
     pub fn terminate(&mut self) {
@@ -199,6 +233,21 @@ fn spawn_reader(
     });
 }
 
+fn contains_sequence(buffer: &[u8], sequence: &[u8]) -> bool {
+    count_sequence(buffer, sequence) > 0
+}
+
+fn count_sequence(buffer: &[u8], sequence: &[u8]) -> usize {
+    if sequence.is_empty() || buffer.len() < sequence.len() {
+        return 0;
+    }
+
+    buffer
+        .windows(sequence.len())
+        .filter(|window| *window == sequence)
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -209,6 +258,12 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn counts_split_terminal_query_sequences() {
+        assert_eq!(count_sequence(b"\x1b[6n", b"\x1b[6n"), 1);
+        assert_eq!(count_sequence(b"abc", b"\x1b[6n"), 0);
+    }
 
     #[test]
     #[ignore = "Windows ConPTY smoke test requires an interactive console; run manually when debugging PTY I/O"]
