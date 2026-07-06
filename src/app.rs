@@ -31,8 +31,6 @@ use crate::{
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 pub struct App {
-    cli: Cli,
-    config: Config,
     launch_plan: Option<LaunchPlan>,
     layout: GridLayout,
     grid_area: Rect,
@@ -213,8 +211,6 @@ impl App {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
-            cli,
-            config,
             launch_plan,
             layout: GridLayout::new(grid),
             grid_area: Rect::default(),
@@ -243,10 +239,8 @@ impl App {
     fn run_in_terminal(&mut self, terminal: &mut Tui) -> Result<()> {
         if self.launch_plan.is_none() {
             let current_dir = resolved_current_dir()?;
-            let mut composer = Composer::new(&self.config, current_dir);
-            let Some(plan) =
-                composer.run(terminal, &mut self.config, self.cli.config.as_deref())?
-            else {
+            let mut composer = Composer::new(current_dir);
+            let Some(plan) = composer.run(terminal)? else {
                 return Ok(());
             };
             self.set_launch_plan(plan);

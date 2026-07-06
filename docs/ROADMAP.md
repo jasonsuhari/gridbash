@@ -12,7 +12,6 @@
 ## V2
 
 - Background daemon for detach/reattach.
-- Saved workspaces and templates.
 - Multi-client attach.
 - Agent status classifiers.
 - Plugin API.

@@ -4,23 +4,20 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use serde::{Deserialize, Serialize};
 
 use crate::{
     layout::GridSize,
     profiles::{LaunchCommand, Profile},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SavedSetup {
-    #[serde(default)]
-    pub folders: Vec<SetupFolder>,
-    #[serde(default)]
+#[derive(Debug, Clone)]
+pub struct LaunchSelection {
+    pub folders: Vec<LaunchFolder>,
     pub agents: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetupFolder {
+#[derive(Debug, Clone)]
+pub struct LaunchFolder {
     pub name: String,
     pub path: PathBuf,
 }
@@ -40,17 +37,17 @@ pub struct PaneLaunchSpec {
     pub worktree_name: Option<String>,
 }
 
-impl SavedSetup {
-    pub fn new(folders: Vec<SetupFolder>, agents: Vec<String>) -> Self {
+impl LaunchSelection {
+    pub fn new(folders: Vec<LaunchFolder>, agents: Vec<String>) -> Self {
         Self { folders, agents }
     }
 
     pub fn validate(&self) -> Result<()> {
         if self.folders.is_empty() {
-            return Err(anyhow!("setup needs at least one folder"));
+            return Err(anyhow!("launch needs at least one folder"));
         }
         if self.agents.is_empty() {
-            return Err(anyhow!("setup needs at least one agent"));
+            return Err(anyhow!("launch needs at least one agent"));
         }
         for folder in &self.folders {
             if !folder.path.is_dir() {
@@ -76,7 +73,7 @@ impl SavedSetup {
     }
 }
 
-impl SetupFolder {
+impl LaunchFolder {
     pub fn from_path(path: PathBuf) -> Self {
         let name = folder_display_name(&path);
         Self { name, path }
@@ -141,29 +138,7 @@ fn run_git(path: &Path, args: &[&str]) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-pub fn sanitize_setup_name(value: &str) -> Option<String> {
-    let normalized = value
-        .trim()
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch.to_ascii_lowercase()
-            } else if ch.is_whitespace() {
-                '-'
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("-");
-
-    (!normalized.is_empty()).then_some(normalized)
-}
-
-fn vibe_pane_spec(agent: &str, folder: &SetupFolder) -> PaneLaunchSpec {
+fn vibe_pane_spec(agent: &str, folder: &LaunchFolder) -> PaneLaunchSpec {
     PaneLaunchSpec {
         profile_name: agent.to_string(),
         command: Profile {
@@ -177,13 +152,16 @@ fn vibe_pane_spec(agent: &str, folder: &SetupFolder) -> PaneLaunchSpec {
     }
 }
 
-pub fn setup_from_selection(folders: Vec<PathBuf>, agents: Vec<String>) -> Result<SavedSetup> {
-    let setup = SavedSetup::new(
-        folders.into_iter().map(SetupFolder::from_path).collect(),
+pub fn launch_selection_from(
+    folders: Vec<PathBuf>,
+    agents: Vec<String>,
+) -> Result<LaunchSelection> {
+    let selection = LaunchSelection::new(
+        folders.into_iter().map(LaunchFolder::from_path).collect(),
         agents,
     );
-    setup.validate().context("invalid setup")?;
-    Ok(setup)
+    selection.validate().context("invalid launch selection")?;
+    Ok(selection)
 }
 
 #[cfg(test)]
@@ -196,13 +174,13 @@ mod tests {
     fn assigns_agents_round_robin_across_folders() {
         let cwd = env::current_dir().expect("cwd");
         let other = cwd.parent().unwrap_or(&cwd).to_path_buf();
-        let setup = SavedSetup::new(
+        let selection = LaunchSelection::new(
             vec![
-                SetupFolder {
+                LaunchFolder {
                     name: "one".into(),
                     path: cwd,
                 },
-                SetupFolder {
+                LaunchFolder {
                     name: "two".into(),
                     path: other,
                 },
@@ -210,7 +188,7 @@ mod tests {
             vec!["claude-1".into(), "claude-2".into(), "codex-2".into()],
         );
 
-        let plan = setup.launch_plan().expect("launch plan");
+        let plan = selection.launch_plan().expect("launch plan");
         assert_eq!(plan.panes[0].folder_name, "one");
         assert_eq!(plan.panes[1].folder_name, "two");
         assert_eq!(plan.panes[2].folder_name, "one");
@@ -220,25 +198,16 @@ mod tests {
     #[test]
     fn builds_vibe_run_command_for_agent() {
         let cwd = env::current_dir().expect("cwd");
-        let setup = SavedSetup::new(
-            vec![SetupFolder {
+        let selection = LaunchSelection::new(
+            vec![LaunchFolder {
                 name: "repo".into(),
                 path: cwd,
             }],
             vec!["claude-1".into()],
         );
 
-        let plan = setup.launch_plan().expect("launch plan");
+        let plan = selection.launch_plan().expect("launch plan");
         assert_eq!(plan.panes[0].command.command, "vibe");
         assert_eq!(plan.panes[0].command.args, vec!["run", "claude-1", "--"]);
-    }
-
-    #[test]
-    fn sanitizes_setup_names() {
-        assert_eq!(
-            sanitize_setup_name("Client Stack!"),
-            Some("client-stack".into())
-        );
-        assert_eq!(sanitize_setup_name("   "), None);
     }
 }

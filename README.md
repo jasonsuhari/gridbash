@@ -16,7 +16,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Modeless Alt shortcuts for pane focus, selection, broadcast, settings, and quit.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
 - Built-in launch profiles for common CLI coding agents.
-- Guided orchestration composer for choosing folders, `vibe` auth profiles, and named setups.
+- Guided orchestration composer for choosing folders and `vibe` auth profiles.
 
 ## Install With npm
 
@@ -76,7 +76,7 @@ On first launch, if no default profile is configured, GridBash opens an animated
 %APPDATA%\GridBash\config.toml
 ```
 
-The composer starts with the directory you launched `gridbash` from. It lets you choose folders, select logged-in `vibe` profiles, preview the pane-to-folder assignment, and optionally save the setup by name. GridBash uses `vibe run <profile> --` under the hood for isolated Claude/Codex auth.
+The composer starts with the directory you launched `gridbash` from. It lets you choose folders, select logged-in `vibe` profiles, preview the pane-to-folder assignment, and launch. GridBash uses `vibe run <profile> --` under the hood for isolated Claude/Codex auth.
 
 Set the default terminal profile:
 
@@ -119,7 +119,6 @@ Passing grid, count, profile, or cwd arguments bypasses the composer and uses th
 | Space | Toggle an agent profile |
 | a | Add a folder on the folder screen; select all ready agents on the agent screen |
 | d | Remove a selected folder |
-| s | Save the previewed setup by name and launch |
 | Esc | Go back |
 | q | Quit from the composer |
 
@@ -168,13 +167,6 @@ profile = "powershell"
 command = "codex"
 args = ["--model", "gpt-5.5"]
 title = "Codex Review"
-
-[setups.gridbash-swarm]
-agents = ["claude-1", "claude-2", "codex-2"]
-
-[[setups.gridbash-swarm.folders]]
-name = "gridbash"
-path = "C:\\Users\\Jason\\Documents\\GitHub\\gridbash"
 ```
 
 Then run:

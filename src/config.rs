@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::{profiles::Profile, setup::SavedSetup};
+use crate::profiles::Profile;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -16,8 +16,6 @@ pub struct Config {
     pub defaults: Defaults,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, Profile>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub setups: BTreeMap<String, SavedSetup>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -60,10 +58,6 @@ impl Config {
         self.defaults.profile = Some(profile.into());
     }
 
-    pub fn save_setup(&mut self, name: impl Into<String>, setup: SavedSetup) {
-        self.setups.insert(name.into(), setup);
-    }
-
     pub fn default_path() -> Option<PathBuf> {
         ProjectDirs::from("", "", "GridBash").map(|dirs| dirs.config_dir().join("config.toml"))
     }
@@ -96,24 +90,5 @@ mod tests {
         .expect("parse config");
 
         assert_eq!(config.defaults.profile.as_deref(), Some("powershell"));
-    }
-
-    #[test]
-    fn parses_named_setups() {
-        let config: Config = toml::from_str(
-            r#"
-            [setups.sample]
-            agents = ["claude-1", "codex-2"]
-
-            [[setups.sample.folders]]
-            name = "gridbash"
-            path = "C:\\Users\\Jason\\Documents\\GitHub\\gridbash"
-            "#,
-        )
-        .expect("parse config");
-
-        let setup = config.setups.get("sample").expect("sample setup");
-        assert_eq!(setup.agents, vec!["claude-1", "codex-2"]);
-        assert_eq!(setup.folders[0].name, "gridbash");
     }
 }

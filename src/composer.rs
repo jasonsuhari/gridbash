@@ -1,11 +1,6 @@
-use std::{
-    collections::BTreeSet,
-    io::Stdout,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{collections::BTreeSet, io::Stdout, path::PathBuf, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
 use ratatui::{
     Frame, Terminal,
@@ -17,8 +12,7 @@ use ratatui::{
 };
 
 use crate::{
-    config::Config,
-    setup::{LaunchPlan, SavedSetup, sanitize_setup_name, setup_from_selection},
+    setup::{LaunchPlan, LaunchSelection, launch_selection_from},
     vibe::{self, VibeProfile},
 };
 
@@ -28,33 +22,21 @@ pub struct Composer {
     stage: Stage,
     vibe_profiles: Vec<VibeProfile>,
     vibe_error: Option<String>,
-    saved_names: Vec<String>,
-    home_cursor: usize,
     folders: Vec<PathBuf>,
     folder_cursor: usize,
     path_input: String,
     agent_cursor: usize,
     selected_agents: BTreeSet<usize>,
-    active_setup: Option<ActiveSetup>,
-    name_input: String,
+    preview_selection: Option<LaunchSelection>,
     status: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
-    Home,
     Folders,
     PathInput,
     Agents,
     Preview,
-    NameInput,
-}
-
-#[derive(Debug, Clone)]
-struct ActiveSetup {
-    name: Option<String>,
-    setup: SavedSetup,
-    from_saved: bool,
 }
 
 enum ComposerEvent {
@@ -64,39 +46,30 @@ enum ComposerEvent {
 }
 
 impl Composer {
-    pub fn new(config: &Config, current_dir: PathBuf) -> Self {
+    pub fn new(current_dir: PathBuf) -> Self {
         let (vibe_profiles, vibe_error) = match vibe::load_profiles() {
             Ok(profiles) => (profiles, None),
             Err(error) => (Vec::new(), Some(format!("{error:#}"))),
         };
         let selected_agents = default_selected_agents(&vibe_profiles);
-        let saved_names = config.setups.keys().cloned().collect::<Vec<_>>();
 
         Self {
-            stage: Stage::Home,
+            stage: Stage::Folders,
             vibe_profiles,
             vibe_error,
-            saved_names,
-            home_cursor: 0,
             folders: vec![current_dir],
             folder_cursor: 0,
             path_input: String::new(),
             agent_cursor: 0,
             selected_agents,
-            active_setup: None,
-            name_input: String::new(),
-            status: "Enter selects | q quits".into(),
+            preview_selection: None,
+            status: "Folders: Enter continues | a adds | d removes".into(),
         }
     }
 
-    pub fn run(
-        &mut self,
-        terminal: &mut ComposerTerminal,
-        config: &mut Config,
-        config_path: Option<&Path>,
-    ) -> Result<Option<LaunchPlan>> {
+    pub fn run(&mut self, terminal: &mut ComposerTerminal) -> Result<Option<LaunchPlan>> {
         loop {
-            terminal.draw(|frame| self.draw(frame, config))?;
+            terminal.draw(|frame| self.draw(frame))?;
 
             if !event::poll(Duration::from_millis(50))? {
                 continue;
@@ -104,9 +77,7 @@ impl Composer {
 
             let event = event::read()?;
             let result = match event {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    self.handle_key(key, config, config_path)?
-                }
+                Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key)?,
                 Event::Paste(text) => self.handle_paste(text),
                 _ => ComposerEvent::Continue,
             };
@@ -119,23 +90,16 @@ impl Composer {
         }
     }
 
-    fn handle_key(
-        &mut self,
-        key: KeyEvent,
-        config: &mut Config,
-        config_path: Option<&Path>,
-    ) -> Result<ComposerEvent> {
+    fn handle_key(&mut self, key: KeyEvent) -> Result<ComposerEvent> {
         if matches!(key.code, KeyCode::Char('q')) && self.stage != Stage::PathInput {
             return Ok(ComposerEvent::Quit);
         }
 
         match self.stage {
-            Stage::Home => self.handle_home_key(key, config),
             Stage::Folders => self.handle_folders_key(key),
             Stage::PathInput => self.handle_path_input_key(key),
             Stage::Agents => self.handle_agents_key(key),
             Stage::Preview => self.handle_preview_key(key),
-            Stage::NameInput => self.handle_name_input_key(key, config, config_path),
         }
     }
 
@@ -146,39 +110,12 @@ impl Composer {
         ComposerEvent::Continue
     }
 
-    fn handle_home_key(&mut self, key: KeyEvent, config: &Config) -> Result<ComposerEvent> {
-        let max = self.saved_names.len();
-        match key.code {
-            KeyCode::Up => self.home_cursor = self.home_cursor.saturating_sub(1),
-            KeyCode::Down => self.home_cursor = (self.home_cursor + 1).min(max),
-            KeyCode::Enter => {
-                if self.vibe_error.is_some() {
-                    self.status = "Install or fix vibe before launching orchestrated agents".into();
-                    return Ok(ComposerEvent::Continue);
-                }
-
-                if self.home_cursor == 0 {
-                    self.stage = Stage::Folders;
-                    self.status = "Folders: Enter continues | a adds | d removes".into();
-                } else if let Some(name) = self.saved_names.get(self.home_cursor - 1) {
-                    if let Some(setup) = config.setups.get(name).cloned() {
-                        self.active_setup = Some(ActiveSetup {
-                            name: Some(name.clone()),
-                            setup,
-                            from_saved: true,
-                        });
-                        self.stage = Stage::Preview;
-                        self.status = "Enter launches | Esc returns".into();
-                    }
-                }
-            }
-            _ => {}
+    fn handle_folders_key(&mut self, key: KeyEvent) -> Result<ComposerEvent> {
+        if let Some(error) = &self.vibe_error {
+            self.status = format!("vibe is required before launch: {error}");
+            return Ok(ComposerEvent::Continue);
         }
 
-        Ok(ComposerEvent::Continue)
-    }
-
-    fn handle_folders_key(&mut self, key: KeyEvent) -> Result<ComposerEvent> {
         match key.code {
             KeyCode::Up => self.folder_cursor = self.folder_cursor.saturating_sub(1),
             KeyCode::Down => {
@@ -204,7 +141,7 @@ impl Composer {
                     self.status = "Agents: Space toggles | Enter previews".into();
                 }
             }
-            KeyCode::Esc => self.stage = Stage::Home,
+            KeyCode::Esc => self.status = "Press q to quit".into(),
             _ => {}
         }
 
@@ -257,14 +194,10 @@ impl Composer {
                 if agents.is_empty() {
                     self.status = "Select at least one logged-in vibe profile".into();
                 } else {
-                    let setup = setup_from_selection(self.folders.clone(), agents)?;
-                    self.active_setup = Some(ActiveSetup {
-                        name: None,
-                        setup,
-                        from_saved: false,
-                    });
+                    self.preview_selection =
+                        Some(launch_selection_from(self.folders.clone(), agents)?);
                     self.stage = Stage::Preview;
-                    self.status = "Enter launches | s saves and launches | Esc returns".into();
+                    self.status = "Enter launches | Esc returns".into();
                 }
             }
             KeyCode::Esc => self.stage = Stage::Folders,
@@ -276,88 +209,22 @@ impl Composer {
 
     fn handle_preview_key(&mut self, key: KeyEvent) -> Result<ComposerEvent> {
         match key.code {
-            KeyCode::Enter => self.launch_active_setup(),
-            KeyCode::Char('s') => {
-                if self
-                    .active_setup
-                    .as_ref()
-                    .is_some_and(|setup| setup.from_saved)
-                {
-                    self.status = "Saved setup is already named; press Enter to launch".into();
-                } else {
-                    self.name_input.clear();
-                    self.stage = Stage::NameInput;
-                    self.status = "Name this setup, then Enter".into();
-                }
-                Ok(ComposerEvent::Continue)
-            }
+            KeyCode::Enter => self.launch_preview(),
             KeyCode::Esc => {
-                self.stage = if self
-                    .active_setup
-                    .as_ref()
-                    .is_some_and(|setup| setup.from_saved)
-                {
-                    Stage::Home
-                } else {
-                    Stage::Agents
-                };
+                self.stage = Stage::Agents;
                 Ok(ComposerEvent::Continue)
             }
             _ => Ok(ComposerEvent::Continue),
         }
     }
 
-    fn handle_name_input_key(
-        &mut self,
-        key: KeyEvent,
-        config: &mut Config,
-        config_path: Option<&Path>,
-    ) -> Result<ComposerEvent> {
-        match key.code {
-            KeyCode::Enter => {
-                let Some(name) = sanitize_setup_name(&self.name_input) else {
-                    self.status = "Use at least one letter or number in the setup name".into();
-                    return Ok(ComposerEvent::Continue);
-                };
-                let Some(active) = &mut self.active_setup else {
-                    self.stage = Stage::Home;
-                    return Ok(ComposerEvent::Continue);
-                };
-                active.name = Some(name.clone());
-                config.save_setup(name.clone(), active.setup.clone());
-                config
-                    .save(config_path)
-                    .context("failed to save named setup")?;
-                if !self.saved_names.iter().any(|existing| existing == &name) {
-                    self.saved_names.push(name.clone());
-                    self.saved_names.sort();
-                }
-                self.launch_active_setup()
-            }
-            KeyCode::Esc => {
-                self.name_input.clear();
-                self.stage = Stage::Preview;
-                Ok(ComposerEvent::Continue)
-            }
-            KeyCode::Backspace => {
-                self.name_input.pop();
-                Ok(ComposerEvent::Continue)
-            }
-            KeyCode::Char(ch) => {
-                self.name_input.push(ch);
-                Ok(ComposerEvent::Continue)
-            }
-            _ => Ok(ComposerEvent::Continue),
-        }
-    }
-
-    fn launch_active_setup(&mut self) -> Result<ComposerEvent> {
-        let Some(active) = &self.active_setup else {
-            self.status = "No setup selected".into();
+    fn launch_preview(&mut self) -> Result<ComposerEvent> {
+        let Some(preview) = &self.preview_selection else {
+            self.status = "No launch preview selected".into();
             return Ok(ComposerEvent::Continue);
         };
 
-        match active.setup.launch_plan() {
+        match preview.launch_plan() {
             Ok(plan) => Ok(ComposerEvent::Launch(plan)),
             Err(error) => {
                 self.status = format!("{error:#}");
@@ -399,7 +266,7 @@ impl Composer {
             .collect()
     }
 
-    fn draw(&self, frame: &mut Frame<'_>, config: &Config) {
+    fn draw(&self, frame: &mut Frame<'_>) {
         let area = frame.area();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -412,51 +279,31 @@ impl Composer {
 
         frame.render_widget(header(), chunks[0]);
         match self.stage {
-            Stage::Home => self.draw_home(frame, chunks[1], config),
             Stage::Folders => self.draw_folders(frame, chunks[1]),
             Stage::PathInput => self.draw_path_input(frame, chunks[1]),
             Stage::Agents => self.draw_agents(frame, chunks[1]),
             Stage::Preview => self.draw_preview(frame, chunks[1]),
-            Stage::NameInput => self.draw_name_input(frame, chunks[1]),
         }
         frame.render_widget(status_bar(&self.status), chunks[2]);
     }
 
-    fn draw_home(&self, frame: &mut Frame<'_>, area: Rect, config: &Config) {
-        let mut lines = Vec::new();
+    fn draw_folders(&self, frame: &mut Frame<'_>, area: Rect) {
         if let Some(error) = &self.vibe_error {
-            lines.push(Line::from(Span::styled(
-                "vibe is required for orchestration",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            )));
-            lines.push(Line::from(""));
-            lines.push(Line::from(error.clone()));
-            lines.push(Line::from(""));
-            lines.push(Line::from("Install or repair vibe, then reopen GridBash."));
-            lines.push(Line::from("Press q to quit."));
-            frame.render_widget(panel("Setup", lines), area);
+            let lines = vec![
+                Line::from(Span::styled(
+                    "vibe is required for orchestration",
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(error.clone()),
+                Line::from(""),
+                Line::from("Install or repair vibe, then reopen GridBash."),
+                Line::from("Press q to quit."),
+            ];
+            frame.render_widget(panel("Launch", lines), area);
             return;
         }
 
-        lines.push(selectable_line(self.home_cursor == 0, "New setup"));
-        for (index, name) in self.saved_names.iter().enumerate() {
-            let selected = self.home_cursor == index + 1;
-            let summary = config
-                .setups
-                .get(name)
-                .map(setup_summary)
-                .unwrap_or_else(|| "saved setup".into());
-            lines.push(selectable_line(selected, &format!("{name}  {summary}")));
-        }
-        if self.saved_names.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from("No named setups yet."));
-        }
-
-        frame.render_widget(panel("Choose Setup", lines), area);
-    }
-
-    fn draw_folders(&self, frame: &mut Frame<'_>, area: Rect) {
         let mut lines = vec![Line::from("Choose where agents should work.")];
         lines.push(Line::from(""));
         for (index, folder) in self.folders.iter().enumerate() {
@@ -524,18 +371,17 @@ impl Composer {
 
     fn draw_preview(&self, frame: &mut Frame<'_>, area: Rect) {
         let mut lines = Vec::new();
-        let Some(active) = &self.active_setup else {
+        let Some(preview) = &self.preview_selection else {
             frame.render_widget(
-                panel("Preview", vec![Line::from("No setup selected")]),
+                panel("Preview", vec![Line::from("No launch preview selected")]),
                 area,
             );
             return;
         };
 
-        let title = active.name.as_deref().unwrap_or("Unsaved setup");
-        lines.push(Line::from(format!("Setup: {title}")));
+        lines.push(Line::from("Launch preview"));
         lines.push(Line::from(""));
-        match active.setup.launch_plan() {
+        match preview.launch_plan() {
             Ok(plan) => {
                 for (index, pane) in plan.panes.iter().enumerate() {
                     lines.push(Line::from(format!(
@@ -560,26 +406,9 @@ impl Composer {
             ))),
         }
         lines.push(Line::from(""));
-        lines.push(Line::from(
-            "Enter launches. s saves and launches. Esc returns.",
-        ));
+        lines.push(Line::from("Enter launches. Esc returns."));
 
         frame.render_widget(panel("Preview", lines), area);
-    }
-
-    fn draw_name_input(&self, frame: &mut Frame<'_>, area: Rect) {
-        let lines = vec![
-            Line::from("Name this setup for future launches."),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled("> ", Style::default().fg(Color::Cyan)),
-                Span::raw(self.name_input.clone()),
-            ]),
-            Line::from(""),
-            Line::from("Names are saved in lowercase kebab-case. Esc returns."),
-        ];
-
-        frame.render_widget(panel("Save Setup", lines), area);
     }
 }
 
@@ -592,14 +421,6 @@ fn default_selected_agents(profiles: &[VibeProfile]) -> BTreeSet<usize> {
         .collect()
 }
 
-fn setup_summary(setup: &SavedSetup) -> String {
-    format!(
-        "{} folder(s), {} agent(s)",
-        setup.folders.len(),
-        setup.agents.len()
-    )
-}
-
 fn header<'a>() -> Paragraph<'a> {
     Paragraph::new(vec![
         Line::from(vec![Span::styled(
@@ -609,7 +430,7 @@ fn header<'a>() -> Paragraph<'a> {
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Line::from("Guided agent setup"),
+        Line::from("Guided agent launch"),
     ])
     .style(Style::default().bg(Color::Rgb(11, 15, 20)))
 }
