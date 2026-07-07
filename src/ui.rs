@@ -8,7 +8,7 @@ use ratatui::{
 use std::path::Path;
 use vt100::Cell;
 
-use crate::app::{App, SettingsRow};
+use crate::app::{App, SettingsRow, TabLabel};
 
 pub struct DrawState {
     pub grid_area: Rect,
@@ -19,12 +19,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
         .split(area);
 
-    let grid_area = chunks[0];
-    let status_area = chunks[1];
+    let tab_area = chunks[0];
+    let grid_area = chunks[1];
+    let status_area = chunks[2];
     let rects = app.pane_rects(grid_area);
+
+    render_tabs(frame, tab_area, &app.tab_labels());
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -127,10 +134,62 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         render_settings(frame, area, &app.settings_rows());
     }
 
+    if app.rename_open() {
+        render_rename(frame, area, app.rename_input());
+    }
+
     DrawState {
         grid_area,
         pane_rects: rects,
     }
+}
+
+fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel]) {
+    let mut spans = vec![Span::styled(
+        " GridBash ",
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    spans.push(Span::raw(" "));
+    for (index, tab) in tabs.iter().enumerate() {
+        let marker = if tab.exited {
+            "!"
+        } else if tab.activity && !tab.active {
+            "*"
+        } else {
+            ""
+        };
+        let label = format!(" {}:{}{} ", index + 1, short_label(&tab.title, 18), marker);
+        let style = if tab.active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else if tab.exited {
+            Style::default().fg(Color::Red)
+        } else if tab.activity {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        spans.push(Span::styled(label, style));
+    }
+
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled("Alt+t", Style::default().fg(Color::Yellow)));
+    spans.push(Span::raw(" next  "));
+    spans.push(Span::styled("Alt+n", Style::default().fg(Color::Yellow)));
+    spans.push(Span::raw(" new  "));
+    spans.push(Span::styled("Alt+r", Style::default().fg(Color::Yellow)));
+    spans.push(Span::raw(" rename"));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(11, 15, 20))),
+        area,
+    );
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow]) {
@@ -171,6 +230,45 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow]) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .title(" Settings ");
+    frame.render_widget(
+        Paragraph::new(lines).block(block).style(
+            Style::default()
+                .fg(Color::Rgb(230, 237, 243))
+                .bg(Color::Rgb(11, 15, 20)),
+        ),
+        modal,
+    );
+}
+
+fn render_rename(frame: &mut Frame<'_>, area: Rect, input: &str) {
+    let modal = centered_rect(area, 60, 28);
+    frame.render_widget(Clear, modal);
+
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            "Rename tab",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Yellow)),
+            Span::raw(input.to_string()),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(" save  "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw(" cancel"),
+        ]),
+    ];
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Tab ");
     frame.render_widget(
         Paragraph::new(lines).block(block).style(
             Style::default()
@@ -226,6 +324,15 @@ fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
         ])
         .split(vertical[1]);
     horizontal[1]
+}
+
+fn short_label(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut label = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        label.push('~');
+    }
+    label
 }
 
 fn folder_label(cwd: &Path) -> String {

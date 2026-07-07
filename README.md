@@ -10,6 +10,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 
 - Real PTY-backed panes through Windows ConPTY via `portable-pty`.
 - Up to 100 panes in one terminal process.
+- Multiple tabbed grids in one terminal process.
 - Configurable default terminal profile: Git Bash, PowerShell, cmd, agents, or custom.
 - Native host-terminal text selection with no mouse-capture mode.
 - Normal terminal keys pass through to focused or broadcast panes.
@@ -132,6 +133,9 @@ GridBash does not capture the mouse, so normal drag selection and copy behavior 
 | Drag mouse | Select/copy terminal text in the host terminal |
 | Alt+Left / Alt+Right | Focus previous / next pane |
 | Alt+Up / Alt+Down | Focus pane above / below |
+| Alt+t | Switch to the next tab |
+| Alt+n | Open the composer and launch a new tab |
+| Alt+r | Rename the current tab |
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+b | Toggle selected broadcast mode |
