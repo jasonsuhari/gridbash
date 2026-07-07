@@ -8,6 +8,7 @@ repository = "https://github.com/jasonsuhari/gridbash"
 
 [dependencies]
 anyhow = "1.0"
+base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 directories = "6.0"

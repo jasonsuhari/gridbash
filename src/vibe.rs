@@ -17,6 +17,7 @@ pub fn load_profiles() -> Result<Vec<VibeProfile>> {
         command: "vibe".into(),
         args: vec!["profiles".into()],
         title: None,
+        agent_kind: None,
     }
     .resolved_command()
     .context("vibe is required for GridBash orchestration, but it was not found")?;

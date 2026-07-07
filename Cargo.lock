@@ -591,6 +591,7 @@ name = "gridbash"
 version = "0.1.5"
 dependencies = [
  "anyhow",
+ "base64",
  "clap",
  "crossterm",
  "directories",
