@@ -604,10 +604,6 @@ impl App {
         self.broadcast
     }
 
-    pub fn quiet_pane_count(&self) -> usize {
-        self.panes.iter().filter(|pane| pane.output_quiet()).count()
-    }
-
     pub fn status(&self) -> &str {
         &self.status
     }

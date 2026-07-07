@@ -15,6 +15,9 @@ pub struct DrawState {
     pub pane_rects: Vec<Rect>,
 }
 
+const QUIET_MARKER: &str = " ◦";
+const QUIET_BORDER: Color = Color::Rgb(78, 96, 122);
+
 pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
     let chunks = Layout::default()
@@ -46,7 +49,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         } else if pane.active {
             Style::default().fg(Color::Green)
         } else if pane.output_quiet() {
-            Style::default().fg(Color::Blue)
+            Style::default().fg(QUIET_BORDER)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -55,10 +58,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             " exited"
         } else if pane.active {
             " active"
-        } else if pane.output_quiet() {
-            " quiet"
         } else if selected {
             " selected"
+        } else {
+            ""
+        };
+        let quiet_marker = if pane.output_quiet() {
+            QUIET_MARKER
         } else {
             ""
         };
@@ -68,9 +74,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             .map(label_name)
             .unwrap_or_else(|| folder_label(pane.cwd()));
         let title = if let Some(worktree) = app.pane_worktree(index) {
-            format!(" {} | {} | {}{} ", index + 1, folder, worktree, badge)
+            format!(
+                " {}{} | {} | {}{} ",
+                index + 1,
+                quiet_marker,
+                folder,
+                worktree,
+                badge
+            )
         } else {
-            format!(" {} | {}{} ", index + 1, folder, badge)
+            format!(" {}{} | {}{} ", index + 1, quiet_marker, folder, badge)
         };
 
         let block = Block::default()
@@ -118,8 +131,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         ),
         Span::raw(" | "),
         Span::raw(format!("{} selected", app.selected().len())),
-        Span::raw(" | "),
-        Span::raw(format!("{} quiet", app.quiet_pane_count())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(" | Alt+q quit"),
