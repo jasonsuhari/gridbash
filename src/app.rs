@@ -316,10 +316,8 @@ impl App {
                         }
                     }
                     Event::Resize(_, _) => {}
-                    Event::Paste(text) => {
-                        if !self.settings.open {
-                            self.route_input(text.as_bytes())?;
-                        }
+                    Event::Paste(text) if !self.settings.open => {
+                        self.route_input(text.as_bytes())?;
                     }
                     _ => {}
                 }
