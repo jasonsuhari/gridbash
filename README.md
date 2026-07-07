@@ -148,6 +148,28 @@ With `--worktrees`, GridBash creates or reuses `.worktrees/gridbash-<base>-NN` f
 
 You can also run `gridbash --worktrees` and choose the grid dimensions in the startup picker.
 
+## Agent Control MCP
+
+GridBash can expose a local, opt-in control API for agents running inside its panes:
+
+```powershell
+gridbash --agent-api 2x3 --profile codex
+```
+
+When enabled, child panes receive `GRIDBASH_CONTROL_ADDR`, `GRIDBASH_CONTROL_TOKEN`, and `GRIDBASH_PANE_INDEX`. Configure an agent MCP server command to run:
+
+```powershell
+gridbash --mcp
+```
+
+The MCP server exposes:
+
+- `gridbash_show_image` to display a local png, jpg, gif, or webp in a GridBash overlay.
+- `gridbash_send_command` to send command text to one or more 1-based pane numbers.
+- `gridbash_set_status` to update the GridBash status bar.
+
+The control API binds to localhost, uses a per-session token, and is off by default.
+
 ## Startup Picker Controls
 
 | Input | Action |

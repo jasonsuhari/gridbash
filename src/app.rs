@@ -24,6 +24,8 @@ use crate::{
     cli::{Cli, GridMode},
     composer::Composer,
     config::Config,
+    control::{self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse},
+    image_preview::{self, ImagePreview},
     layout::{GridLayout, GridSize, PaneId, pane_at},
     profiles::find_profile,
     pty::{PtyEvent, PtyPane},
@@ -53,6 +55,9 @@ pub struct App {
     sleeping: BTreeSet<usize>,
     rects: Vec<Rect>,
     mouse_enabled: bool,
+    control_handle: Option<ControlHandle>,
+    control_rx: Option<std_mpsc::Receiver<ControlEnvelope>>,
+    image_overlay: Option<ImagePreview>,
     settings: SettingsState,
     rename: RenamePaneState,
     status: String,
@@ -409,6 +414,28 @@ impl App {
             });
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (usage_tx, usage_rx) = std_mpsc::channel();
+        let agent_api_enabled = cli.agent_api || cli.agent_api_port != 0;
+        let (control_handle, control_rx) = if agent_api_enabled {
+            let (control_tx, control_rx) = std_mpsc::channel();
+            (
+                Some(control::start_control_server(
+                    cli.agent_api_port,
+                    control_tx,
+                )?),
+                Some(control_rx),
+            )
+        } else {
+            (None, None)
+        };
+        let base_status = if mouse_enabled {
+            "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
+        } else {
+            "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
+        };
+        let status = control_handle
+            .as_ref()
+            .map(|control| format!("agent API {} | {base_status}", control.endpoint()))
+            .unwrap_or_else(|| base_status.into());
 
         Ok(Self {
             config,
@@ -424,15 +451,12 @@ impl App {
             sleeping: BTreeSet::new(),
             rects: Vec::new(),
             mouse_enabled,
+            control_handle,
+            control_rx,
+            image_overlay: None,
             settings: SettingsState::default(),
             rename: RenamePaneState::default(),
-            status: if mouse_enabled {
-                "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
-                    .into()
-            } else {
-                "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
-                    .into()
-            },
+            status,
             next_pane_id: 0,
             event_tx,
             event_rx,
@@ -510,16 +534,34 @@ impl App {
         let launch = spec.resolved_command()?;
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
+        let pane_index = self.panes.len();
+        let extra_env = self.pane_env(pane_index);
         let pane = PtyPane::spawn(
             id,
             0,
             &launch.command,
             &launch.args,
             &spec.cwd,
+            &extra_env,
             self.event_tx.clone(),
         )?;
         self.panes.push(pane);
         Ok(())
+    }
+
+    fn pane_env(&self, pane_index: usize) -> Vec<(String, String)> {
+        let Some(control) = &self.control_handle else {
+            return Vec::new();
+        };
+
+        vec![
+            (
+                "GRIDBASH_CONTROL_ADDR".into(),
+                control.endpoint().to_string(),
+            ),
+            ("GRIDBASH_CONTROL_TOKEN".into(), control.token().to_string()),
+            ("GRIDBASH_PANE_INDEX".into(), (pane_index + 1).to_string()),
+        ]
     }
 
     fn run_loop(&mut self, terminal: &mut Tui) -> Result<()> {
@@ -529,6 +571,7 @@ impl App {
         loop {
             needs_render |= self.drain_pty_events();
             needs_render |= self.drain_usage_events();
+            needs_render |= self.drain_control_events();
             needs_render |= self.decay_activity();
 
             if needs_render {
@@ -659,6 +702,135 @@ impl App {
         changed
     }
 
+    fn drain_control_events(&mut self) -> bool {
+        let mut changed = false;
+
+        loop {
+            let envelope = self.control_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+            let Some(envelope) = envelope else {
+                break;
+            };
+
+            let response = self.handle_control_command(envelope.command);
+            changed = true;
+            let _ = envelope.response_tx.send(response);
+        }
+
+        changed
+    }
+
+    fn handle_control_command(&mut self, command: ControlCommand) -> ControlResponse {
+        match command {
+            ControlCommand::SetStatus { message } => self.set_control_status(message),
+            ControlCommand::SendCommand {
+                panes,
+                command,
+                submit,
+            } => self.send_control_command(&panes, &command, submit),
+            ControlCommand::ShowImage { path, title } => self.show_control_image(path, title),
+        }
+    }
+
+    fn set_control_status(&mut self, message: String) -> ControlResponse {
+        let message = truncate_chars(message.trim(), 180);
+        if message.is_empty() {
+            return ControlResponse::error("status message cannot be empty");
+        }
+
+        self.status = message.clone();
+        ControlResponse::ok(format!("status set: {message}"))
+    }
+
+    fn send_control_command(
+        &mut self,
+        pane_numbers: &[usize],
+        command: &str,
+        submit: bool,
+    ) -> ControlResponse {
+        let targets = match self.control_pane_indices(pane_numbers) {
+            Ok(targets) => targets,
+            Err(error) => return ControlResponse::error(format!("{error:#}")),
+        };
+        let command_bytes = command.as_bytes();
+
+        for index in &targets {
+            let Some(pane) = self.panes.get(*index) else {
+                return ControlResponse::error(format!("pane {} is unavailable", index + 1));
+            };
+            if !command_bytes.is_empty()
+                && let Err(error) = pane.write(command_bytes)
+            {
+                return ControlResponse::error(format!(
+                    "failed to send command to pane {}: {error:#}",
+                    index + 1
+                ));
+            }
+            if submit && let Err(error) = pane.write(b"\r") {
+                return ControlResponse::error(format!(
+                    "failed to submit command in pane {}: {error:#}",
+                    index + 1
+                ));
+            }
+        }
+
+        let panes = pane_number_list(&targets);
+        self.status = if submit {
+            format!("agent sent command to pane(s) {panes}")
+        } else {
+            format!("agent wrote text to pane(s) {panes}")
+        };
+        ControlResponse::ok(self.status.clone())
+    }
+
+    fn show_control_image(
+        &mut self,
+        path: std::path::PathBuf,
+        title: Option<String>,
+    ) -> ControlResponse {
+        let preview = match image_preview::load_image_preview(&path, title, 72, 24) {
+            Ok(preview) => preview,
+            Err(error) => return ControlResponse::error(format!("{error:#}")),
+        };
+        let title = preview.title.clone();
+        let data = serde_json::json!({
+            "path": preview.path.display().to_string(),
+            "source_width": preview.source_width,
+            "source_height": preview.source_height,
+            "preview_columns": preview.cell_width,
+            "preview_rows": preview.cell_height
+        });
+
+        self.status = format!(
+            "showing image {title} ({}x{})",
+            preview.source_width, preview.source_height
+        );
+        self.image_overlay = Some(preview);
+        ControlResponse::with_data(self.status.clone(), data)
+    }
+
+    fn control_pane_indices(&self, pane_numbers: &[usize]) -> Result<Vec<usize>> {
+        if pane_numbers.is_empty() {
+            return Err(anyhow!("at least one target pane is required"));
+        }
+
+        let mut targets = BTreeSet::new();
+        for pane_number in pane_numbers {
+            if *pane_number == 0 || *pane_number > self.panes.len() {
+                return Err(anyhow!("pane {pane_number} is not available"));
+            }
+            let index = pane_number - 1;
+            if self.sleeping.contains(&index) {
+                return Err(anyhow!("pane {pane_number} is asleep"));
+            }
+            if self.panes.get(index).is_some_and(|pane| pane.exited) {
+                return Err(anyhow!("pane {pane_number} has exited"));
+            }
+            targets.insert(index);
+        }
+
+        Ok(targets.into_iter().collect())
+    }
+
     fn decay_activity(&mut self) -> bool {
         if self.last_activity_decay.elapsed() < Duration::from_millis(250) {
             return false;
@@ -673,6 +845,10 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if self.image_overlay.is_some() {
+            return Ok(self.handle_image_overlay_key(key));
+        }
+
         if self.rename.open {
             return self.handle_rename_key(key);
         }
@@ -702,6 +878,21 @@ impl App {
         } else {
             KeyOutcome::Continue
         })
+    }
+
+    fn handle_image_overlay_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return KeyOutcome::Quit;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.image_overlay = None;
+                self.status = "image closed".into();
+                KeyOutcome::Render
+            }
+            _ => KeyOutcome::Continue,
+        }
     }
 
     fn handle_app_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
@@ -1410,6 +1601,10 @@ impl App {
         self.settings.open
     }
 
+    pub fn image_overlay_view(&self) -> Option<&ImagePreview> {
+        self.image_overlay.as_ref()
+    }
+
     pub fn settings_rows(&self) -> Vec<SettingsRow> {
         self.settings.rows()
     }
@@ -1779,6 +1974,14 @@ fn awake_input_targets_for(
 
 fn pane_word(count: usize) -> &'static str {
     if count == 1 { "pane" } else { "panes" }
+}
+
+fn pane_number_list(indices: &[usize]) -> String {
+    indices
+        .iter()
+        .map(|index| (index + 1).to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn control_byte(ch: char) -> Option<u8> {

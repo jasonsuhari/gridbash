@@ -54,6 +54,7 @@ impl PtyPane {
         command: &Path,
         args: &[String],
         cwd: &Path,
+        extra_env: &[(String, String)],
         event_tx: mpsc::UnboundedSender<PtyEvent>,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
@@ -73,6 +74,9 @@ impl PtyPane {
         command_builder.cwd(cwd);
         command_builder.env("TERM", "xterm-256color");
         command_builder.env("COLORTERM", "truecolor");
+        for (key, value) in extra_env {
+            command_builder.env(key, value);
+        }
 
         let child = pair
             .slave
@@ -315,6 +319,7 @@ mod tests {
                 "set /p GRIDBASH_IN= & echo GRIDBASH_READY:!GRIDBASH_IN!".to_string(),
             ],
             &cwd,
+            &[],
             event_tx,
         )
         .expect("spawn cmd pty");

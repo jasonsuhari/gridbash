@@ -8,7 +8,10 @@ use ratatui::{
 use std::path::Path;
 use vt100::Cell;
 
-use crate::app::{App, PaneSelection, RenamePaneView, SettingsRow};
+use crate::{
+    app::{App, PaneSelection, RenamePaneView, SettingsRow},
+    image_preview::ImagePreview,
+};
 
 const APP_BG: Color = Color::Rgb(11, 15, 20);
 const SETTINGS_BG: Color = Color::Rgb(9, 14, 19);
@@ -35,7 +38,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let status_area = chunks[1];
     let rects = app.pane_rects(grid_area);
     let rename_view = app.rename_pane_view();
-    let modal_open = app.settings_open() || rename_view.is_some();
+    let image_overlay = app.image_overlay_view();
+    let modal_open = app.settings_open() || rename_view.is_some() || image_overlay.is_some();
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -128,6 +132,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
     if let Some(rename) = rename_view.as_ref() {
         render_rename_pane(frame, area, rename);
+    }
+    if let Some(image) = image_overlay {
+        render_image_overlay(frame, area, image);
     }
 
     DrawState {
@@ -307,6 +314,106 @@ fn render_rename_pane(frame: &mut Frame<'_>, area: Rect, rename: &RenamePaneView
             .x
             .saturating_add(cursor.min(input_inner.width.saturating_sub(1)));
         frame.set_cursor_position((x, input_inner.y));
+    }
+}
+
+fn render_image_overlay(frame: &mut Frame<'_>, area: Rect, image: &ImagePreview) {
+    let modal = image_modal_rect(area, image);
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().fg(SETTINGS_TEXT).bg(APP_BG))
+        .title(format!(" Image | {} ", truncate_text(&image.title, 48)));
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut lines = Vec::new();
+    lines.push(image_meta_line(image, inner.width));
+    lines.push(Line::from(""));
+
+    let available_image_rows = inner.height.saturating_sub(4) as usize;
+    let max_columns = inner.width as usize;
+    for row in image.rows.iter().take(available_image_rows) {
+        lines.push(image_row(row, max_columns));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        command_key("Esc"),
+        Span::styled(" close  ", Style::default().fg(Color::Gray)),
+        command_key("q"),
+        Span::styled(" close", Style::default().fg(Color::Gray)),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(SETTINGS_TEXT).bg(APP_BG)),
+        inner,
+    );
+}
+
+fn image_meta_line(image: &ImagePreview, width: u16) -> Line<'static> {
+    let text = format!(
+        "{}x{} -> {}x{} cells | {}",
+        image.source_width,
+        image.source_height,
+        image.cell_width,
+        image.cell_height,
+        image.path.display()
+    );
+
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            truncate_text(&text, width.saturating_sub(2) as usize),
+            Style::default().fg(Color::Gray),
+        ),
+    ])
+}
+
+fn image_row(row: &[crate::image_preview::ImageCell], max_columns: usize) -> Line<'static> {
+    let spans = row
+        .iter()
+        .take(max_columns)
+        .map(|cell| {
+            Span::styled(
+                "▀",
+                Style::default()
+                    .fg(rgb(cell.upper))
+                    .bg(rgb(cell.lower))
+                    .add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    Line::from(spans)
+}
+
+fn rgb(value: [u8; 3]) -> Color {
+    Color::Rgb(value[0], value[1], value[2])
+}
+
+fn image_modal_rect(area: Rect, image: &ImagePreview) -> Rect {
+    let desired_width = image.cell_width.saturating_add(4).clamp(36, 92);
+    let desired_height = image.cell_height.saturating_add(6).clamp(10, 34);
+    let width = area.width.saturating_sub(4).min(desired_width).max(1);
+    let height = area.height.saturating_sub(2).min(desired_height).max(1);
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
     }
 }
 
