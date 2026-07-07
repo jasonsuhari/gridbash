@@ -17,6 +17,7 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use tokio::sync::mpsc;
+use vt100::Screen;
 
 use crate::{
     cli::{Cli, GridMode},
@@ -34,6 +35,7 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const MAX_PANE_NAME_CHARS: usize = 32;
+const CONVERSATION_SUMMARY_MAX_CHARS: usize = 120;
 
 pub struct App {
     config: Config,
@@ -1074,6 +1076,18 @@ impl App {
             .and_then(|pane| pane.worktree_name.as_deref())
     }
 
+    pub fn pane_conversation_footer(&self, index: usize, max_chars: usize) -> Option<String> {
+        let label = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .and_then(|pane| pane.agent_label())?;
+        let pane = self.panes.get(index)?;
+        let summary = conversation_summary(pane.screen())
+            .unwrap_or_else(|| "waiting for conversation".into());
+        Some(truncate_chars(&format!("{label} | {summary}"), max_chars))
+    }
+
     pub fn sync_pane_sizes(&mut self) {
         for (index, rect) in self.rects.iter().enumerate() {
             let Some(pane) = self.panes.get_mut(index) else {
@@ -1430,6 +1444,56 @@ mod tests {
     }
 }
 
+fn conversation_summary(screen: &Screen) -> Option<String> {
+    let (_, cols) = screen.size();
+    let mut lines = screen.rows(0, cols).collect::<Vec<_>>();
+    lines.reverse();
+
+    lines
+        .into_iter()
+        .filter_map(|line| normalize_conversation_line(&line))
+        .next()
+}
+
+fn normalize_conversation_line(line: &str) -> Option<String> {
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty()
+        || !trimmed.chars().any(char::is_alphanumeric)
+        || is_low_signal_terminal_line(trimmed)
+    {
+        return None;
+    }
+
+    Some(truncate_chars(trimmed, CONVERSATION_SUMMARY_MAX_CHARS))
+}
+
+fn is_low_signal_terminal_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower == "esc"
+        || lower == "escape"
+        || lower.contains("alt+q quit")
+        || lower.contains("ctrl+c")
+        || lower.contains("press enter")
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() && max_chars > 3 {
+        format!(
+            "{}...",
+            truncated.chars().take(max_chars - 3).collect::<String>()
+        )
+    } else {
+        truncated
+    }
+}
+
 fn setup_terminal(enable_mouse: bool) -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1458,6 +1522,7 @@ fn teardown_terminal(terminal: &mut Tui, enable_mouse: bool) -> Result<()> {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+    use vt100::Parser;
 
     #[test]
     fn pane_selection_contains_single_and_multi_line_ranges() {
@@ -1507,8 +1572,19 @@ mod selection_tests {
     }
 
     #[test]
+    fn summarizes_last_meaningful_visible_line() {
+        let mut parser = Parser::new(4, 80, 100);
+        parser.process(b"User: add tests\r\n\r\nAssistant: tests are passing\r\n");
+
+        assert_eq!(
+            conversation_summary(parser.screen()).as_deref(),
+            Some("Assistant: tests are passing")
+        );
+    }
+
+    #[test]
     fn selected_text_uses_only_the_selection_width() {
-        let mut parser = vt100::Parser::new(3, 10, 100);
+        let mut parser = Parser::new(3, 10, 100);
         parser.process(b"hello\r\nworld");
 
         let text = extract_selection_text(
@@ -1526,11 +1602,28 @@ mod selection_tests {
     }
 
     #[test]
+    fn skips_empty_and_control_hint_lines() {
+        let mut parser = Parser::new(4, 80, 100);
+        parser.process(b"Assistant: ready\r\n\r\nAlt+q quit\r\n");
+
+        assert_eq!(
+            conversation_summary(parser.screen()).as_deref(),
+            Some("Assistant: ready")
+        );
+    }
+
+    #[test]
     fn base64_encoder_handles_padding() {
         assert_eq!(base64_encode(b""), "");
         assert_eq!(base64_encode(b"f"), "Zg==");
         assert_eq!(base64_encode(b"fo"), "Zm8=");
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"pane text"), "cGFuZSB0ZXh0");
+    }
+
+    #[test]
+    fn truncates_long_footer_text() {
+        assert_eq!(truncate_chars("abcdef", 4), "a...");
+        assert_eq!(truncate_chars("abc", 4), "abc");
     }
 }

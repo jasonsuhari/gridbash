@@ -26,6 +26,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Normal terminal keys pass through to the focused pane, or to selected panes when multiple panes are selected.
 - Modeless Alt shortcuts for pane focus, selection, rename, settings, and quit.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
+- Claude, Codex, and other agent panes show a compact conversation summary in the footer line.
 - Built-in launch profiles for common CLI coding agents.
 - Startup dimension picker with a live grid preview.
 - Optional managed git worktrees so every pane can work in an isolated checkout.
