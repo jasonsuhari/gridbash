@@ -40,6 +40,8 @@ npm pack
 
 The package ships a Node command shim that launches the bundled Windows x64 `gridbash.exe`.
 
+Release automation and devlog workflow are documented in `docs/RELEASING.md`.
+
 ## Install From Source
 
 Install Rust first:

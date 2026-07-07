@@ -152,8 +152,6 @@ pub fn sanitize_setup_name(value: &str) -> Option<String> {
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
                 ch.to_ascii_lowercase()
-            } else if ch.is_whitespace() {
-                '-'
             } else {
                 '-'
             }

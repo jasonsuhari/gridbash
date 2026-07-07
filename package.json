@@ -22,7 +22,9 @@
   ],
   "scripts": {
     "build": "cargo build --release",
+    "devlog": "node npm/scripts/devlog.js",
     "prepare": "node npm/scripts/prepare.js",
+    "release": "node npm/scripts/release.js",
     "test": "cargo test"
   },
   "keywords": [

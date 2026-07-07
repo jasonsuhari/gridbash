@@ -312,10 +312,8 @@ impl App {
                         }
                     }
                     Event::Resize(_, _) => {}
-                    Event::Paste(text) => {
-                        if !self.settings.open {
-                            self.route_input(text.as_bytes())?;
-                        }
+                    Event::Paste(text) if !self.settings.open => {
+                        self.route_input(text.as_bytes())?;
                     }
                     _ => {}
                 }
@@ -374,10 +372,10 @@ impl App {
             return self.handle_settings_key(key);
         }
 
-        if key.modifiers.contains(KeyModifiers::ALT) {
-            if let Some(quit) = self.handle_app_key(key)? {
-                return Ok(quit);
-            }
+        if key.modifiers.contains(KeyModifiers::ALT)
+            && let Some(quit) = self.handle_app_key(key)?
+        {
+            return Ok(quit);
         }
 
         if let Some(bytes) = terminal_key_bytes(key) {

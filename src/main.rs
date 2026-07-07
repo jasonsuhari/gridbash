@@ -42,10 +42,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if onboarding::should_run(&cli, &config) {
-        if onboarding::run(&mut config, cli.config.as_deref())? == OnboardingResult::Quit {
-            return Ok(());
-        }
+    if onboarding::should_run(&cli, &config)
+        && onboarding::run(&mut config, cli.config.as_deref())? == OnboardingResult::Quit
+    {
+        return Ok(());
     }
 
     let mut app = App::new(cli, config)?;

@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Check npm token
+        shell: pwsh
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if (-not $env:NODE_AUTH_TOKEN) {
+            throw "Set the NPM_TOKEN repository secret before publishing releases."
+          }
+
+      - run: cargo fmt --check
+
+      - run: cargo clippy -- -D warnings
+
+      - run: cargo test
+
+      - run: node npm/scripts/prepare.js
+
+      - name: Pack npm package
+        id: pack
+        shell: pwsh
+        run: |
+          $raw = npm pack --json
+          $pack = ($raw | ConvertFrom-Json)[0].filename
+          "tarball=$pack" >> $env:GITHUB_OUTPUT
+
+      - name: Resolve release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $notes = "docs/releases/$tag.md"
+          if (-not (Test-Path $notes)) {
+            "# $tag`n`nAutomated release for $tag." | Set-Content -Path RELEASE_NOTES.md
+            $notes = "RELEASE_NOTES.md"
+          }
+          "path=$notes" >> $env:GITHUB_OUTPUT
+
+      - name: Publish npm package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" `
+            "target/release/gridbash.exe" `
+            "${{ steps.pack.outputs.tarball }}" `
+            --title "${{ github.ref_name }}" `
+            --notes-file "${{ steps.notes.outputs.path }}" `
+            --verify-tag `
+            --latest
