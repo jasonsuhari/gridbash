@@ -43,6 +43,7 @@ pub struct PtyPane {
 }
 
 impl PtyPane {
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn(
         id: PaneId,
         generation: u64,
