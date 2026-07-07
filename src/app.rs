@@ -14,7 +14,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, style::Color};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -58,46 +58,204 @@ enum KeyOutcome {
     Quit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteRole {
+    Accent,
+    Focus,
+    Selected,
+    Active,
+    Quiet,
+    Exited,
+}
+
+impl PaletteRole {
+    const ALL: [Self; 6] = [
+        Self::Accent,
+        Self::Focus,
+        Self::Selected,
+        Self::Active,
+        Self::Quiet,
+        Self::Exited,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Accent => "Accent/chrome",
+            Self::Focus => "Focus border",
+            Self::Selected => "Selected border",
+            Self::Active => "Active border",
+            Self::Quiet => "Quiet border",
+            Self::Exited => "Exited border",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteColor {
+    Cyan,
+    Sky,
+    Blue,
+    Teal,
+    Green,
+    Yellow,
+    Amber,
+    Orange,
+    Red,
+    Magenta,
+    Gray,
+    White,
+}
+
+impl PaletteColor {
+    const ALL: [Self; 12] = [
+        Self::Cyan,
+        Self::Sky,
+        Self::Blue,
+        Self::Teal,
+        Self::Green,
+        Self::Yellow,
+        Self::Amber,
+        Self::Orange,
+        Self::Red,
+        Self::Magenta,
+        Self::Gray,
+        Self::White,
+    ];
+
+    fn color(self) -> Color {
+        match self {
+            Self::Cyan => Color::Cyan,
+            Self::Sky => Color::Rgb(88, 166, 255),
+            Self::Blue => Color::Blue,
+            Self::Teal => Color::Rgb(54, 211, 153),
+            Self::Green => Color::Green,
+            Self::Yellow => Color::Yellow,
+            Self::Amber => Color::Rgb(245, 158, 11),
+            Self::Orange => Color::Rgb(249, 115, 22),
+            Self::Red => Color::Red,
+            Self::Magenta => Color::Magenta,
+            Self::Gray => Color::Gray,
+            Self::White => Color::White,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cyan => "cyan",
+            Self::Sky => "sky",
+            Self::Blue => "blue",
+            Self::Teal => "teal",
+            Self::Green => "green",
+            Self::Yellow => "yellow",
+            Self::Amber => "amber",
+            Self::Orange => "orange",
+            Self::Red => "red",
+            Self::Magenta => "magenta",
+            Self::Gray => "gray",
+            Self::White => "white",
+        }
+    }
+
+    fn adjust(self, delta: isize) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|color| *color == self)
+            .unwrap_or_default();
+        let next = (index as isize + delta).rem_euclid(Self::ALL.len() as isize) as usize;
+        Self::ALL[next]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridPalette {
+    accent: PaletteColor,
+    focus: PaletteColor,
+    selected: PaletteColor,
+    active: PaletteColor,
+    quiet: PaletteColor,
+    exited: PaletteColor,
+}
+
+impl Default for GridPalette {
+    fn default() -> Self {
+        Self {
+            accent: PaletteColor::Cyan,
+            focus: PaletteColor::Yellow,
+            selected: PaletteColor::Cyan,
+            active: PaletteColor::Green,
+            quiet: PaletteColor::Sky,
+            exited: PaletteColor::Red,
+        }
+    }
+}
+
+impl GridPalette {
+    pub fn accent(&self) -> Color {
+        self.accent.color()
+    }
+
+    pub fn focus(&self) -> Color {
+        self.focus.color()
+    }
+
+    pub fn selected(&self) -> Color {
+        self.selected.color()
+    }
+
+    pub fn active(&self) -> Color {
+        self.active.color()
+    }
+
+    pub fn quiet(&self) -> Color {
+        self.quiet.color()
+    }
+
+    pub fn exited(&self) -> Color {
+        self.exited.color()
+    }
+
+    fn color_for(self, role: PaletteRole) -> PaletteColor {
+        match role {
+            PaletteRole::Accent => self.accent,
+            PaletteRole::Focus => self.focus,
+            PaletteRole::Selected => self.selected,
+            PaletteRole::Active => self.active,
+            PaletteRole::Quiet => self.quiet,
+            PaletteRole::Exited => self.exited,
+        }
+    }
+
+    fn adjust(&mut self, role: PaletteRole, delta: isize) {
+        let target = match role {
+            PaletteRole::Accent => &mut self.accent,
+            PaletteRole::Focus => &mut self.focus,
+            PaletteRole::Selected => &mut self.selected,
+            PaletteRole::Active => &mut self.active,
+            PaletteRole::Quiet => &mut self.quiet,
+            PaletteRole::Exited => &mut self.exited,
+        };
+        *target = (*target).adjust(delta);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SettingsRow {
     pub selected: bool,
     pub label: &'static str,
     pub value: String,
+    pub value_color: Color,
     pub hint: &'static str,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct SettingsState {
     open: bool,
     cursor: usize,
-    compact_titles: bool,
-    activity_badges: bool,
-    confirm_quit: bool,
-    pane_density: i32,
-    scrollback: i32,
-    refresh_ms: i32,
-    accent_index: usize,
-}
-
-impl Default for SettingsState {
-    fn default() -> Self {
-        Self {
-            open: false,
-            cursor: 0,
-            compact_titles: false,
-            activity_badges: true,
-            confirm_quit: false,
-            pane_density: 2,
-            scrollback: 10_000,
-            refresh_ms: 16,
-            accent_index: 0,
-        }
-    }
+    palette: GridPalette,
 }
 
 impl SettingsState {
-    const ROW_COUNT: usize = 7;
-    const ACCENTS: [&'static str; 4] = ["cyan", "yellow", "green", "magenta"];
+    const ROW_COUNT: usize = PaletteRole::ALL.len();
 
     fn move_cursor(&mut self, delta: isize) {
         let current = self.cursor as isize;
@@ -105,109 +263,32 @@ impl SettingsState {
     }
 
     fn activate(&mut self) {
-        match self.cursor {
-            0 => self.compact_titles = !self.compact_titles,
-            1 => self.activity_badges = !self.activity_badges,
-            2 => self.confirm_quit = !self.confirm_quit,
-            6 => self.adjust(1),
-            _ => self.adjust(1),
-        }
+        self.adjust(1);
     }
 
     fn adjust(&mut self, delta: i32) {
-        match self.cursor {
-            0 => {
-                if delta != 0 {
-                    self.compact_titles = !self.compact_titles;
-                }
-            }
-            1 => {
-                if delta != 0 {
-                    self.activity_badges = !self.activity_badges;
-                }
-            }
-            2 => {
-                if delta != 0 {
-                    self.confirm_quit = !self.confirm_quit;
-                }
-            }
-            3 => self.pane_density = (self.pane_density + delta).clamp(1, 5),
-            4 => self.scrollback = (self.scrollback + delta * 1000).clamp(1_000, 50_000),
-            5 => self.refresh_ms = (self.refresh_ms + delta * 4).clamp(8, 100),
-            6 => {
-                let count = Self::ACCENTS.len() as isize;
-                self.accent_index =
-                    (self.accent_index as isize + delta as isize).rem_euclid(count) as usize;
-            }
-            _ => {}
-        }
+        self.palette
+            .adjust(PaletteRole::ALL[self.cursor], delta as isize);
     }
 
     fn rows(&self) -> Vec<SettingsRow> {
-        vec![
-            self.row(
-                0,
-                "Compact pane titles",
-                switch_value(self.compact_titles),
-                "sample switch",
-            ),
-            self.row(
-                1,
-                "Activity badges",
-                switch_value(self.activity_badges),
-                "sample switch",
-            ),
-            self.row(
-                2,
-                "Confirm before quit",
-                switch_value(self.confirm_quit),
-                "sample switch",
-            ),
-            self.row(
-                3,
-                "Pane density",
-                self.pane_density.to_string(),
-                "-/+ sample stepper",
-            ),
-            self.row(
-                4,
-                "Scrollback rows",
-                self.scrollback.to_string(),
-                "-/+ sample stepper",
-            ),
-            self.row(
-                5,
-                "Refresh delay",
-                format!("{} ms", self.refresh_ms),
-                "-/+ sample stepper",
-            ),
-            self.row(
-                6,
-                "Accent color",
-                Self::ACCENTS[self.accent_index].to_string(),
-                "sample choice",
-            ),
-        ]
+        PaletteRole::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, role)| self.row(index, *role))
+            .collect()
     }
 
-    fn row(
-        &self,
-        index: usize,
-        label: &'static str,
-        value: String,
-        hint: &'static str,
-    ) -> SettingsRow {
+    fn row(&self, index: usize, role: PaletteRole) -> SettingsRow {
+        let color = self.palette.color_for(role);
         SettingsRow {
             selected: self.cursor == index,
-            label,
-            value,
-            hint,
+            label: role.label(),
+            value: color.name().to_string(),
+            value_color: color.color(),
+            hint: "-/+ color",
         }
     }
-}
-
-fn switch_value(enabled: bool) -> String {
-    if enabled { "on".into() } else { "off".into() }
 }
 
 impl App {
@@ -604,6 +685,10 @@ impl App {
         self.broadcast
     }
 
+    pub fn palette(&self) -> &GridPalette {
+        &self.settings.palette
+    }
+
     pub fn status(&self) -> &str {
         &self.status
     }
@@ -810,4 +895,26 @@ fn teardown_terminal(terminal: &mut Tui) -> Result<()> {
     )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_color_cycles_in_both_directions() {
+        assert_eq!(PaletteColor::Cyan.adjust(1), PaletteColor::Sky);
+        assert_eq!(PaletteColor::Cyan.adjust(-1), PaletteColor::White);
+    }
+
+    #[test]
+    fn settings_rows_expose_grid_palette_roles() {
+        let settings = SettingsState::default();
+        let rows = settings.rows();
+
+        assert_eq!(rows.len(), PaletteRole::ALL.len());
+        assert_eq!(rows[0].label, "Accent/chrome");
+        assert_eq!(rows[4].label, "Quiet border");
+        assert_eq!(rows[4].value, "sky");
+    }
 }

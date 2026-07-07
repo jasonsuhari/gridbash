@@ -26,7 +26,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Normal terminal keys pass through to focused or broadcast panes.
 - Modeless Alt shortcuts for pane focus, selection, broadcast, settings, and quit.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
-- Quiet-output indicators call out panes that produced output and then stopped with a subtle border and icon.
+- Quiet-output indicators call out panes that produced output and then stopped with a palette-controlled border and icon.
 - Built-in launch profiles for common CLI coding agents.
 - Startup dimension picker with a live grid preview.
 
@@ -153,14 +153,14 @@ GridBash does not capture the mouse, so normal drag selection and copy behavior 
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+b | Toggle selected broadcast mode |
-| Alt+o | Open sample settings |
+| Alt+o | Open settings |
 | Alt+q | Quit |
 
 When broadcast is on, typing goes to selected panes only. If nothing is selected, input goes to the focused pane.
 
-Pane titles show `active` while fresh output is arriving and `exited` after the child process ends. After roughly three seconds without output, a pane gets a violet border and a small `●` title icon. The icon is an output signal, not a guarantee that an agent has completed its task.
+Pane titles show `active` while fresh output is arriving and `exited` after the child process ends. After roughly three seconds without output, a pane gets a colored border and a small `●` title icon. The icon is an output signal, not a guarantee that an agent has completed its task.
 
-The settings screen is currently a sample UI. Its switches, steppers, and choices can be changed, but they do not affect runtime behavior yet.
+The settings screen includes live color controls for GridBash's accent, focus, selected, active, quiet, and exited grid roles. Changes apply immediately for the current run.
 
 ## Profiles
 

@@ -8,7 +8,7 @@ use ratatui::{
 use std::path::Path;
 use vt100::Cell;
 
-use crate::app::{App, SettingsRow};
+use crate::app::{App, GridPalette, SettingsRow};
 
 pub struct DrawState {
     pub grid_area: Rect,
@@ -16,7 +16,6 @@ pub struct DrawState {
 }
 
 const QUIET_MARKER: &str = " ●";
-const QUIET_BORDER: Color = Color::Rgb(156, 112, 255);
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
@@ -28,6 +27,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let grid_area = chunks[0];
     let status_area = chunks[1];
     let rects = app.pane_rects(grid_area);
+    let palette = app.palette();
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -38,19 +38,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         let selected = app.selected().contains(&index);
         let border_style = if selected {
             Style::default()
-                .fg(Color::Cyan)
+                .fg(palette.selected())
                 .add_modifier(Modifier::BOLD)
         } else if focused {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(palette.focus())
                 .add_modifier(Modifier::BOLD)
         } else if pane.exited {
-            Style::default().fg(Color::Red)
+            Style::default().fg(palette.exited())
         } else if pane.active {
-            Style::default().fg(Color::Green)
+            Style::default().fg(palette.active())
         } else if pane.output_quiet() {
             Style::default()
-                .fg(QUIET_BORDER)
+                .fg(palette.quiet())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
@@ -112,21 +112,21 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             " GridBash ",
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::Cyan)
+                .bg(palette.accent())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
             "LIVE",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(palette.focus())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" | "),
         Span::styled(
             broadcast,
             Style::default().fg(if app.broadcast() {
-                Color::Cyan
+                palette.selected()
             } else {
                 Color::Gray
             }),
@@ -143,7 +143,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     );
 
     if app.settings_open() {
-        render_settings(frame, area, &app.settings_rows());
+        render_settings(frame, area, &app.settings_rows(), palette);
     }
 
     DrawState {
@@ -152,21 +152,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
 }
 
-fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow]) {
+fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow], palette: &GridPalette) {
     let modal = centered_rect(area, 72, 64);
     frame.render_widget(Clear, modal);
 
     let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                "Sample settings",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled("not wired yet", Style::default().fg(Color::DarkGray)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Grid colors",
+            Style::default()
+                .fg(palette.accent())
+                .add_modifier(Modifier::BOLD),
+        )]),
         Line::from(""),
     ];
 
@@ -176,19 +172,19 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow]) {
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("Up/Down", Style::default().fg(Color::Yellow)),
+        Span::styled("Up/Down", Style::default().fg(palette.focus())),
         Span::raw(" move  "),
-        Span::styled("Space", Style::default().fg(Color::Yellow)),
-        Span::raw(" toggle  "),
-        Span::styled("-/+", Style::default().fg(Color::Yellow)),
+        Span::styled("Space", Style::default().fg(palette.focus())),
+        Span::raw(" cycle  "),
+        Span::styled("-/+", Style::default().fg(palette.focus())),
         Span::raw(" adjust  "),
-        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::styled("Esc", Style::default().fg(palette.focus())),
         Span::raw(" close"),
     ]));
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(palette.accent()))
         .title(" Settings ");
     frame.render_widget(
         Paragraph::new(lines).block(block).style(
@@ -203,7 +199,7 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow]) {
 fn settings_row(row: &SettingsRow) -> Line<'static> {
     let cursor = if row.selected { "> " } else { "  " };
     let cursor_style = if row.selected {
-        Style::default().fg(Color::Yellow)
+        Style::default().fg(row.value_color)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -218,9 +214,10 @@ fn settings_row(row: &SettingsRow) -> Line<'static> {
     Line::from(vec![
         Span::styled(cursor, cursor_style),
         Span::styled(format!("{:<24}", row.label), label_style),
+        Span::styled("■ ", Style::default().fg(row.value_color)),
         Span::styled(
-            format!("{:>10}", row.value),
-            Style::default().fg(Color::LightCyan),
+            format!("{:<8}", row.value),
+            Style::default().fg(row.value_color),
         ),
         Span::raw("   "),
         Span::styled(row.hint, Style::default().fg(Color::DarkGray)),
