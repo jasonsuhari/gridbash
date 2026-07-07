@@ -1,7 +1,8 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
     io::{self, Stdout},
+    sync::mpsc as std_mpsc,
     time::{Duration, Instant},
 };
 
@@ -26,6 +27,7 @@ use crate::{
     pty::{PtyEvent, PtyPane},
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
+    usage::{self, UsageEvent, UsageTarget},
 };
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -46,6 +48,10 @@ pub struct App {
     status: String,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
+    usage_tx: std_mpsc::Sender<UsageEvent>,
+    usage_rx: std_mpsc::Receiver<UsageEvent>,
+    profile_usage: BTreeMap<String, String>,
+    api_spend_label: Option<String>,
     last_activity_decay: Instant,
 }
 
@@ -226,6 +232,7 @@ impl App {
                 columns: 3,
             });
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (usage_tx, usage_rx) = std_mpsc::channel();
 
         Ok(Self {
             config,
@@ -242,6 +249,10 @@ impl App {
                 .into(),
             event_tx,
             event_rx,
+            usage_tx,
+            usage_rx,
+            profile_usage: BTreeMap::new(),
+            api_spend_label: None,
             last_activity_decay: Instant::now(),
         })
     }
@@ -285,8 +296,24 @@ impl App {
         for (index, spec) in plan.panes.iter().enumerate() {
             self.spawn_pane_spec(index, spec, 0)?;
         }
+        self.start_usage_monitor(&plan);
 
         Ok(())
+    }
+
+    fn start_usage_monitor(&mut self, plan: &LaunchPlan) {
+        self.profile_usage.clear();
+        self.api_spend_label = None;
+
+        let targets = plan
+            .panes
+            .iter()
+            .map(|spec| UsageTarget {
+                profile_name: spec.profile_name.clone(),
+                command: spec.command.command.clone(),
+            })
+            .collect::<Vec<_>>();
+        usage::spawn_usage_monitor(targets, self.usage_tx.clone());
     }
 
     fn spawn_pane_spec(
@@ -314,6 +341,7 @@ impl App {
 
         loop {
             needs_render |= self.drain_pty_events();
+            needs_render |= self.drain_usage_events();
             needs_render |= self.decay_activity();
 
             if needs_render {
@@ -405,6 +433,33 @@ impl App {
 
         for pane in &mut self.panes {
             changed |= pane.poll_exit();
+        }
+
+        changed
+    }
+
+    fn drain_usage_events(&mut self) -> bool {
+        let mut changed = false;
+
+        while let Ok(event) = self.usage_rx.try_recv() {
+            match event {
+                UsageEvent::Profile {
+                    profile_name,
+                    label,
+                } => match label {
+                    Some(label) => {
+                        changed |= self.profile_usage.get(&profile_name) != Some(&label);
+                        self.profile_usage.insert(profile_name, label);
+                    }
+                    None => {
+                        changed |= self.profile_usage.remove(&profile_name).is_some();
+                    }
+                },
+                UsageEvent::ApiSpend { label } => {
+                    changed |= self.api_spend_label != label;
+                    self.api_spend_label = label;
+                }
+            }
         }
 
         changed
@@ -754,6 +809,26 @@ impl App {
             .as_ref()
             .and_then(|plan| plan.panes.get(index))
             .and_then(|pane| pane.worktree_name.as_deref())
+    }
+
+    pub fn pane_usage_label(&self, index: usize) -> Option<String> {
+        let mut parts = Vec::new();
+
+        if let Some(profile_name) = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .map(|pane| pane.profile_name.as_str())
+            && let Some(label) = self.profile_usage.get(profile_name)
+        {
+            parts.push(label.clone());
+        }
+
+        if let Some(label) = &self.api_spend_label {
+            parts.push(label.clone());
+        }
+
+        (!parts.is_empty()).then(|| parts.join(" | "))
     }
 
     pub fn sync_pane_sizes(&mut self) {

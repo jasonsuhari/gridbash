@@ -40,16 +40,21 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             .pane_folder(index)
             .map(label_name)
             .unwrap_or_else(|| folder_label(pane.cwd()));
+        let usage = app
+            .pane_usage_label(index)
+            .map(|label| format!(" | {label}"))
+            .unwrap_or_default();
         let title = if let Some(worktree) = app.pane_worktree(index) {
             format!(
-                " {} | {} | {}{} ",
+                " {} | {} | {}{}{} ",
                 index + 1,
                 folder,
                 worktree,
+                usage,
                 chrome.badge
             )
         } else {
-            format!(" {} | {}{} ", index + 1, folder, chrome.badge)
+            format!(" {} | {}{}{} ", index + 1, folder, usage, chrome.badge)
         };
 
         let block = Block::default()
