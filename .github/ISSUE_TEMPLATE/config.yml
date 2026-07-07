@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/jasonsuhari/gridbash/security/policy
+    about: Please report vulnerabilities privately through the security policy.
+  - name: Support guidance
+    url: https://github.com/jasonsuhari/gridbash/blob/main/SUPPORT.md
+    about: Read where to ask usage, bug, and feature questions.

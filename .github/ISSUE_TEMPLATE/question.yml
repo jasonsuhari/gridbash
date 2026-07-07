@@ -1,0 +1,24 @@
+name: Question
+description: Ask a usage or setup question that is not answered in the README.
+title: "question: "
+labels: ["question"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Include your Windows version, host terminal, launch command, profile, and relevant config.
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked the README first.
+          required: true
