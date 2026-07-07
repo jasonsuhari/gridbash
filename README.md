@@ -27,6 +27,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Normal terminal keys pass through to the focused pane, or to selected panes when multiple panes are selected.
 - Modeless Alt shortcuts for pane focus, selection, rename, settings, and quit.
 - Compact dark theme with focus, selection, sleep, exit, usage, and quiet-output cues.
+- Hidden manager agent groups let a manager profile coordinate selected worker panes without taking a visible grid slot.
 - Claude, Codex, and other agent panes show a compact conversation summary in the footer line.
 - Built-in launch profiles for common CLI coding agents.
 - Startup dimension picker with a live grid preview.
@@ -174,6 +175,8 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+r | Rename the focused pane |
 | Alt+z | Put the focused pane to sleep; when multiple panes are selected, sleep the selected panes |
+| Alt+g | Group selected panes under a hidden manager; with no selection, open the focused group's manager prompt |
+| Alt+u | Dissolve the focused pane's manager group |
 | Hover sleeping pane | Wake the pane and make its terminal contents visible again |
 | Alt+o | Open settings |
 | Alt+q | Quit |
@@ -207,6 +210,7 @@ Example:
 ```toml
 [defaults]
 profile = "powershell"
+manager_profile = "claude-1"
 
 [profiles.review]
 command = "codex"
@@ -225,6 +229,14 @@ Default profile resolution order:
 ```text
 --profile > GRIDBASH_PROFILE > [defaults].profile > git-bash
 ```
+
+Hidden manager groups use this manager profile resolution order:
+
+```text
+--manager-profile > GRIDBASH_MANAGER_PROFILE > [defaults].manager_profile
+```
+
+The manager profile can be a normal GridBash profile or a ready Vibe profile. To create a group, select one or more awake panes and press `Alt+g`. GridBash launches the manager as a hidden PTY, marks the grouped panes with a `G<letter>` badge, relays worker output snapshots to the manager, and forwards manager `gridbash send` blocks back to awake workers in that group.
 
 ## Design Goals
 
