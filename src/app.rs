@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     io::{self, Stdout, Write},
+    path::PathBuf,
     sync::mpsc as std_mpsc,
     time::{Duration, Instant},
 };
@@ -25,22 +26,30 @@ use crate::{
     composer::Composer,
     config::Config,
     layout::{GridLayout, GridSize, PaneId, pane_at},
-    profiles::find_profile,
+    orchestrator::{
+        GroupColor, GroupId, MAX_GROUPS, SendBlock, SendTargets, extract_send_blocks, group_color,
+        group_label, manager_pane_id,
+    },
+    profiles::{Profile, find_profile},
     pty::{PtyEvent, PtyPane},
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
     usage::{self, UsageEvent, UsageTarget},
+    vibe,
     worktrees::ManagedWorktreeOptions,
 };
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const WORKER_RELAY_IDLE: Duration = Duration::from_millis(900);
+const WORKER_RELAY_MAX_BYTES: usize = 6000;
 const MAX_PANE_NAME_CHARS: usize = 32;
 const CONVERSATION_SUMMARY_MAX_CHARS: usize = 120;
 
 pub struct App {
     config: Config,
+    manager_profile_name: Option<String>,
     worktrees: Option<ManagedWorktreeOptions>,
     launch_plan: Option<LaunchPlan>,
     layout: GridLayout,
@@ -51,6 +60,9 @@ pub struct App {
     pane_names: Vec<Option<String>>,
     text_selection: Option<MouseSelection>,
     sleeping: BTreeSet<usize>,
+    groups: Vec<AgentGroup>,
+    next_group_id: usize,
+    prompt: Option<PromptState>,
     rects: Vec<Rect>,
     mouse_enabled: bool,
     settings: SettingsState,
@@ -151,6 +163,36 @@ enum SwapSelection {
     NeedsMore,
     TooMany,
     Pair(usize, usize),
+}
+
+struct AgentGroup {
+    id: GroupId,
+    palette_index: usize,
+    label: char,
+    workers: BTreeSet<usize>,
+    manager: PtyPane,
+    manager_buffer: String,
+    relay_buffers: BTreeMap<usize, String>,
+    last_worker_output: Option<Instant>,
+    status: String,
+}
+
+struct PromptState {
+    group_id: GroupId,
+    input: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PaneGroupView {
+    pub label: char,
+    pub color: GroupColor,
+}
+
+#[derive(Debug, Clone)]
+pub struct PromptView {
+    pub label: char,
+    pub color: GroupColor,
+    pub input: String,
 }
 
 #[derive(Debug, Clone)]
@@ -399,6 +441,7 @@ impl App {
             .then(|| ManagedWorktreeOptions::new(cli.worktree_prefix.clone()))
             .transpose()?;
         let launch_plan = resolve_direct_launch_plan(&cli, &config, worktrees.as_ref())?;
+        let manager_profile_name = resolve_manager_profile_name(&cli, &config);
         let mouse_enabled = !cli.no_mouse;
         let grid = launch_plan
             .as_ref()
@@ -412,6 +455,7 @@ impl App {
 
         Ok(Self {
             config,
+            manager_profile_name,
             worktrees,
             launch_plan,
             layout: GridLayout::new(grid),
@@ -422,15 +466,18 @@ impl App {
             pane_names: Vec::new(),
             text_selection: None,
             sleeping: BTreeSet::new(),
+            groups: Vec::new(),
+            next_group_id: 0,
+            prompt: None,
             rects: Vec::new(),
             mouse_enabled,
             settings: SettingsState::default(),
             rename: RenamePaneState::default(),
             status: if mouse_enabled {
-                "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
+                "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
                     .into()
             } else {
-                "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
+                "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
                     .into()
             },
             next_pane_id: 0,
@@ -482,6 +529,9 @@ impl App {
         self.text_selection = None;
         self.sleeping.clear();
         self.next_pane_id = 0;
+        self.groups.clear();
+        self.next_group_id = 0;
+        self.prompt = None;
 
         for spec in &plan.panes {
             self.spawn_pane_spec(spec)?;
@@ -530,6 +580,7 @@ impl App {
             needs_render |= self.drain_pty_events();
             needs_render |= self.drain_usage_events();
             needs_render |= self.decay_activity();
+            needs_render |= self.relay_worker_output();
 
             if needs_render {
                 terminal.draw(|frame| {
@@ -556,12 +607,19 @@ impl App {
                         self.rename.insert_text(&text);
                         needs_render = true;
                     }
+                    Event::Paste(text) if self.prompt.is_some() => {
+                        if let Some(prompt) = &mut self.prompt {
+                            prompt.input.push_str(&text);
+                            needs_render = true;
+                        }
+                    }
                     Event::Paste(text) if !self.settings.open => {
                         self.route_input(text.as_bytes())?;
                     }
                     Event::Mouse(mouse)
                         if (self.mouse_enabled || !self.sleeping.is_empty())
-                            && !self.settings.open =>
+                            && !self.settings.open
+                            && self.prompt.is_none() =>
                     {
                         needs_render |= self.handle_mouse(mouse, terminal)?;
                     }
@@ -594,6 +652,7 @@ impl App {
 
     fn drain_pty_events(&mut self) -> bool {
         let mut changed = false;
+        let mut dispatches = Vec::new();
 
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
@@ -602,23 +661,24 @@ impl App {
                     generation,
                     bytes,
                 } => {
-                    if let Some(target) = self
-                        .panes
-                        .iter_mut()
-                        .find(|p| p.id() == pane && p.generation() == generation)
-                    {
+                    if let Some(index) = self.visible_pane_index(pane, generation) {
+                        let target = &mut self.panes[index];
                         target.process_output(&bytes);
+                        self.capture_worker_output(index, &bytes);
+                        changed = true;
+                    } else if self.process_manager_output(pane, generation, &bytes, &mut dispatches)
+                    {
                         changed = true;
                     }
                 }
                 PtyEvent::Exited { pane, generation } => {
-                    if let Some(target) = self
-                        .panes
-                        .iter_mut()
-                        .find(|p| p.id() == pane && p.generation() == generation)
-                        && !target.exited
-                    {
-                        target.exited = true;
+                    if let Some(index) = self.visible_pane_index(pane, generation) {
+                        let target = &mut self.panes[index];
+                        if !target.exited {
+                            target.exited = true;
+                            changed = true;
+                        }
+                    } else if self.process_manager_exit(pane, generation) {
                         changed = true;
                     }
                 }
@@ -627,6 +687,168 @@ impl App {
 
         for pane in &mut self.panes {
             changed |= pane.poll_exit();
+        }
+        for group in &mut self.groups {
+            let exited_now = group.manager.poll_exit();
+            if exited_now {
+                group.status = "manager exited".into();
+            }
+            changed |= exited_now;
+        }
+
+        changed |= self.dispatch_manager_commands(dispatches);
+
+        changed
+    }
+
+    fn visible_pane_index(&self, pane: PaneId, generation: u64) -> Option<usize> {
+        self.panes
+            .iter()
+            .position(|target| target.id() == pane && target.generation() == generation)
+    }
+
+    fn process_manager_output(
+        &mut self,
+        pane: PaneId,
+        generation: u64,
+        bytes: &[u8],
+        dispatches: &mut Vec<(GroupId, SendBlock)>,
+    ) -> bool {
+        let Some(group) = self
+            .groups
+            .iter_mut()
+            .find(|group| group.manager.id() == pane && group.manager.generation() == generation)
+        else {
+            return false;
+        };
+
+        group.manager.process_output(bytes);
+        group
+            .manager_buffer
+            .push_str(&String::from_utf8_lossy(bytes));
+        for block in extract_send_blocks(&mut group.manager_buffer) {
+            dispatches.push((group.id, block));
+        }
+        let label = group.label;
+        group.status = "manager active".into();
+        self.status = format!("group {label}: manager active");
+        true
+    }
+
+    fn process_manager_exit(&mut self, pane: PaneId, generation: u64) -> bool {
+        let Some(group) = self
+            .groups
+            .iter_mut()
+            .find(|group| group.manager.id() == pane && group.manager.generation() == generation)
+        else {
+            return false;
+        };
+
+        if group.manager.exited {
+            return false;
+        }
+
+        let label = group.label;
+        group.manager.exited = true;
+        group.status = "manager exited".into();
+        self.status = format!("group {label}: manager exited");
+        true
+    }
+
+    fn capture_worker_output(&mut self, pane_index: usize, bytes: &[u8]) {
+        if self.sleeping.contains(&pane_index) {
+            return;
+        }
+
+        let output = String::from_utf8_lossy(bytes);
+        if output.trim().is_empty() {
+            return;
+        }
+
+        for group in &mut self.groups {
+            if !group.workers.contains(&pane_index) {
+                continue;
+            }
+
+            let buffer = group.relay_buffers.entry(pane_index).or_default();
+            buffer.push_str(&output);
+            trim_relay_buffer(buffer);
+            group.last_worker_output = Some(Instant::now());
+        }
+    }
+
+    fn dispatch_manager_commands(&mut self, dispatches: Vec<(GroupId, SendBlock)>) -> bool {
+        let mut changed = false;
+
+        for (group_id, block) in dispatches {
+            let Some(group_index) = self.groups.iter().position(|group| group.id == group_id)
+            else {
+                continue;
+            };
+            let workers = self.groups[group_index].workers.clone();
+            let targets = match block.targets {
+                SendTargets::All => workers,
+                SendTargets::Panes(panes) => panes
+                    .into_iter()
+                    .filter_map(|pane_number| pane_number.checked_sub(1))
+                    .filter(|pane_index| workers.contains(pane_index))
+                    .collect::<BTreeSet<_>>(),
+            };
+            let targets = targets
+                .into_iter()
+                .filter(|pane_index| !self.sleeping.contains(pane_index))
+                .collect::<BTreeSet<_>>();
+
+            if targets.is_empty() {
+                self.groups[group_index].status = "manager send had no awake valid targets".into();
+                self.status = format!(
+                    "group {} send skipped: no awake valid targets",
+                    self.groups[group_index].label
+                );
+                changed = true;
+                continue;
+            }
+
+            let bytes = paste_and_enter_bytes(&block.message);
+            let mut sent = 0_usize;
+            for pane_index in targets {
+                if let Some(pane) = self.panes.get(pane_index)
+                    && pane.write(&bytes).is_ok()
+                {
+                    sent += 1;
+                }
+            }
+
+            let label = self.groups[group_index].label;
+            self.groups[group_index].status = format!("sent to {sent} worker(s)");
+            self.status = format!("group {label} manager sent to {sent} worker(s)");
+            changed = true;
+        }
+
+        changed
+    }
+
+    fn relay_worker_output(&mut self) -> bool {
+        let now = Instant::now();
+        let mut changed = false;
+
+        for group in &mut self.groups {
+            let Some(last_output) = group.last_worker_output else {
+                continue;
+            };
+            if now.duration_since(last_output) < WORKER_RELAY_IDLE || group.relay_buffers.is_empty()
+            {
+                continue;
+            }
+
+            let relay = worker_relay_message(group.label, &group.relay_buffers);
+            if group.manager.write(&paste_and_enter_bytes(&relay)).is_ok() {
+                group.status = format!("relayed {} worker(s)", group.relay_buffers.len());
+                self.status = format!("group {}: worker output relayed", group.label);
+                group.relay_buffers.clear();
+                group.last_worker_output = None;
+                changed = true;
+            }
         }
 
         changed
@@ -678,6 +900,11 @@ impl App {
         }
 
         let selection_cleared = self.clear_text_selection();
+
+        if self.prompt.is_some() {
+            let outcome = self.handle_prompt_key(key)?;
+            return Ok(render_if_selection_cleared(outcome, selection_cleared));
+        }
 
         if self.settings.open {
             let outcome = self.handle_settings_key(key)?;
@@ -771,6 +998,18 @@ impl App {
             }
             'x' => {
                 self.swap_selected_tiles();
+                Ok(Some(false))
+            }
+            'g' => {
+                if self.selected.is_empty() {
+                    self.open_manager_prompt()?;
+                } else {
+                    self.create_group_from_selection()?;
+                }
+                Ok(Some(false))
+            }
+            'u' => {
+                self.dissolve_focused_group();
                 Ok(Some(false))
             }
             'o' => {
@@ -920,8 +1159,317 @@ impl App {
             plan.panes.swap(first, second);
         }
         swap_set_indices(&mut self.sleeping, first, second);
+        self.swap_group_indices(first, second);
         self.focus = swapped_index(self.focus, first, second);
         self.status = format!("swapped panes {} and {}", first + 1, second + 1);
+    }
+
+    fn swap_group_indices(&mut self, first: usize, second: usize) {
+        for group in &mut self.groups {
+            swap_set_indices(&mut group.workers, first, second);
+
+            let first_buffer = group.relay_buffers.remove(&first);
+            let second_buffer = group.relay_buffers.remove(&second);
+            if let Some(buffer) = first_buffer {
+                group.relay_buffers.insert(second, buffer);
+            }
+            if let Some(buffer) = second_buffer {
+                group.relay_buffers.insert(first, buffer);
+            }
+        }
+    }
+
+    fn create_group_from_selection(&mut self) -> Result<()> {
+        if self.groups.len() >= MAX_GROUPS {
+            self.status = format!("group limit reached ({MAX_GROUPS})");
+            return Ok(());
+        }
+
+        let workers = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|index| *index < self.panes.len() && !self.sleeping.contains(index))
+            .collect::<BTreeSet<_>>();
+        if workers.is_empty() {
+            self.status = "select awake worker panes before grouping".into();
+            return Ok(());
+        }
+
+        if let Some((pane_index, label)) = self.first_grouped_pane(&workers) {
+            self.status = format!("pane {} already belongs to group {label}", pane_index + 1);
+            return Ok(());
+        }
+
+        let Some(palette_index) = self.next_palette_index() else {
+            self.status = format!("group limit reached ({MAX_GROUPS})");
+            return Ok(());
+        };
+        let label = group_label(palette_index);
+
+        let (manager_name, manager_profile) = match self.resolve_manager_profile() {
+            Ok(profile) => profile,
+            Err(error) => {
+                self.status = format!("manager profile unavailable: {error:#}");
+                return Ok(());
+            }
+        };
+        let launch = match manager_profile.resolved_command() {
+            Ok(launch) => launch,
+            Err(error) => {
+                self.status = format!("manager profile failed: {error:#}");
+                return Ok(());
+            }
+        };
+
+        let group_id = GroupId(self.next_group_id);
+        self.next_group_id += 1;
+        let cwd = self.group_cwd(&workers)?;
+        let manager = match PtyPane::spawn(
+            PaneId(manager_pane_id(group_id)),
+            group_id.0 as u64 + 1,
+            &launch.command,
+            &launch.args,
+            &cwd,
+            self.event_tx.clone(),
+        ) {
+            Ok(manager) => manager,
+            Err(error) => {
+                self.status = format!("manager spawn failed: {error:#}");
+                return Ok(());
+            }
+        };
+
+        let intro = self.manager_intro_message(label, &workers);
+        if let Err(error) = manager.write(&paste_and_enter_bytes(&intro)) {
+            self.status = format!("manager init failed: {error:#}");
+            return Ok(());
+        }
+
+        self.groups.push(AgentGroup {
+            id: group_id,
+            palette_index,
+            label,
+            workers,
+            manager,
+            manager_buffer: String::new(),
+            relay_buffers: BTreeMap::new(),
+            last_worker_output: None,
+            status: format!("manager {manager_name} ready"),
+        });
+        self.selected.clear();
+        self.status = format!("group {label} attached to hidden manager {manager_name}");
+        Ok(())
+    }
+
+    fn open_manager_prompt(&mut self) -> Result<()> {
+        let group_id = self
+            .group_for_pane(self.focus)
+            .or_else(|| (self.groups.len() == 1).then_some(self.groups[0].id));
+        let Some(group_id) = group_id else {
+            self.status = "select panes to create a group, or focus a grouped pane".into();
+            return Ok(());
+        };
+
+        let Some(group) = self.groups.iter().find(|group| group.id == group_id) else {
+            self.status = "group is no longer available".into();
+            return Ok(());
+        };
+
+        self.prompt = Some(PromptState {
+            group_id,
+            input: String::new(),
+        });
+        self.status = format!("talking to group {} manager", group.label);
+        Ok(())
+    }
+
+    fn dissolve_focused_group(&mut self) {
+        let group_id = self
+            .group_for_pane(self.focus)
+            .or_else(|| (self.groups.len() == 1).then_some(self.groups[0].id));
+        let Some(group_id) = group_id else {
+            self.status = "focus a grouped pane to dissolve its group".into();
+            return;
+        };
+
+        let Some(index) = self.groups.iter().position(|group| group.id == group_id) else {
+            self.status = "group is no longer available".into();
+            return;
+        };
+
+        let label = self.groups[index].label;
+        if self
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| prompt.group_id == group_id)
+        {
+            self.prompt = None;
+        }
+        self.groups.remove(index);
+        self.status = format!("group {label} dissolved");
+    }
+
+    fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return Ok(KeyOutcome::Quit);
+        }
+
+        let Some(prompt) = &mut self.prompt else {
+            return Ok(KeyOutcome::Continue);
+        };
+
+        match key.code {
+            KeyCode::Esc => {
+                self.prompt = None;
+                self.status = "manager prompt closed".into();
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Enter => self.send_prompt_to_manager(),
+            KeyCode::Backspace => {
+                prompt.input.pop();
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                prompt.input.clear();
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                prompt.input.push(ch);
+                Ok(KeyOutcome::Render)
+            }
+            _ => Ok(KeyOutcome::Continue),
+        }
+    }
+
+    fn send_prompt_to_manager(&mut self) -> Result<KeyOutcome> {
+        let Some(prompt) = self.prompt.take() else {
+            return Ok(KeyOutcome::Continue);
+        };
+        let input = prompt.input.trim();
+        if input.is_empty() {
+            self.status = "manager prompt skipped".into();
+            return Ok(KeyOutcome::Render);
+        }
+
+        let Some(group) = self
+            .groups
+            .iter_mut()
+            .find(|group| group.id == prompt.group_id)
+        else {
+            self.status = "group is no longer available".into();
+            return Ok(KeyOutcome::Render);
+        };
+
+        let message = user_manager_message(group.label, input);
+        match group.manager.write(&paste_and_enter_bytes(&message)) {
+            Ok(()) => {
+                group.status = "manager prompted".into();
+                self.status = format!("sent prompt to group {} manager", group.label);
+            }
+            Err(error) => {
+                group.status = "manager write failed".into();
+                self.status = format!("manager prompt failed: {error:#}");
+            }
+        }
+
+        Ok(KeyOutcome::Render)
+    }
+
+    fn first_grouped_pane(&self, workers: &BTreeSet<usize>) -> Option<(usize, char)> {
+        workers.iter().find_map(|pane_index| {
+            self.groups
+                .iter()
+                .find(|group| group.workers.contains(pane_index))
+                .map(|group| (*pane_index, group.label))
+        })
+    }
+
+    fn next_palette_index(&self) -> Option<usize> {
+        let used = self
+            .groups
+            .iter()
+            .map(|group| group.palette_index)
+            .collect::<BTreeSet<_>>();
+        (0..MAX_GROUPS).find(|index| !used.contains(index))
+    }
+
+    fn resolve_manager_profile(&self) -> Result<(String, Profile)> {
+        let name = self
+            .manager_profile_name
+            .as_deref()
+            .ok_or_else(|| anyhow!("set --manager-profile or [defaults].manager_profile"))?;
+
+        if let Ok(profile) = find_profile(&self.config, name) {
+            return Ok((name.to_string(), profile));
+        }
+
+        let profiles = vibe::load_profiles()?;
+        let profile = vibe::profile_for_name(name, &profiles)
+            .ok_or_else(|| anyhow!("vibe profile '{name}' is missing or not ready"))?;
+        Ok((name.to_string(), profile))
+    }
+
+    fn group_cwd(&self, workers: &BTreeSet<usize>) -> Result<PathBuf> {
+        let Some(first_worker) = workers.iter().next() else {
+            return resolved_current_dir();
+        };
+        Ok(self
+            .panes
+            .get(*first_worker)
+            .map(|pane| pane.cwd().to_path_buf())
+            .unwrap_or(resolved_current_dir()?))
+    }
+
+    fn manager_intro_message(&self, label: char, workers: &BTreeSet<usize>) -> String {
+        let worker_lines = workers
+            .iter()
+            .map(|pane_index| {
+                format!(
+                    "- pane {}: {}",
+                    pane_index + 1,
+                    self.worker_label(*pane_index)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(
+            "You are the hidden GridBash manager for group {label}.\n\
+            Coordinate only these worker panes:\n\
+            {worker_lines}\n\n\
+            When you need GridBash to send instructions to workers, emit a fenced block whose opening line is three backticks immediately followed by one of these commands:\n\
+            gridbash send all\n\
+            gridbash send panes 1, 3\n\
+            Put only the worker instruction text inside that fence.\n\n\
+            I will relay worker output snapshots back to you. Keep routing blocks concise and only target panes in this group."
+        )
+    }
+
+    fn worker_label(&self, pane_index: usize) -> String {
+        let folder = self
+            .pane_folder(pane_index)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                self.panes
+                    .get(pane_index)
+                    .map(|pane| pane.cwd().display().to_string())
+                    .unwrap_or_else(|| "unknown cwd".into())
+            });
+        match self.pane_worktree(pane_index) {
+            Some(worktree) => format!("{folder} ({worktree})"),
+            None => folder,
+        }
+    }
+
+    fn group_for_pane(&self, pane_index: usize) -> Option<GroupId> {
+        self.groups
+            .iter()
+            .find(|group| group.workers.contains(&pane_index))
+            .map(|group| group.id)
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -1271,7 +1819,26 @@ impl App {
         {
             self.text_selection = None;
         }
+        self.truncate_groups(target_count);
         true
+    }
+
+    fn truncate_groups(&mut self, target_count: usize) {
+        self.groups.retain_mut(|group| {
+            group.workers.retain(|index| *index < target_count);
+            group
+                .relay_buffers
+                .retain(|pane_index, _| *pane_index < target_count);
+            !group.workers.is_empty()
+        });
+
+        if self
+            .prompt
+            .as_ref()
+            .is_some_and(|prompt| !self.groups.iter().any(|group| group.id == prompt.group_id))
+        {
+            self.prompt = None;
+        }
     }
 
     fn toggle_sleep_for_targets(&mut self) {
@@ -1432,6 +1999,29 @@ impl App {
         })
     }
 
+    pub fn pane_group(&self, index: usize) -> Option<PaneGroupView> {
+        self.groups
+            .iter()
+            .find(|group| group.workers.contains(&index))
+            .map(|group| PaneGroupView {
+                label: group.label,
+                color: group_color(group.palette_index),
+            })
+    }
+
+    pub fn prompt_view(&self) -> Option<PromptView> {
+        let prompt = self.prompt.as_ref()?;
+        let group = self
+            .groups
+            .iter()
+            .find(|group| group.id == prompt.group_id)?;
+        Some(PromptView {
+            label: group.label,
+            color: group_color(group.palette_index),
+            input: prompt.input.clone(),
+        })
+    }
+
     pub fn pane_folder(&self, index: usize) -> Option<&str> {
         self.launch_plan
             .as_ref()
@@ -1565,9 +2155,49 @@ fn resolve_profile_name(cli: &Cli, config: &Config) -> String {
         .unwrap_or_else(|| "git-bash".into())
 }
 
+fn resolve_manager_profile_name(cli: &Cli, config: &Config) -> Option<String> {
+    cli.manager_profile
+        .clone()
+        .or_else(|| env::var("GRIDBASH_MANAGER_PROFILE").ok())
+        .or_else(|| config.defaults.manager_profile.clone())
+}
+
 fn resolved_current_dir() -> Result<std::path::PathBuf> {
     let current = env::current_dir().context("failed to resolve current directory")?;
     Ok(current.canonicalize().unwrap_or(current))
+}
+
+fn trim_relay_buffer(buffer: &mut String) {
+    if buffer.len() > WORKER_RELAY_MAX_BYTES {
+        let keep_from = buffer.len().saturating_sub(WORKER_RELAY_MAX_BYTES);
+        buffer.drain(..keep_from);
+    }
+}
+
+fn worker_relay_message(label: char, buffers: &BTreeMap<usize, String>) -> String {
+    let mut message = format!("GridBash worker output snapshot for group {label}.");
+    for (pane_index, output) in buffers {
+        message.push_str(&format!(
+            "\n\n[pane {} output]\n{}",
+            pane_index + 1,
+            output.trim()
+        ));
+    }
+    message
+}
+
+fn user_manager_message(label: char, input: &str) -> String {
+    format!(
+        "User instruction for GridBash group {label}:\n{input}\n\nRoute work to workers with gridbash send blocks when needed."
+    )
+}
+
+fn paste_and_enter_bytes(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(text.len() + 16);
+    bytes.extend_from_slice(b"\x1b[200~");
+    bytes.extend_from_slice(text.as_bytes());
+    bytes.extend_from_slice(b"\x1b[201~\r");
+    bytes
 }
 
 fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) {

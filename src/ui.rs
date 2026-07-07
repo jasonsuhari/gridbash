@@ -8,7 +8,7 @@ use ratatui::{
 use std::path::Path;
 use vt100::Cell;
 
-use crate::app::{App, PaneSelection, RenamePaneView, SettingsRow};
+use crate::app::{App, PaneGroupView, PaneSelection, PromptView, RenamePaneView, SettingsRow};
 
 const APP_BG: Color = Color::Rgb(11, 15, 20);
 const SETTINGS_BG: Color = Color::Rgb(9, 14, 19);
@@ -35,7 +35,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let status_area = chunks[1];
     let rects = app.pane_rects(grid_area);
     let rename_view = app.rename_pane_view();
-    let modal_open = app.settings_open() || rename_view.is_some();
+    let prompt_view = app.prompt_view();
+    let modal_open = app.settings_open() || rename_view.is_some() || prompt_view.is_some();
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -45,7 +46,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         let focused = app.focus() == index;
         let selected = app.selected().contains(&index);
         let sleeping = app.pane_sleeping(index);
-        let chrome = pane_chrome(selected, focused, pane.active, pane.exited, sleeping);
+        let group = app.pane_group(index);
+        let chrome = pane_chrome(
+            selected,
+            focused,
+            pane.active,
+            pane.exited,
+            sleeping,
+            group.map(|group| group.color.rgb),
+        );
 
         let folder = app
             .pane_folder(index)
@@ -76,6 +85,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             render_sleeping_screen(frame, inner);
         } else {
             render_screen(frame, inner, pane.screen(), app.selection_for_pane(index));
+        }
+        if let Some(group) = group {
+            render_group_badge(frame, rect, group);
         }
 
         if focused && !sleeping && !modal_open {
@@ -116,7 +128,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(" | Alt+x swap | Alt+z sleep | hover wakes | Alt+q quit"),
+        Span::raw(
+            " | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | hover wakes | Alt+q quit",
+        ),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
@@ -128,6 +142,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
     if let Some(rename) = rename_view.as_ref() {
         render_rename_pane(frame, area, rename);
+    }
+    if let Some(prompt) = prompt_view.as_ref() {
+        render_manager_prompt(frame, area, prompt);
     }
 
     DrawState {
@@ -151,6 +168,72 @@ fn pane_title(
     }
 }
 
+fn render_group_badge(frame: &mut Frame<'_>, rect: Rect, group: PaneGroupView) {
+    let label = format!(" G{} ", group.label);
+    let width = label.len() as u16;
+    if rect.width <= width.saturating_add(2) {
+        return;
+    }
+
+    let area = Rect {
+        x: rect.x + rect.width - width - 1,
+        y: rect.y,
+        width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(label).style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(rgb_color(group.color.rgb))
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+}
+
+fn render_manager_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PromptView) {
+    let width = area.width.saturating_sub(4).max(24);
+    let prompt_area = Rect {
+        x: area.x.saturating_add(2),
+        y: area.y.saturating_add(area.height.saturating_sub(5)),
+        width: width.min(area.width),
+        height: 3,
+    };
+    frame.render_widget(Clear, prompt_area);
+
+    let input = if prompt.input.is_empty() {
+        Span::styled(
+            "type instruction, Enter sends, Esc cancels",
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::raw(prompt.input.as_str())
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            format!(" G{} ", prompt.label),
+            Style::default()
+                .fg(Color::Black)
+                .bg(rgb_color(prompt.color.rgb))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        input,
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(rgb_color(prompt.color.rgb)))
+        .title(" Manager ");
+    frame.render_widget(
+        Paragraph::new(line)
+            .block(block)
+            .style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
+        prompt_area,
+    );
+}
+
 #[derive(Debug, PartialEq)]
 struct PaneChrome {
     border_style: Style,
@@ -163,6 +246,7 @@ fn pane_chrome(
     _active: bool,
     exited: bool,
     sleeping: bool,
+    group_color: Option<(u8, u8, u8)>,
 ) -> PaneChrome {
     let border_style = if sleeping {
         Style::default().fg(Color::Rgb(32, 36, 42))
@@ -176,6 +260,10 @@ fn pane_chrome(
             .add_modifier(Modifier::BOLD)
     } else if exited {
         Style::default().fg(Color::Red)
+    } else if let Some(group_color) = group_color {
+        Style::default()
+            .fg(rgb_color(group_color))
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -822,6 +910,10 @@ fn selection_style(style: Style, selection: Option<PaneSelection>, row: u16, col
     }
 }
 
+fn rgb_color((red, green, blue): (u8, u8, u8)) -> Color {
+    Color::Rgb(red, green, blue)
+}
+
 fn vt_color(color: vt100::Color, default: Color) -> Color {
     match color {
         vt100::Color::Default => default,
@@ -888,24 +980,27 @@ mod tests {
     #[test]
     fn output_activity_does_not_change_idle_pane_chrome() {
         assert_eq!(
-            pane_chrome(false, false, false, false, false),
-            pane_chrome(false, false, true, false, false)
+            pane_chrome(false, false, false, false, false, None),
+            pane_chrome(false, false, true, false, false, None)
         );
     }
 
     #[test]
     fn selected_and_exited_badges_remain_visible() {
         assert_eq!(
-            pane_chrome(true, false, true, false, false).badge,
+            pane_chrome(true, false, true, false, false, None).badge,
             " selected"
         );
-        assert_eq!(pane_chrome(true, false, true, true, false).badge, " exited");
+        assert_eq!(
+            pane_chrome(true, false, true, true, false, None).badge,
+            " exited"
+        );
     }
 
     #[test]
     fn sleeping_panes_show_sleep_badge() {
         assert_eq!(
-            pane_chrome(false, false, true, false, true).badge,
+            pane_chrome(false, false, true, false, true, None).badge,
             " asleep"
         );
     }
