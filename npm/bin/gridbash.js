@@ -18,6 +18,18 @@ if (process.arch !== "x64") {
 }
 
 const exe = path.join(__dirname, "win32-x64", "gridbash.exe");
+const normalizedBinDir = path.resolve(__dirname).toLowerCase();
+const sourceManifest = path.resolve(__dirname, "..", "..", "Cargo.toml");
+
+if (
+  (normalizedBinDir.includes(`${path.sep}.worktrees${path.sep}`.toLowerCase()) ||
+    fs.existsSync(sourceManifest)) &&
+  process.env.GRIDBASH_ALLOW_WORKTREE_LINK !== "1"
+) {
+  fail(
+    'global command resolves to a source checkout. Run "npm run install:local" from the intended checkout, or set GRIDBASH_ALLOW_WORKTREE_LINK=1 to override.'
+  );
+}
 
 if (!fs.existsSync(exe)) {
   fail(`missing packaged binary at ${exe}. Run "npm run build" from the gridbash repo.`);

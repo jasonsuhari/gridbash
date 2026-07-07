@@ -1,10 +1,21 @@
 # GridBash
 
+[![npm version](https://img.shields.io/npm/v/gridbash?label=npm)](https://www.npmjs.com/package/gridbash)
+[![GitHub release](https://img.shields.io/github/v/release/jasonsuhari/gridbash?label=github)](https://github.com/jasonsuhari/gridbash/releases)
+
 Fast, beautiful terminal grids for running lots of CLI agents at once.
 
 GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy development: launch a grid of Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, Git Bash, PowerShell, or any custom command, then select panes and broadcast input only where you want it.
 
 > V1 is intentionally single-process. Closing GridBash closes its child agents. Daemon detach/reattach is the next major frontier.
+
+## Release Status & Devlogs
+
+- Latest npm version is shown by the npm badge above and on the npm package page.
+- Latest GitHub release is shown by the GitHub release badge above and on the GitHub Releases page.
+- Devlogs live in `docs/devlogs/`.
+- Versioned release notes live in `docs/releases/` and are used for GitHub release notes.
+- npm packages include `docs/devlogs/` and `docs/releases/` so published package contents carry the logs too.
 
 ## Highlights
 
@@ -16,14 +27,14 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Modeless Alt shortcuts for pane focus, selection, broadcast, settings, and quit.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
 - Built-in launch profiles for common CLI coding agents.
-- Guided orchestration composer for choosing folders, `vibe` auth profiles, and named setups.
+- Startup dimension picker with a live grid preview.
 
 ## Install With npm
 
 From this repo:
 
 ```powershell
-npm install -g .
+npm run install:local
 ```
 
 Then run it from anywhere:
@@ -39,6 +50,14 @@ npm pack
 ```
 
 The package ships a Node command shim that launches the bundled Windows x64 `gridbash.exe`.
+
+Release automation and devlog workflow are documented in `docs/RELEASING.md`.
+
+Use `npm run install:local` for local development installs. It installs from a packed tarball so the global `gridbash` command points at a stable package copy, not whichever `.worktrees/` checkout last ran `npm install -g .`.
+
+## PR Workflow
+
+Pull requests can be merged directly after they have been reviewed. Before merging, check the diff, confirm the intent is clear, and make sure the relevant validation has passed.
 
 ## Install From Source
 
@@ -64,7 +83,7 @@ target\release\gridbash.exe
 
 ## Use
 
-Open the guided composer:
+Open the startup grid picker:
 
 ```powershell
 gridbash
@@ -76,7 +95,7 @@ On first launch, if no default profile is configured, GridBash opens an animated
 %APPDATA%\GridBash\config.toml
 ```
 
-The composer starts with the directory you launched `gridbash` from. It lets you choose folders, select logged-in `vibe` profiles, preview the pane-to-folder assignment, and optionally save the setup by name. GridBash uses `vibe run <profile> --` under the hood for isolated Claude/Codex auth.
+The startup picker asks for rows and columns, updates the preview grid as you change them, and launches every pane in the directory where you started `gridbash`.
 
 Set the default terminal profile:
 
@@ -108,20 +127,18 @@ Start in a repo:
 gridbash 3x4 --profile codex --cwd C:\Users\Jason\Documents\GitHub\fluent
 ```
 
-Passing grid, count, profile, or cwd arguments bypasses the composer and uses the direct launch path.
+Passing grid, count, profile, or cwd arguments bypasses the startup picker and uses the direct launch path.
 
-## Composer Controls
+## Startup Picker Controls
 
 | Input | Action |
 | --- | --- |
-| Up / Down | Move through choices |
-| Enter | Continue, preview, or launch |
-| Space | Toggle an agent profile |
-| a | Add a folder on the folder screen; select all ready agents on the agent screen |
-| d | Remove a selected folder |
-| s | Save the previewed setup by name and launch |
-| Esc | Go back |
-| q | Quit from the composer |
+| Left / Right | Switch between rows and columns |
+| Up / Down | Increase or decrease the active dimension |
+| r / c | Select rows or columns |
+| 1-9 / 0 | Set the active dimension directly, with 0 meaning 10 |
+| Enter | Launch the grid |
+| Esc / q | Quit |
 
 ## Controls
 
@@ -168,13 +185,6 @@ profile = "powershell"
 command = "codex"
 args = ["--model", "gpt-5.5"]
 title = "Codex Review"
-
-[setups.gridbash-swarm]
-agents = ["claude-1", "claude-2", "codex-2"]
-
-[[setups.gridbash-swarm.folders]]
-name = "gridbash"
-path = "C:\\Users\\Jason\\Documents\\GitHub\\gridbash"
 ```
 
 Then run:
