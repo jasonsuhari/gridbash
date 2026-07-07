@@ -28,6 +28,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
 - Built-in launch profiles for common CLI coding agents.
 - Startup dimension picker with a live grid preview.
+- Optional managed git worktrees so every pane can work in an isolated checkout.
 
 ## Install With npm
 
@@ -128,6 +129,16 @@ gridbash 3x4 --profile codex --cwd C:\Users\Jason\Documents\GitHub\fluent
 ```
 
 Passing grid, count, profile, or cwd arguments bypasses the startup picker and uses the direct launch path.
+
+Launch every pane in a separate repo-local git worktree:
+
+```powershell
+gridbash 2x3 --profile codex --worktrees
+```
+
+With `--worktrees`, GridBash creates or reuses `.worktrees/gridbash-<base>-NN` folders and `gridbash/<base>-pane-NN` branches. Panes keep the same relative folder as the directory where you launched GridBash, so starting from `repo\app` opens each terminal in the matching `app` folder inside its managed worktree. GridBash refuses this mode outside a git repo or when tracked changes are present in the base checkout.
+
+You can also run `gridbash --worktrees` and choose the grid dimensions in the startup picker.
 
 ## Startup Picker Controls
 

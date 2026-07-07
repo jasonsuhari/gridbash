@@ -26,6 +26,14 @@ pub struct Cli {
     #[arg(long)]
     pub cwd: Option<PathBuf>,
 
+    /// Launch each pane in its own managed git worktree.
+    #[arg(long)]
+    pub worktrees: bool,
+
+    /// Prefix for managed worktree folders and branches.
+    #[arg(long, default_value = "gridbash")]
+    pub worktree_prefix: String,
+
     /// Load a custom config TOML file.
     #[arg(long)]
     pub config: Option<PathBuf>,

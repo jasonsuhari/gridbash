@@ -16,6 +16,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
+use crate::worktrees::ManagedWorktreeOptions;
 use crate::{config::Config, layout::GridSize, profiles::find_profile, setup::LaunchPlan};
 
 type ComposerTerminal = Terminal<CrosstermBackend<Stdout>>;
@@ -30,6 +31,7 @@ const PREVIEW_DARK: Color = Color::Rgb(15, 65, 49);
 
 pub struct Composer {
     current_dir: PathBuf,
+    worktrees: Option<ManagedWorktreeOptions>,
     rows: usize,
     columns: usize,
     active_field: DimensionField,
@@ -48,9 +50,10 @@ enum ComposerEvent {
 }
 
 impl Composer {
-    pub fn new(current_dir: PathBuf) -> Self {
+    pub fn new(current_dir: PathBuf, worktrees: Option<ManagedWorktreeOptions>) -> Self {
         Self {
             current_dir,
+            worktrees,
             rows: DEFAULT_ROWS,
             columns: DEFAULT_COLUMNS,
             active_field: DimensionField::Rows,
@@ -147,13 +150,14 @@ impl Composer {
         let profile_name = startup_profile_name(config);
         let profile = find_profile(config, &profile_name)?;
 
-        Ok(LaunchPlan::legacy(
+        LaunchPlan::from_launch_options(
             profile_name,
             profile,
             self.current_dir.clone(),
             grid.count(),
             grid,
-        ))
+            self.worktrees.as_ref(),
+        )
     }
 
     fn draw(&self, frame: &mut Frame<'_>) {
