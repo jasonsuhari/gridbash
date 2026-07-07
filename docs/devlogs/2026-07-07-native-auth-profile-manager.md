@@ -14,7 +14,7 @@ Release target: unreleased
 - Added `[auth]` config with Claude/Codex defaults and best-effort usage status.
 - Added an Auth tab in Settings for browsing profiles, creating profile directories, setting defaults, refreshing status, and launching login.
 - Built-in Claude/Codex profiles and custom profiles with `agent_kind` now receive `CLAUDE_CONFIG_DIR` or `CODEX_HOME` when a default is configured.
-- Pane titles show the auth profile name when one is applied.
+- Pane titles show the launch profile name, plus the auth profile name when one is applied.
 
 ## Why It Matters
 
@@ -25,11 +25,12 @@ Release target: unreleased
 ## Validation
 
 - Ran `cargo fmt`.
-- Ran `cargo test` with 19 passing tests and 1 ignored interactive ConPTY smoke test.
+- Ran `cargo test` with 21 passing tests and 1 ignored interactive ConPTY smoke test.
 - Ran `cargo run -- --list-profiles` and confirmed the profile list still renders with Claude/Codex available on this machine.
 
 ## Release Notes
 
 - Added native Claude/Codex auth profile management in Settings.
 - Added global auth defaults for built-in and kind-tagged custom agent profiles.
+- Pane headers now include the launch profile name.
 - Added config and README documentation for isolated auth profile directories.

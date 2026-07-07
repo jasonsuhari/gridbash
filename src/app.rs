@@ -790,6 +790,13 @@ impl App {
             .map(|pane| pane.folder_name.as_str())
     }
 
+    pub fn pane_profile(&self, index: usize) -> Option<&str> {
+        self.launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .map(|pane| pane.profile_name.as_str())
+    }
+
     pub fn pane_worktree(&self, index: usize) -> Option<&str> {
         self.launch_plan
             .as_ref()

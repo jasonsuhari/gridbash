@@ -66,22 +66,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             .pane_folder(index)
             .map(label_name)
             .unwrap_or_else(|| folder_label(pane.cwd()));
-        let auth = app
-            .pane_auth(index)
-            .map(|name| format!(" | {name}"))
-            .unwrap_or_default();
-        let title = if let Some(worktree) = app.pane_worktree(index) {
-            format!(
-                " {} | {} | {}{}{} ",
-                index + 1,
-                folder,
-                worktree,
-                auth,
-                badge
-            )
-        } else {
-            format!(" {} | {}{}{} ", index + 1, folder, auth, badge)
-        };
+        let title = pane_title(
+            index + 1,
+            &folder,
+            app.pane_worktree(index),
+            app.pane_profile(index),
+            app.pane_auth(index),
+            badge,
+        );
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -432,6 +424,28 @@ fn label_name(name: &str) -> String {
     label
 }
 
+fn pane_title(
+    number: usize,
+    folder: &str,
+    worktree: Option<&str>,
+    profile: Option<&str>,
+    auth: Option<&str>,
+    badge: &str,
+) -> String {
+    let mut parts = vec![number.to_string(), folder.to_string()];
+    if let Some(worktree) = worktree.filter(|value| !value.is_empty()) {
+        parts.push(worktree.to_string());
+    }
+    if let Some(profile) = profile.filter(|value| !value.is_empty()) {
+        parts.push(profile.to_string());
+    }
+    if let Some(auth) = auth.filter(|value| !value.is_empty()) {
+        parts.push(auth.to_string());
+    }
+
+    format!(" {}{} ", parts.join(" | "), badge)
+}
+
 fn render_screen(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -603,4 +617,32 @@ fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen
         .y
         .saturating_add(row.min(area.height.saturating_sub(1)));
     frame.set_cursor_position((x, y));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pane_title_includes_launch_profile() {
+        assert_eq!(
+            pane_title(3, "gridbash/", Some("main"), Some("codex"), None, ""),
+            " 3 | gridbash/ | main | codex "
+        );
+    }
+
+    #[test]
+    fn pane_title_keeps_auth_profile_after_launch_profile() {
+        assert_eq!(
+            pane_title(
+                3,
+                "gridbash/",
+                Some("main"),
+                Some("codex"),
+                Some("codex-2"),
+                " active"
+            ),
+            " 3 | gridbash/ | main | codex | codex-2 active "
+        );
+    }
 }

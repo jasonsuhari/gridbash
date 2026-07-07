@@ -35,7 +35,6 @@ pub struct LaunchPlan {
 
 #[derive(Debug, Clone)]
 pub struct PaneLaunchSpec {
-    #[allow(dead_code)]
     pub profile_name: String,
     pub command: Profile,
     pub env: BTreeMap<String, String>,
