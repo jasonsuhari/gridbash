@@ -11,6 +11,7 @@ pub struct VibeProfile {
     pub status: String,
 }
 
+#[allow(dead_code)]
 pub fn load_profiles() -> Result<Vec<VibeProfile>> {
     let launch = Profile {
         command: "vibe".into(),

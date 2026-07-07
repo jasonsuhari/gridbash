@@ -33,6 +33,7 @@ pub struct LaunchPlan {
 
 #[derive(Debug, Clone)]
 pub struct PaneLaunchSpec {
+    #[allow(dead_code)]
     pub profile_name: String,
     pub command: Profile,
     pub cwd: PathBuf,
@@ -77,6 +78,7 @@ impl SavedSetup {
 }
 
 impl SetupFolder {
+    #[allow(dead_code)]
     pub fn from_path(path: PathBuf) -> Self {
         let name = folder_display_name(&path);
         Self { name, path }
@@ -177,6 +179,7 @@ fn vibe_pane_spec(agent: &str, folder: &SetupFolder) -> PaneLaunchSpec {
     }
 }
 
+#[allow(dead_code)]
 pub fn setup_from_selection(folders: Vec<PathBuf>, agents: Vec<String>) -> Result<SavedSetup> {
     let setup = SavedSetup::new(
         folders.into_iter().map(SetupFolder::from_path).collect(),
