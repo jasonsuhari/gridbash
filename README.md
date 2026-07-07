@@ -166,8 +166,8 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Input | Action |
 | --- | --- |
 | Drag mouse | Select/copy terminal text within the source pane |
-| Alt+Left / Alt+Right | Focus previous / next pane |
-| Alt+Up / Alt+Down | Focus pane above / below |
+| Alt+Left / Alt+Right | Focus previous / next pane or command line |
+| Alt+Up / Alt+Down | Focus pane above / below, or move to/from the command line |
 | Alt+Shift+Up / Alt+Shift+Down | Remove / add a row when safe |
 | Alt+Shift+Left / Alt+Shift+Right | Remove / add a column when safe |
 | Alt+s | Toggle focused pane selection |
@@ -175,10 +175,11 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+r | Rename the focused pane |
 | Alt+z | Put the focused pane to sleep; when multiple panes are selected, sleep the selected panes |
 | Hover sleeping pane | Wake the pane and make its terminal contents visible again |
+| Alt+e | Expand or hide command output |
 | Alt+o | Open sample settings |
 | Alt+q | Quit |
 
-Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane.
+Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane. When the one-line command bar is focused, typing stays in that bar; Enter runs the command from the cwd shown in the prompt and keeps output hidden until expanded.
 
 Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
 
