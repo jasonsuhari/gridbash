@@ -8,7 +8,7 @@ use ratatui::{
 use std::path::Path;
 use vt100::Cell;
 
-use crate::app::{App, SettingsRow};
+use crate::app::{App, PaneGroupView, PromptView, SettingsRow};
 
 pub struct DrawState {
     pub grid_area: Rect,
@@ -33,6 +33,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
 
         let focused = app.focus() == index;
         let selected = app.selected().contains(&index);
+        let group = app.pane_group(index);
         let border_style = if selected {
             Style::default()
                 .fg(Color::Cyan)
@@ -40,6 +41,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         } else if focused {
             Style::default()
                 .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else if let Some(group) = group {
+            Style::default()
+                .fg(rgb_color(group.color.rgb))
                 .add_modifier(Modifier::BOLD)
         } else if pane.active {
             Style::default().fg(Color::Green)
@@ -76,7 +81,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
 
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
-        render_screen(frame, inner, pane.screen());
+        render_screen(
+            frame,
+            inner,
+            pane.screen(),
+            group.map(|group| group.color.rgb),
+        );
+        if let Some(group) = group {
+            render_group_badge(frame, rect, group);
+        }
 
         if focused {
             set_terminal_cursor(frame, inner, pane.screen());
@@ -126,11 +139,82 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     if app.settings_open() {
         render_settings(frame, area, &app.settings_rows());
     }
+    if let Some(prompt) = app.prompt_view() {
+        render_manager_prompt(frame, area, prompt);
+    }
 
     DrawState {
         grid_area,
         pane_rects: rects,
     }
+}
+
+fn render_group_badge(frame: &mut Frame<'_>, rect: Rect, group: PaneGroupView) {
+    let label = format!(" :3 {} ", group.label);
+    let width = label.len() as u16;
+    if rect.width <= width.saturating_add(2) {
+        return;
+    }
+
+    let area = Rect {
+        x: rect.x + rect.width - width - 1,
+        y: rect.y,
+        width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(label).style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(rgb_color(group.color.rgb))
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+}
+
+fn render_manager_prompt(frame: &mut Frame<'_>, area: Rect, prompt: PromptView) {
+    let width = area.width.saturating_sub(4).max(24);
+    let prompt_area = Rect {
+        x: area.x.saturating_add(2),
+        y: area.y.saturating_add(area.height.saturating_sub(5)),
+        width: width.min(area.width),
+        height: 3,
+    };
+    frame.render_widget(Clear, prompt_area);
+
+    let input = if prompt.input.is_empty() {
+        Span::styled(
+            "type instruction, Enter sends, Esc cancels",
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::raw(prompt.input)
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            format!(" :3 {} ", prompt.label),
+            Style::default()
+                .fg(Color::Black)
+                .bg(rgb_color(prompt.color.rgb))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        input,
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(rgb_color(prompt.color.rgb)))
+        .title(" Manager ");
+    frame.render_widget(
+        Paragraph::new(line).block(block).style(
+            Style::default()
+                .fg(Color::Rgb(230, 237, 243))
+                .bg(Color::Rgb(11, 15, 20)),
+        ),
+        prompt_area,
+    );
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow]) {
@@ -247,26 +331,36 @@ fn label_name(name: &str) -> String {
     label
 }
 
-fn render_screen(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen) {
+fn render_screen(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    screen: &vt100::Screen,
+    tint: Option<(u8, u8, u8)>,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
     let lines = (0..area.height)
-        .map(|row| render_screen_row(screen, row, area.width))
+        .map(|row| render_screen_row(screen, row, area.width, tint))
         .collect::<Vec<_>>();
 
     frame.render_widget(
         Paragraph::new(lines).style(
             Style::default()
                 .fg(Color::Rgb(230, 237, 243))
-                .bg(Color::Rgb(11, 15, 20)),
+                .bg(tint_color(Color::Rgb(11, 15, 20), tint)),
         ),
         area,
     );
 }
 
-fn render_screen_row<'a>(screen: &vt100::Screen, row: u16, width: u16) -> Line<'a> {
+fn render_screen_row<'a>(
+    screen: &vt100::Screen,
+    row: u16,
+    width: u16,
+    tint: Option<(u8, u8, u8)>,
+) -> Line<'a> {
     let mut spans = Vec::new();
     let mut current_style: Option<Style> = None;
     let mut current_text = String::new();
@@ -277,7 +371,7 @@ fn render_screen_row<'a>(screen: &vt100::Screen, row: u16, width: u16) -> Line<'
                 &mut spans,
                 &mut current_style,
                 &mut current_text,
-                Style::default(),
+                Style::default().bg(tint_color(Color::Rgb(11, 15, 20), tint)),
                 " ",
             );
             continue;
@@ -296,7 +390,7 @@ fn render_screen_row<'a>(screen: &vt100::Screen, row: u16, width: u16) -> Line<'
             &mut spans,
             &mut current_style,
             &mut current_text,
-            cell_style(cell),
+            cell_style(cell, tint),
             text,
         );
     }
@@ -337,10 +431,13 @@ fn flush_span<'a>(
     ));
 }
 
-fn cell_style(cell: &Cell) -> Style {
+fn cell_style(cell: &Cell, tint: Option<(u8, u8, u8)>) -> Style {
     let mut style = Style::default()
         .fg(vt_color(cell.fgcolor(), Color::Rgb(230, 237, 243)))
-        .bg(vt_color(cell.bgcolor(), Color::Rgb(11, 15, 20)));
+        .bg(tint_color(
+            vt_color(cell.bgcolor(), Color::Rgb(11, 15, 20)),
+            tint,
+        ));
 
     if cell.bold() {
         style = style.add_modifier(Modifier::BOLD);
@@ -359,6 +456,52 @@ fn cell_style(cell: &Cell) -> Style {
     }
 
     style
+}
+
+fn rgb_color((red, green, blue): (u8, u8, u8)) -> Color {
+    Color::Rgb(red, green, blue)
+}
+
+fn tint_color(color: Color, tint: Option<(u8, u8, u8)>) -> Color {
+    let Some((tint_red, tint_green, tint_blue)) = tint else {
+        return color;
+    };
+    let Some((red, green, blue)) = color_to_rgb(color) else {
+        return color;
+    };
+
+    Color::Rgb(
+        blend_channel(red, tint_red),
+        blend_channel(green, tint_green),
+        blend_channel(blue, tint_blue),
+    )
+}
+
+fn blend_channel(base: u8, tint: u8) -> u8 {
+    ((base as u16 * 4 + tint as u16) / 5) as u8
+}
+
+fn color_to_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    match color {
+        Color::Black => Some((0, 0, 0)),
+        Color::Red => Some((128, 0, 0)),
+        Color::Green => Some((0, 128, 0)),
+        Color::Yellow => Some((128, 128, 0)),
+        Color::Blue => Some((0, 0, 128)),
+        Color::Magenta => Some((128, 0, 128)),
+        Color::Cyan => Some((0, 128, 128)),
+        Color::Gray => Some((128, 128, 128)),
+        Color::DarkGray => Some((80, 80, 80)),
+        Color::LightRed => Some((255, 85, 85)),
+        Color::LightGreen => Some((85, 255, 85)),
+        Color::LightYellow => Some((255, 255, 85)),
+        Color::LightBlue => Some((85, 85, 255)),
+        Color::LightMagenta => Some((255, 85, 255)),
+        Color::LightCyan => Some((85, 255, 255)),
+        Color::White => Some((255, 255, 255)),
+        Color::Rgb(red, green, blue) => Some((red, green, blue)),
+        _ => None,
+    }
 }
 
 fn vt_color(color: vt100::Color, default: Color) -> Color {

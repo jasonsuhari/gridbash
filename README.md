@@ -25,6 +25,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Native host-terminal text selection with no mouse-capture mode.
 - Normal terminal keys pass through to focused or broadcast panes.
 - Modeless Alt shortcuts for pane focus, selection, broadcast, settings, and quit.
+- Hidden manager agents for selected worker groups, with mascot badges and colored pane tints.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
 - Built-in launch profiles for common CLI coding agents.
 - Startup dimension picker with a live grid preview.
@@ -152,10 +153,21 @@ GridBash does not capture the mouse, so normal drag selection and copy behavior 
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+b | Toggle selected broadcast mode |
+| Alt+g | Group selected worker panes, or talk to the focused group manager |
+| Alt+u | Dissolve the focused worker group |
 | Alt+o | Open sample settings |
 | Alt+q | Quit |
 
 When broadcast is on, typing goes to selected panes only. If nothing is selected, input goes to the focused pane.
+
+To use hidden manager groups, configure a manager profile first:
+
+```toml
+[defaults]
+manager_profile = "claude-1"
+```
+
+The manager profile can be a normal GridBash profile or a ready `vibe` profile. Select worker panes with `Alt+s`, press `Alt+g` to attach a hidden manager, then focus any pane in that group and press `Alt+g` again to send the manager an instruction. Grouped worker panes show a deterministic non-green color tint and a `:3` badge.
 
 The settings screen is currently a sample UI. Its switches, steppers, and choices can be changed, but they do not affect runtime behavior yet.
 
@@ -180,6 +192,7 @@ Example:
 ```toml
 [defaults]
 profile = "powershell"
+manager_profile = "claude-1"
 
 [profiles.review]
 command = "codex"

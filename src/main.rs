@@ -4,6 +4,7 @@ mod composer;
 mod config;
 mod layout;
 mod onboarding;
+mod orchestrator;
 mod profiles;
 mod pty;
 mod setup;
