@@ -31,6 +31,15 @@ type OnboardingTerminal = Terminal<CrosstermBackend<io::Stdout>>;
 const LOAD_DURATION: Duration = Duration::from_millis(900);
 const TICK_RATE: Duration = Duration::from_millis(50);
 const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
+const MASCOT_ART: [&str; 7] = [
+    "    .--------.",
+    "   /  [] []  \\",
+    "  |    >_    |",
+    "  |  \\____/  |",
+    "   \\__====__/",
+    "     /|GB|\\",
+    "    /_|__|_\\",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnboardingResult {
@@ -172,10 +181,33 @@ fn draw_loading(frame: &mut Frame<'_>, elapsed: Duration, detected_count: usize)
     let area = frame.area();
     frame.render_widget(background(), area);
 
-    let panel = centered_rect(area, 64, 10);
+    let panel = centered_rect(area, 88, 13);
+    let block = setup_block(" first run ");
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    if let Some((mascot_area, content_area)) = mascot_layout(inner) {
+        render_mascot(frame, mascot_area);
+        render_loading_content(frame, content_area, elapsed, detected_count, false);
+    } else {
+        render_loading_content(frame, inner, elapsed, detected_count, true);
+    }
+}
+
+fn render_loading_content(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    elapsed: Duration,
+    detected_count: usize,
+    include_compact_mascot: bool,
+) {
     let spinner = SPINNER[((elapsed.as_millis() / 110) as usize) % SPINNER.len()];
     let ratio = (elapsed.as_secs_f64() / LOAD_DURATION.as_secs_f64()).clamp(0.0, 1.0);
-    let lines = vec![
+    let mut lines = Vec::new();
+    if include_compact_mascot {
+        lines.extend(compact_mascot_lines());
+    }
+    lines.extend([
         Line::from(Span::styled(
             "GridBash setup",
             Style::default()
@@ -188,27 +220,30 @@ fn draw_loading(frame: &mut Frame<'_>, elapsed: Duration, detected_count: usize)
             Span::raw(" detecting available terminals"),
         ]),
         Line::from(format!("found {detected_count} terminal profile(s)")),
-    ];
+    ]);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(4),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
 
     frame.render_widget(
         Paragraph::new(lines)
             .alignment(Alignment::Center)
-            .block(setup_block(" first run ")),
-        panel,
+            .style(setup_panel_style()),
+        chunks[0],
     );
 
-    let gauge_area = Rect::new(
-        panel.x.saturating_add(4),
-        panel.y.saturating_add(panel.height.saturating_sub(3)),
-        panel.width.saturating_sub(8),
-        1,
-    );
     frame.render_widget(
         Gauge::default()
             .ratio(ratio)
             .gauge_style(Style::default().fg(Color::Cyan))
             .label(""),
-        gauge_area,
+        inset_x(chunks[2], 2),
     );
 }
 
@@ -218,10 +253,34 @@ fn draw_picker(frame: &mut Frame<'_>, choices: &[TerminalChoice], selected: usiz
 
     let height = (choices.len() as u16)
         .saturating_mul(2)
-        .saturating_add(10)
+        .saturating_add(13)
         .min(area.height.max(1));
-    let panel = centered_rect(area, 72, height);
-    let mut lines = vec![
+    let panel = centered_rect(area, 88, height);
+    let block = setup_block(" terminal setup ");
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    if let Some((mascot_area, content_area)) = mascot_layout(inner) {
+        render_mascot(frame, mascot_area);
+        render_picker_content(frame, content_area, choices, selected, false);
+    } else {
+        render_picker_content(frame, inner, choices, selected, true);
+    }
+}
+
+fn render_picker_content(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    choices: &[TerminalChoice],
+    selected: usize,
+    include_compact_mascot: bool,
+) {
+    let mut lines = Vec::new();
+    if include_compact_mascot {
+        lines.extend(compact_mascot_lines());
+    }
+
+    lines.extend([
         Line::from(Span::styled(
             "Choose your default terminal",
             Style::default()
@@ -234,7 +293,7 @@ fn draw_picker(frame: &mut Frame<'_>, choices: &[TerminalChoice], selected: usiz
             Style::default().fg(Color::Gray),
         )),
         Line::from(""),
-    ];
+    ]);
 
     for (index, choice) in choices.iter().enumerate() {
         let is_selected = index == selected;
@@ -279,13 +338,77 @@ fn draw_picker(frame: &mut Frame<'_>, choices: &[TerminalChoice], selected: usiz
     frame.render_widget(
         Paragraph::new(lines)
             .alignment(Alignment::Left)
-            .block(setup_block(" terminal setup ")),
-        panel,
+            .style(setup_panel_style()),
+        area,
     );
+}
+
+fn render_mascot(frame: &mut Frame<'_>, area: Rect) {
+    let mut lines = Vec::with_capacity(MASCOT_ART.len() + 3);
+    lines.push(Line::from(Span::styled(
+        "BashBot",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "setup sidekick",
+        Style::default().fg(Color::Gray),
+    )));
+    lines.push(Line::from(""));
+    lines.extend(
+        MASCOT_ART
+            .iter()
+            .map(|line| Line::from(Span::styled(*line, Style::default().fg(Color::LightCyan)))),
+    );
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .style(setup_panel_style()),
+        area,
+    );
+}
+
+fn compact_mascot_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::from(vec![
+            Span::styled(
+                "BashBot",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" [>_]", Style::default().fg(Color::LightCyan)),
+            Span::styled(" ready to grid", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(""),
+    ]
+}
+
+fn mascot_layout(area: Rect) -> Option<(Rect, Rect)> {
+    if area.width < 74 || area.height < 10 {
+        return None;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(22),
+            Constraint::Length(2),
+            Constraint::Min(40),
+        ])
+        .split(area);
+
+    Some((chunks[0], chunks[2]))
 }
 
 fn background() -> Paragraph<'static> {
     Paragraph::new("").style(Style::default().bg(Color::Rgb(11, 15, 20)))
+}
+
+fn setup_panel_style() -> Style {
+    Style::default().bg(Color::Rgb(11, 15, 20))
 }
 
 fn setup_block(title: &'static str) -> Block<'static> {
@@ -293,7 +416,16 @@ fn setup_block(title: &'static str) -> Block<'static> {
         .borders(Borders::ALL)
         .title(title)
         .border_style(Style::default().fg(Color::Cyan))
-        .style(Style::default().bg(Color::Rgb(11, 15, 20)))
+        .style(setup_panel_style())
+}
+
+fn inset_x(area: Rect, x: u16) -> Rect {
+    Rect {
+        x: area.x.saturating_add(x),
+        y: area.y,
+        width: area.width.saturating_sub(x.saturating_mul(2)),
+        height: area.height,
+    }
 }
 
 fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
