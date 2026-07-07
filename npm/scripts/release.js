@@ -116,11 +116,14 @@ function nextVersion(current, requested) {
 function updateCargoVersion(version) {
   const cargoPath = path.join(root, "Cargo.toml");
   const raw = fs.readFileSync(cargoPath, "utf8");
-  const updated = raw.replace(/^version = "([^"]+)"/m, `version = "${version}"`);
-  if (updated === raw) {
-    fail("could not update Cargo.toml package version");
+  if (!/^version = "([^"]+)"/m.test(raw)) {
+    fail("could not find Cargo.toml package version");
   }
-  fs.writeFileSync(cargoPath, updated);
+
+  const updated = raw.replace(/^version = "([^"]+)"/m, `version = "${version}"`);
+  if (updated !== raw) {
+    fs.writeFileSync(cargoPath, updated);
+  }
 }
 
 function latestDevlog() {
