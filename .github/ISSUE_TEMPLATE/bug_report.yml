@@ -1,0 +1,73 @@
+name: Bug report
+description: Report reproducible broken behavior in GridBash.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting a bug. Do not use this form for security vulnerabilities; follow SECURITY.md instead.
+  - type: input
+    id: version
+    attributes:
+      label: GridBash version or commit
+      placeholder: "0.1.4 or git commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 24H2"
+    validations:
+      required: true
+  - type: input
+    id: terminal
+    attributes:
+      label: Host terminal
+      placeholder: "Windows Terminal, PowerShell, Git Bash, cmd"
+    validations:
+      required: true
+  - type: input
+    id: command
+    attributes:
+      label: Launch command
+      placeholder: "gridbash 2x3 --profile powershell"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use the smallest reliable reproduction you have.
+      placeholder: |
+        1. Run ...
+        2. Press ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Logs, screenshots, terminal output, config snippets, or profile details.
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and pull requests.
+          required: true
+        - label: This is not a security vulnerability report.
+          required: true
