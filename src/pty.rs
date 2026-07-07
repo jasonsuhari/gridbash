@@ -12,6 +12,12 @@ use vt100::{Parser, Screen};
 
 use crate::layout::PaneId;
 
+const DEVICE_STATUS_QUERY: &[u8] = b"\x1b[5n";
+const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
+const PRIMARY_DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[c";
+const PRIMARY_DEVICE_ATTRIBUTES_ZERO_QUERY: &[u8] = b"\x1b[0c";
+const MAX_TERMINAL_QUERY_LEN: usize = 4;
+
 #[derive(Debug, Clone)]
 pub enum PtyEvent {
     Output {
@@ -166,11 +172,11 @@ impl PtyPane {
         scan.extend_from_slice(&self.response_scan_tail);
         scan.extend_from_slice(bytes);
 
-        if contains_sequence(&scan, b"\x1b[5n") {
+        if contains_sequence(&scan, DEVICE_STATUS_QUERY) {
             let _ = self.write(b"\x1b[0n");
         }
 
-        let cursor_position_requests = count_sequence(&scan, b"\x1b[6n");
+        let cursor_position_requests = count_sequence(&scan, CURSOR_POSITION_QUERY);
         if cursor_position_requests > 0 {
             let (row, column) = self.parser.screen().cursor_position();
             let response = format!(
@@ -183,13 +189,13 @@ impl PtyPane {
             }
         }
 
-        if contains_sequence(&scan, b"\x1b[c") || contains_sequence(&scan, b"\x1b[0c") {
+        if contains_sequence(&scan, PRIMARY_DEVICE_ATTRIBUTES_QUERY)
+            || contains_sequence(&scan, PRIMARY_DEVICE_ATTRIBUTES_ZERO_QUERY)
+        {
             let _ = self.write(b"\x1b[?1;2c");
         }
 
-        const MAX_QUERY_LEN: usize = 5;
-        let tail_start = scan.len().saturating_sub(MAX_QUERY_LEN - 1);
-        self.response_scan_tail = scan[tail_start..].to_vec();
+        self.response_scan_tail = terminal_query_scan_tail(&scan);
     }
 
     pub fn terminate(&mut self) {
@@ -253,6 +259,12 @@ fn count_sequence(buffer: &[u8], sequence: &[u8]) -> usize {
         .count()
 }
 
+fn terminal_query_scan_tail(scan: &[u8]) -> Vec<u8> {
+    let tail_len = MAX_TERMINAL_QUERY_LEN.saturating_sub(1);
+    let tail_start = scan.len().saturating_sub(tail_len);
+    scan[tail_start..].to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -268,6 +280,22 @@ mod tests {
     fn counts_split_terminal_query_sequences() {
         assert_eq!(count_sequence(b"\x1b[6n", b"\x1b[6n"), 1);
         assert_eq!(count_sequence(b"abc", b"\x1b[6n"), 0);
+    }
+
+    #[test]
+    fn terminal_query_scan_tail_keeps_split_queries_detectable() {
+        let mut scan = terminal_query_scan_tail(b"prompt\x1b[6");
+        scan.extend_from_slice(b"n");
+
+        assert_eq!(count_sequence(&scan, CURSOR_POSITION_QUERY), 1);
+    }
+
+    #[test]
+    fn terminal_query_scan_tail_does_not_replay_complete_queries() {
+        let mut scan = terminal_query_scan_tail(CURSOR_POSITION_QUERY);
+        scan.extend_from_slice(b"prompt");
+
+        assert_eq!(count_sequence(&scan, CURSOR_POSITION_QUERY), 0);
     }
 
     #[test]

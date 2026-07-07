@@ -56,6 +56,13 @@ and pushes the release commit and `vX.Y.Z` tag. A separate publish job in the
 same workflow run then builds the Windows package, publishes npm, and creates
 or updates the GitHub release.
 
+Before creating the release commit, the script fetches origin branch refs and
+fails if any unmerged task branches remain under `chore/`, `docs/`, `feat/`,
+`fix/`, `refactor/`, or `test/`. Review, merge, or delete those branches before
+releasing. Use `--allow-unmerged-branches` only when the branch queue was
+explicitly reviewed and the release is intentionally shipping without those
+changes.
+
 If publishing fails after the tag exists, rerun the failed publish job after
 fixing credentials. The publish job skips npm when that exact package version
 is already live and updates an existing GitHub release with `--clobber` assets.
@@ -84,6 +91,7 @@ The script will:
 
 - require a clean working tree
 - require `main` or `master` unless `--allow-branch` is passed
+- require reviewed/merged origin task branches unless `--allow-unmerged-branches` is passed
 - bump `package.json` and `Cargo.toml`
 - update `Cargo.lock`
 - copy the devlog to `docs/releases/vX.Y.Z.md`

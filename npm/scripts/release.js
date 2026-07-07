@@ -23,6 +23,8 @@ Options:
   --push               Push the release commit and tag to origin
   --yes                Required with --push
   --allow-branch       Allow releasing from a branch other than main or master
+  --allow-unmerged-branches
+                      Allow release even when origin has unmerged task branches
   --skip-checks        Skip cargo fmt, tests, prepare, and npm pack dry run
 `);
 }
@@ -183,6 +185,102 @@ function assertBranchAllowed() {
   }
 }
 
+function hasRemote(name) {
+  const result = spawnSync("git", ["remote", "get-url", name], {
+    cwd: root,
+    stdio: "ignore",
+    shell: false,
+  });
+  return result.status === 0;
+}
+
+function refreshOriginBranches() {
+  if (!hasRemote("origin")) {
+    return;
+  }
+
+  const result = spawnSync(
+    "git",
+    ["fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"],
+    {
+      cwd: root,
+      stdio: "pipe",
+      encoding: "utf8",
+      shell: false,
+    },
+  );
+
+  if (result.error) {
+    throw result.error;
+  }
+
+  if (result.status !== 0) {
+    fail(
+      `could not refresh origin branches before release\n${result.stderr || result.stdout}\nUse --allow-unmerged-branches only after manually reviewing branch state.`,
+    );
+  }
+}
+
+function taskBranchName(remoteBranch) {
+  return remoteBranch.replace(/^origin\//, "");
+}
+
+function isTaskBranch(remoteBranch) {
+  return /^(chore|docs|feat|fix|refactor|test)\//.test(taskBranchName(remoteBranch));
+}
+
+function isMergedIntoHead(remoteBranch) {
+  const result = spawnSync("git", ["merge-base", "--is-ancestor", remoteBranch, "HEAD"], {
+    cwd: root,
+    stdio: "ignore",
+    shell: false,
+  });
+  return result.status === 0;
+}
+
+function unmergedOriginTaskBranches() {
+  if (!hasRemote("origin")) {
+    return [];
+  }
+
+  const output = run("git", ["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"], {
+    capture: true,
+  });
+
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((branch) => branch !== "origin/HEAD")
+    .filter((branch) => !["origin/main", "origin/master"].includes(branch))
+    .filter(isTaskBranch)
+    .filter((branch) => !isMergedIntoHead(branch));
+}
+
+function summarizeBranch(remoteBranch) {
+  const latest = run("git", ["log", "--oneline", "-1", remoteBranch], { capture: true });
+  return `- ${remoteBranch}: ${latest}`;
+}
+
+function assertNoUnmergedTaskBranches() {
+  if (flags.has("--allow-unmerged-branches")) {
+    return;
+  }
+
+  refreshOriginBranches();
+  const branches = unmergedOriginTaskBranches();
+  if (branches.length === 0) {
+    return;
+  }
+
+  const visible = branches.slice(0, 12).map(summarizeBranch).join("\n");
+  const hiddenCount = branches.length - 12;
+  const hidden = hiddenCount > 0 ? `\n- ...and ${hiddenCount} more` : "";
+  fail(
+    `unmerged origin task branches exist; review, merge, or delete them before release:\n${visible}${hidden}\nUse --allow-unmerged-branches only after an explicit branch review.`,
+  );
+}
+
 function assertTagFree(tag) {
   const result = spawnSync("git", ["rev-parse", "--verify", tag], {
     cwd: root,
@@ -210,6 +308,7 @@ if (flags.has("--push") && !flags.has("--yes")) {
 
 assertClean();
 assertBranchAllowed();
+assertNoUnmergedTaskBranches();
 
 const packageJson = readJson("package.json");
 const cargoToml = fs.readFileSync(path.join(root, "Cargo.toml"), "utf8");
