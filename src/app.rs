@@ -41,7 +41,6 @@ pub struct App {
     focus: usize,
     selected: BTreeSet<usize>,
     rects: Vec<Rect>,
-    broadcast: bool,
     settings: SettingsState,
     status: String,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
@@ -229,11 +228,8 @@ impl App {
             focus: 0,
             selected: BTreeSet::new(),
             rects: Vec::new(),
-            broadcast: false,
             settings: SettingsState::default(),
-            status:
-                "Alt+arrows move | Alt+s select | Alt+a all/none | Alt+b broadcast | Alt+o settings"
-                    .into(),
+            status: "Alt+arrows move | Alt+s select | Alt+a all/none | Alt+o settings".into(),
             event_tx,
             event_rx,
             last_activity_decay: Instant::now(),
@@ -444,15 +440,6 @@ impl App {
         let lower = ch.to_ascii_lowercase();
         match lower {
             'q' => Ok(Some(true)),
-            'b' => {
-                self.broadcast = !self.broadcast;
-                self.status = if self.broadcast {
-                    "broadcast selected: on".into()
-                } else {
-                    "broadcast selected: off".into()
-                };
-                Ok(Some(false))
-            }
             's' => {
                 toggle_selection(&mut self.selected, self.focus);
                 self.status = format!("selected {} panes", self.selected.len());
@@ -536,11 +523,7 @@ impl App {
     }
 
     fn input_targets(&self) -> Vec<usize> {
-        if self.broadcast && !self.selected.is_empty() {
-            self.selected.iter().copied().collect()
-        } else {
-            vec![self.focus.min(self.panes.len().saturating_sub(1))]
-        }
+        input_targets_for(self.focus, &self.selected, self.panes.len())
     }
 
     fn focus_next(&mut self) {
@@ -591,10 +574,6 @@ impl App {
 
     pub fn selected(&self) -> &BTreeSet<usize> {
         &self.selected
-    }
-
-    pub fn broadcast(&self) -> bool {
-        self.broadcast
     }
 
     pub fn status(&self) -> &str {
@@ -716,6 +695,18 @@ fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) {
     }
 }
 
+fn input_targets_for(focus: usize, selected: &BTreeSet<usize>, pane_count: usize) -> Vec<usize> {
+    if pane_count == 0 {
+        return Vec::new();
+    }
+
+    if selected.len() > 1 {
+        selected.iter().copied().collect()
+    } else {
+        vec![focus.min(pane_count - 1)]
+    }
+}
+
 fn control_byte(ch: char) -> Option<u8> {
     let lower = ch.to_ascii_lowercase();
     if lower.is_ascii_lowercase() {
@@ -783,6 +774,32 @@ fn function_key_sequence(number: u8) -> Option<&'static [u8]> {
         11 => Some(b"\x1b[23~"),
         12 => Some(b"\x1b[24~"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn selected(indices: &[usize]) -> BTreeSet<usize> {
+        indices.iter().copied().collect()
+    }
+
+    #[test]
+    fn input_targets_focused_pane_without_multiple_selected_panes() {
+        assert_eq!(input_targets_for(2, &selected(&[]), 4), vec![2]);
+        assert_eq!(input_targets_for(2, &selected(&[0]), 4), vec![2]);
+    }
+
+    #[test]
+    fn input_targets_selected_panes_when_multiple_panes_are_selected() {
+        assert_eq!(input_targets_for(2, &selected(&[0, 3]), 4), vec![0, 3]);
+    }
+
+    #[test]
+    fn input_targets_clamps_focus_to_available_panes() {
+        assert_eq!(input_targets_for(8, &selected(&[]), 4), vec![3]);
+        assert!(input_targets_for(0, &selected(&[]), 0).is_empty());
     }
 }
 

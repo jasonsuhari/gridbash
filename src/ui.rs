@@ -83,10 +83,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         }
     }
 
-    let broadcast = if app.broadcast() {
-        "BROADCAST"
+    let input_scope = if app.selected().len() > 1 {
+        "selected panes"
     } else {
-        "focused"
+        "focused pane"
     };
     let status = Line::from(vec![
         Span::styled(
@@ -105,8 +105,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         ),
         Span::raw(" | "),
         Span::styled(
-            broadcast,
-            Style::default().fg(if app.broadcast() {
+            input_scope,
+            Style::default().fg(if app.selected().len() > 1 {
                 Color::Cyan
             } else {
                 Color::Gray
