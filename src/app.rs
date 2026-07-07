@@ -56,6 +56,13 @@ enum KeyOutcome {
     Quit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwapSelection {
+    NeedsMore,
+    TooMany,
+    Pair(usize, usize),
+}
+
 #[derive(Debug, Clone)]
 pub struct SettingsRow {
     pub selected: bool,
@@ -231,7 +238,8 @@ impl App {
             sleeping: BTreeSet::new(),
             rects: Vec::new(),
             settings: SettingsState::default(),
-            status: "Alt+arrows move | Alt+s select | Alt+z sleep | Alt+o settings".into(),
+            status: "Alt+arrows move | Alt+s select | Alt+x swap | Alt+z sleep | Alt+o settings"
+                .into(),
             event_tx,
             event_rx,
             last_activity_decay: Instant::now(),
@@ -485,6 +493,10 @@ impl App {
                 self.toggle_sleep_for_targets();
                 Ok(Some(false))
             }
+            'x' => {
+                self.swap_selected_tiles();
+                Ok(Some(false))
+            }
             'o' => {
                 self.settings.open = true;
                 self.status = "settings open".into();
@@ -492,6 +504,36 @@ impl App {
             }
             _ => Ok(None),
         }
+    }
+
+    fn swap_selected_tiles(&mut self) {
+        let (first, second) = match selected_swap_pair(&self.selected) {
+            SwapSelection::NeedsMore => {
+                self.status = "select two panes to swap".into();
+                return;
+            }
+            SwapSelection::TooMany => {
+                self.status = "deselect panes until only two are selected".into();
+                return;
+            }
+            SwapSelection::Pair(first, second) => (first, second),
+        };
+
+        if first >= self.panes.len() || second >= self.panes.len() {
+            self.status = "select two visible panes to swap".into();
+            return;
+        }
+
+        self.panes.swap(first, second);
+        if let Some(plan) = self.launch_plan.as_mut()
+            && first < plan.panes.len()
+            && second < plan.panes.len()
+        {
+            plan.panes.swap(first, second);
+        }
+        swap_set_indices(&mut self.sleeping, first, second);
+        self.focus = swapped_index(self.focus, first, second);
+        self.status = format!("swapped panes {} and {}", first + 1, second + 1);
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -807,6 +849,41 @@ fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) {
     }
 }
 
+fn selected_swap_pair(selected: &BTreeSet<usize>) -> SwapSelection {
+    match selected.len() {
+        0 | 1 => SwapSelection::NeedsMore,
+        2 => {
+            let mut selected = selected.iter().copied();
+            let first = selected.next().expect("pair has a first index");
+            let second = selected.next().expect("pair has a second index");
+            SwapSelection::Pair(first, second)
+        }
+        _ => SwapSelection::TooMany,
+    }
+}
+
+fn swap_set_indices(indices: &mut BTreeSet<usize>, first: usize, second: usize) {
+    let had_first = indices.remove(&first);
+    let had_second = indices.remove(&second);
+
+    if had_first {
+        indices.insert(second);
+    }
+    if had_second {
+        indices.insert(first);
+    }
+}
+
+fn swapped_index(index: usize, first: usize, second: usize) -> usize {
+    if index == first {
+        second
+    } else if index == second {
+        first
+    } else {
+        index
+    }
+}
+
 fn input_targets_for(focus: usize, selected: &BTreeSet<usize>, pane_count: usize) -> Vec<usize> {
     if pane_count == 0 {
         return Vec::new();
@@ -911,6 +988,44 @@ mod tests {
 
     fn selected(indices: &[usize]) -> BTreeSet<usize> {
         indices.iter().copied().collect()
+    }
+
+    #[test]
+    fn selected_swap_pair_requires_exactly_two_panes() {
+        assert_eq!(selected_swap_pair(&selected(&[])), SwapSelection::NeedsMore);
+        assert_eq!(
+            selected_swap_pair(&selected(&[1])),
+            SwapSelection::NeedsMore
+        );
+        assert_eq!(
+            selected_swap_pair(&selected(&[0, 1, 2])),
+            SwapSelection::TooMany
+        );
+    }
+
+    #[test]
+    fn selected_swap_pair_returns_selected_pair_in_order() {
+        assert_eq!(
+            selected_swap_pair(&selected(&[3, 1])),
+            SwapSelection::Pair(1, 3)
+        );
+    }
+
+    #[test]
+    fn swap_set_indices_moves_membership_between_swapped_panes() {
+        let mut indices = selected(&[0, 4]);
+        swap_set_indices(&mut indices, 0, 2);
+        assert_eq!(indices, selected(&[2, 4]));
+
+        swap_set_indices(&mut indices, 0, 2);
+        assert_eq!(indices, selected(&[0, 4]));
+    }
+
+    #[test]
+    fn swapped_index_follows_the_swapped_pair() {
+        assert_eq!(swapped_index(0, 0, 2), 2);
+        assert_eq!(swapped_index(2, 0, 2), 0);
+        assert_eq!(swapped_index(4, 0, 2), 4);
     }
 
     #[test]
