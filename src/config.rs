@@ -60,6 +60,7 @@ impl Config {
         self.defaults.profile = Some(profile.into());
     }
 
+    #[allow(dead_code)]
     pub fn save_setup(&mut self, name: impl Into<String>, setup: SavedSetup) {
         self.setups.insert(name.into(), setup);
     }
