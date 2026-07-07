@@ -23,6 +23,10 @@ type ComposerTerminal = Terminal<CrosstermBackend<Stdout>>;
 const DEFAULT_ROWS: usize = 2;
 const DEFAULT_COLUMNS: usize = 3;
 const MAX_DIMENSION: usize = 10;
+const PREVIEW_BORDER: Color = Color::Rgb(95, 214, 150);
+const PREVIEW_LIGHT: Color = Color::Rgb(43, 128, 84);
+const PREVIEW_MID: Color = Color::Rgb(28, 96, 65);
+const PREVIEW_DARK: Color = Color::Rgb(15, 65, 49);
 
 pub struct Composer {
     current_dir: PathBuf,
@@ -156,7 +160,7 @@ impl Composer {
         let area = frame.area();
         frame.render_widget(background(), area);
 
-        let panel = centered_rect(area, 82, 28);
+        let panel = area;
         frame.render_widget(Clear, panel);
         let block = Block::default()
             .borders(Borders::ALL)
@@ -218,7 +222,13 @@ impl Composer {
                 continue;
             }
 
-            frame.render_widget(dithered_square(index, rect), rect);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(PREVIEW_BORDER))
+                .style(Style::default().bg(PREVIEW_DARK));
+            let inner = block.inner(rect);
+            frame.render_widget(block, rect);
+            frame.render_widget(dithered_fill(index, inner), inner);
         }
     }
 
@@ -292,26 +302,6 @@ fn panel_style() -> Style {
         .bg(Color::Rgb(11, 15, 20))
 }
 
-fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(height.min(area.height)),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - width_percent) / 2),
-            Constraint::Percentage(width_percent),
-            Constraint::Percentage((100 - width_percent) / 2),
-        ])
-        .split(vertical[1])[1]
-}
-
 fn inset(area: Rect, x: u16, y: u16) -> Rect {
     Rect {
         x: area.x.saturating_add(x),
@@ -372,26 +362,21 @@ fn square_preview_rects(area: Rect, grid: GridSize) -> Vec<Rect> {
     rects
 }
 
-fn dithered_square(index: usize, rect: Rect) -> Paragraph<'static> {
+fn dithered_fill(index: usize, rect: Rect) -> Paragraph<'static> {
     let lines = (0..rect.height)
         .map(|y| {
-            let mut text = String::with_capacity(rect.width as usize);
+            let mut spans = Vec::with_capacity(rect.width as usize);
             for x in 0..rect.width {
-                let ch = match (x + y + index as u16) % 4 {
-                    0 => '#',
-                    1 => '.',
-                    2 => ':',
-                    _ => '.',
+                let bg = match (x.saturating_mul(3) + y.saturating_mul(5) + index as u16) % 6 {
+                    0 | 3 => PREVIEW_LIGHT,
+                    1 | 4 => PREVIEW_MID,
+                    _ => PREVIEW_DARK,
                 };
-                text.push(ch);
+                spans.push(Span::styled(" ", Style::default().bg(bg)));
             }
-            Line::from(text)
+            Line::from(spans)
         })
         .collect::<Vec<_>>();
 
-    Paragraph::new(lines).style(
-        Style::default()
-            .fg(Color::Rgb(78, 198, 220))
-            .bg(Color::Rgb(12, 58, 72)),
-    )
+    Paragraph::new(lines).style(Style::default().bg(PREVIEW_DARK))
 }
