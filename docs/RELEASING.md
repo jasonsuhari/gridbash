@@ -59,6 +59,9 @@ or updates the GitHub release.
 If publishing fails after the tag exists, rerun the failed publish job after
 fixing credentials. The publish job skips npm when that exact package version
 is already live and updates an existing GitHub release with `--clobber` assets.
+If the whole workflow needs to be dispatched again for an exact version whose
+tag already exists, the prepare job skips version preparation and publishes the
+existing tag.
 
 Separately, if a `v*` tag is pushed from a local release fallback, the tag push
 path in the same workflow publishes npm and creates the GitHub release.
