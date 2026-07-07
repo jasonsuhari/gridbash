@@ -1,6 +1,21 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "patch, minor, major, or an explicit x.y.z version"
+        required: true
+        default: "patch"
+      notes:
+        description: "Devlog or release notes path. Defaults to latest docs/devlogs entry."
+        required: false
+        default: ""
+      skip_checks:
+        description: "Skip release validation checks. Use only for emergency retries."
+        required: false
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
@@ -10,7 +25,88 @@ permissions:
   id-token: write
 
 jobs:
-  release:
+  prepare:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Check npm token
+        shell: pwsh
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if (-not $env:NODE_AUTH_TOKEN) {
+            throw "Set the NPM_TOKEN repository secret before publishing releases."
+          }
+
+      - name: Create release commit and tag
+        id: release
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          $releaseArgs = @("${{ inputs.version }}", "--push", "--yes")
+          if ("${{ inputs.notes }}") {
+            $releaseArgs += @("--notes", "${{ inputs.notes }}")
+          }
+          if ("${{ inputs.skip_checks }}" -eq "true") {
+            $releaseArgs += "--skip-checks"
+          }
+
+          node npm/scripts/release.js @releaseArgs
+
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+
+      - run: node npm/scripts/prepare.js
+
+      - name: Pack npm package
+        id: pack
+        shell: pwsh
+        run: |
+          $raw = npm pack --json --ignore-scripts
+          $pack = ($raw | ConvertFrom-Json)[0].filename
+          "tarball=$pack" >> $env:GITHUB_OUTPUT
+
+      - name: Publish npm package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ steps.release.outputs.tag }}"
+          $notes = "docs/releases/$tag.md"
+          if (-not (Test-Path $notes)) {
+            "# $tag`n`nAutomated release for $tag." | Set-Content -Path RELEASE_NOTES.md
+            $notes = "RELEASE_NOTES.md"
+          }
+
+          gh release create $tag `
+            "target/release/gridbash.exe" `
+            "${{ steps.pack.outputs.tarball }}" `
+            --title $tag `
+            --notes-file $notes `
+            --verify-tag `
+            --latest
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4

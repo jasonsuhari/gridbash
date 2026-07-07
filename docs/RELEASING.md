@@ -4,11 +4,12 @@ This repo has an agent-friendly release path:
 
 1. Land and verify the product change.
 2. Create a devlog.
-3. Run the release script.
-4. Push the generated tag.
-5. GitHub Actions publishes npm and creates the GitHub release.
+3. Run the `Release` GitHub Actions workflow.
+4. GitHub Actions creates the release commit and tag.
+5. The pushed tag publishes npm and creates the GitHub release.
 
-The release workflow runs only for tags named `v*`.
+The release workflow can be run manually from GitHub Actions and also responds
+to pushed tags named `v*`.
 
 ## One-Time Setup
 
@@ -35,9 +36,26 @@ Fill in the generated file under `docs/devlogs/`. Keep it factual:
 - what was validated
 - any known risk
 
-## Release From Main
+## Release From GitHub Actions
 
-After the change is merged and the working tree is clean:
+After the change is merged to `main`:
+
+1. Open the `Release` workflow in GitHub Actions.
+2. Select `Run workflow`.
+3. Set `version` to `patch`, `minor`, `major`, or an exact version like `0.2.0`.
+4. Optionally set `notes` to a devlog path such as `docs/devlogs/YYYY-MM-DD-title.md`.
+5. Run the workflow.
+
+The workflow runs `node npm/scripts/release.js` on `main`. That script creates
+and pushes the release commit and `vX.Y.Z` tag. The same workflow run then builds
+the Windows package, publishes npm, and creates the GitHub release.
+
+Separately, if a `v*` tag is pushed from a local release fallback, the tag push
+path in the same workflow publishes npm and creates the GitHub release.
+
+## Local Fallback
+
+Use this only when GitHub Actions is unavailable:
 
 ```powershell
 npm run release -- patch --notes docs/devlogs/YYYY-MM-DD-title.md --push --yes
