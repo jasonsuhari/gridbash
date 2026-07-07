@@ -44,7 +44,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
 
         let focused = app.focus() == index;
         let selected = app.selected().contains(&index);
-        let chrome = pane_chrome(selected, focused, pane.active, pane.exited);
+        let sleeping = app.pane_sleeping(index);
+        let chrome = pane_chrome(selected, focused, pane.active, pane.exited, sleeping);
 
         let folder = app
             .pane_folder(index)
@@ -69,9 +70,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
 
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
-        render_screen(frame, inner, pane.screen(), app.selection_for_pane(index));
+        if sleeping {
+            render_sleeping_screen(frame, inner);
+        } else {
+            render_screen(frame, inner, pane.screen(), app.selection_for_pane(index));
+        }
 
-        if focused && !modal_open {
+        if focused && !sleeping && !modal_open {
             set_terminal_cursor(frame, inner, pane.screen());
         }
     }
@@ -109,7 +114,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(" | Alt+q quit"),
+        Span::raw(" | Alt+z sleep | hover wakes | Alt+q quit"),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
@@ -143,8 +148,16 @@ struct PaneChrome {
     badge: &'static str,
 }
 
-fn pane_chrome(selected: bool, focused: bool, _active: bool, exited: bool) -> PaneChrome {
-    let border_style = if selected {
+fn pane_chrome(
+    selected: bool,
+    focused: bool,
+    _active: bool,
+    exited: bool,
+    sleeping: bool,
+) -> PaneChrome {
+    let border_style = if sleeping {
+        Style::default().fg(Color::Rgb(32, 36, 42))
+    } else if selected {
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
@@ -160,6 +173,8 @@ fn pane_chrome(selected: bool, focused: bool, _active: bool, exited: bool) -> Pa
 
     let badge = if exited {
         " exited"
+    } else if sleeping {
+        " asleep"
     } else if selected {
         " selected"
     } else {
@@ -653,6 +668,20 @@ fn label_name(name: &str) -> String {
     label
 }
 
+fn render_sleeping_screen(frame: &mut Frame<'_>, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let style = Style::default().fg(Color::Black).bg(Color::Black);
+    let blank = " ".repeat(area.width as usize);
+    let lines = (0..area.height)
+        .map(|_| Line::from(Span::styled(blank.clone(), style)))
+        .collect::<Vec<_>>();
+
+    frame.render_widget(Paragraph::new(lines).style(style), area);
+}
+
 fn render_screen(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -850,15 +879,26 @@ mod tests {
     #[test]
     fn output_activity_does_not_change_idle_pane_chrome() {
         assert_eq!(
-            pane_chrome(false, false, false, false),
-            pane_chrome(false, false, true, false)
+            pane_chrome(false, false, false, false, false),
+            pane_chrome(false, false, true, false, false)
         );
     }
 
     #[test]
     fn selected_and_exited_badges_remain_visible() {
-        assert_eq!(pane_chrome(true, false, true, false).badge, " selected");
-        assert_eq!(pane_chrome(true, false, true, true).badge, " exited");
+        assert_eq!(
+            pane_chrome(true, false, true, false, false).badge,
+            " selected"
+        );
+        assert_eq!(pane_chrome(true, false, true, true, false).badge, " exited");
+    }
+
+    #[test]
+    fn sleeping_panes_show_sleep_badge() {
+        assert_eq!(
+            pane_chrome(false, false, true, false, true).badge,
+            " asleep"
+        );
     }
 
     #[test]

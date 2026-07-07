@@ -48,6 +48,7 @@ pub struct App {
     selected: BTreeSet<usize>,
     pane_names: Vec<Option<String>>,
     text_selection: Option<MouseSelection>,
+    sleeping: BTreeSet<usize>,
     rects: Vec<Rect>,
     mouse_enabled: bool,
     settings: SettingsState,
@@ -406,15 +407,16 @@ impl App {
             selected: BTreeSet::new(),
             pane_names: Vec::new(),
             text_selection: None,
+            sleeping: BTreeSet::new(),
             rects: Vec::new(),
             mouse_enabled,
             settings: SettingsState::default(),
             rename: RenamePaneState::default(),
             status: if mouse_enabled {
-                "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+o settings"
+                "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+z sleep | Alt+o settings"
                     .into()
             } else {
-                "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+o settings"
+                "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+z sleep | Alt+o settings"
                     .into()
             },
             next_pane_id: 0,
@@ -459,6 +461,8 @@ impl App {
         self.layout = GridLayout::new(plan.grid);
         self.panes.clear();
         self.pane_names = vec![None; plan.panes.len()];
+        self.text_selection = None;
+        self.sleeping.clear();
         self.next_pane_id = 0;
 
         for spec in &plan.panes {
@@ -486,6 +490,7 @@ impl App {
 
     fn run_loop(&mut self, terminal: &mut Tui) -> Result<()> {
         let mut needs_render = true;
+        let mut mouse_capture_enabled = self.mouse_enabled;
 
         loop {
             needs_render |= self.drain_pty_events();
@@ -500,6 +505,7 @@ impl App {
                 self.sync_pane_sizes();
                 needs_render = false;
             }
+            self.sync_mouse_capture(terminal, &mut mouse_capture_enabled)?;
 
             if event::poll(INPUT_POLL_INTERVAL)? {
                 match event::read()? {
@@ -518,7 +524,10 @@ impl App {
                     Event::Paste(text) if !self.settings.open => {
                         self.route_input(text.as_bytes())?;
                     }
-                    Event::Mouse(mouse) if self.mouse_enabled && !self.settings.open => {
+                    Event::Mouse(mouse)
+                        if (self.mouse_enabled || !self.sleeping.is_empty())
+                            && !self.settings.open =>
+                    {
                         needs_render |= self.handle_mouse(mouse, terminal)?;
                     }
                     _ => {}
@@ -526,6 +535,25 @@ impl App {
             }
         }
 
+        if mouse_capture_enabled {
+            execute!(terminal.backend_mut(), DisableMouseCapture)?;
+        }
+
+        Ok(())
+    }
+
+    fn sync_mouse_capture(&self, terminal: &mut Tui, enabled: &mut bool) -> Result<()> {
+        let should_enable = self.mouse_enabled || !self.sleeping.is_empty();
+        if should_enable == *enabled {
+            return Ok(());
+        }
+
+        if should_enable {
+            execute!(terminal.backend_mut(), EnableMouseCapture)?;
+        } else {
+            execute!(terminal.backend_mut(), DisableMouseCapture)?;
+        }
+        *enabled = should_enable;
         Ok(())
     }
 
@@ -673,6 +701,10 @@ impl App {
                     self.selected = (0..self.panes.len()).collect();
                 }
                 self.status = format!("selected {} panes", self.selected.len());
+                Ok(Some(false))
+            }
+            'z' => {
+                self.toggle_sleep_for_targets();
                 Ok(Some(false))
             }
             'o' => {
@@ -836,6 +868,28 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, terminal: &mut Tui) -> Result<bool> {
+        if !matches!(
+            mouse.kind,
+            MouseEventKind::Moved
+                | MouseEventKind::Down(_)
+                | MouseEventKind::Up(_)
+                | MouseEventKind::Drag(_)
+        ) {
+            return Ok(false);
+        }
+
+        if let Some(index) = pane_at(&self.rects, mouse.column, mouse.row)
+            && self.sleeping.remove(&index)
+        {
+            self.focus = index;
+            self.status = format!("woke pane {}", index + 1);
+            return Ok(true);
+        }
+
+        if !self.mouse_enabled {
+            return Ok(false);
+        }
+
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(cell) = self.pane_cell_at(mouse.column, mouse.row) {
@@ -1049,6 +1103,7 @@ impl App {
         for spec in specs {
             self.spawn_pane_spec(&spec)?;
         }
+        self.pane_names.resize(self.panes.len(), None);
         Ok(())
     }
 
@@ -1098,7 +1153,49 @@ impl App {
         if self.focus >= target_count {
             self.focus = target_count.saturating_sub(1);
         }
+        self.pane_names.truncate(target_count);
+        self.sleeping = self
+            .sleeping
+            .iter()
+            .copied()
+            .filter(|index| *index < target_count)
+            .collect();
+        if self
+            .text_selection
+            .is_some_and(|selection| selection.pane >= target_count)
+        {
+            self.text_selection = None;
+        }
         true
+    }
+
+    fn toggle_sleep_for_targets(&mut self) {
+        let targets = self.target_panes();
+        if targets.is_empty() {
+            return;
+        }
+
+        let should_sleep = targets.iter().any(|index| !self.sleeping.contains(index));
+        if should_sleep {
+            for index in &targets {
+                self.sleeping.insert(*index);
+                self.selected.remove(index);
+            }
+
+            if self.sleeping.contains(&self.focus)
+                && let Some(index) = self.next_awake_pane(self.focus)
+            {
+                self.focus = index;
+            }
+        } else {
+            for index in &targets {
+                self.sleeping.remove(index);
+            }
+            self.focus = targets[0];
+        }
+
+        let action = if should_sleep { "slept" } else { "woke" };
+        self.status = format!("{} {} {}", action, targets.len(), pane_word(targets.len()));
     }
 
     fn route_input(&mut self, bytes: &[u8]) -> Result<()> {
@@ -1113,6 +1210,10 @@ impl App {
     }
 
     fn input_targets(&self) -> Vec<usize> {
+        awake_input_targets_for(self.focus, &self.selected, self.panes.len(), &self.sleeping)
+    }
+
+    fn target_panes(&self) -> Vec<usize> {
         input_targets_for(self.focus, &self.selected, self.panes.len())
     }
 
@@ -1120,18 +1221,28 @@ impl App {
         if self.panes.is_empty() {
             return;
         }
-        self.focus = (self.focus + 1) % self.panes.len();
+
+        for offset in 1..=self.panes.len() {
+            let candidate = (self.focus + offset) % self.panes.len();
+            if !self.sleeping.contains(&candidate) {
+                self.focus = candidate;
+                return;
+            }
+        }
     }
 
     fn focus_previous(&mut self) {
         if self.panes.is_empty() {
             return;
         }
-        self.focus = if self.focus == 0 {
-            self.panes.len() - 1
-        } else {
-            self.focus - 1
-        };
+
+        for offset in 1..=self.panes.len() {
+            let candidate = (self.focus + self.panes.len() - offset) % self.panes.len();
+            if !self.sleeping.contains(&candidate) {
+                self.focus = candidate;
+                return;
+            }
+        }
     }
 
     fn focus_in_grid(&mut self, row_delta: isize) {
@@ -1145,9 +1256,19 @@ impl App {
         } else {
             self.focus.saturating_add(columns)
         };
-        if candidate < self.panes.len() {
+        if candidate < self.panes.len() && !self.sleeping.contains(&candidate) {
             self.focus = candidate;
         }
+    }
+
+    fn next_awake_pane(&self, start: usize) -> Option<usize> {
+        if self.panes.is_empty() {
+            return None;
+        }
+
+        (1..=self.panes.len())
+            .map(|offset| (start + offset) % self.panes.len())
+            .find(|index| !self.sleeping.contains(index))
     }
 
     pub fn pane_rects(&self, area: Rect) -> Vec<Rect> {
@@ -1170,6 +1291,10 @@ impl App {
         self.text_selection
             .filter(|selection| selection.pane == index)
             .map(MouseSelection::range)
+    }
+
+    pub fn pane_sleeping(&self, index: usize) -> bool {
+        self.sleeping.contains(&index)
     }
 
     pub fn status(&self) -> &str {
@@ -1480,6 +1605,22 @@ fn invalid_grid_status(rows: usize, columns: usize) -> String {
     }
 }
 
+fn awake_input_targets_for(
+    focus: usize,
+    selected: &BTreeSet<usize>,
+    pane_count: usize,
+    sleeping: &BTreeSet<usize>,
+) -> Vec<usize> {
+    input_targets_for(focus, selected, pane_count)
+        .into_iter()
+        .filter(|index| !sleeping.contains(index))
+        .collect()
+}
+
+fn pane_word(count: usize) -> &'static str {
+    if count == 1 { "pane" } else { "panes" }
+}
+
 fn control_byte(ch: char) -> Option<u8> {
     let lower = ch.to_ascii_lowercase();
     if lower.is_ascii_lowercase() {
@@ -1598,6 +1739,18 @@ mod tests {
         rename.delete();
         assert_eq!(rename.value, "ab");
     }
+
+    #[test]
+    fn sleeping_panes_do_not_receive_input() {
+        assert_eq!(
+            awake_input_targets_for(2, &selected(&[]), 4, &selected(&[2])),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            awake_input_targets_for(2, &selected(&[0, 3]), 4, &selected(&[0])),
+            vec![3]
+        );
+    }
 }
 
 fn conversation_summary(screen: &Screen) -> Option<String> {
@@ -1669,6 +1822,7 @@ fn teardown_terminal(terminal: &mut Tui, enable_mouse: bool) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
+        DisableMouseCapture,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
