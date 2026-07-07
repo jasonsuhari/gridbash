@@ -1,10 +1,14 @@
 mod app;
 mod cli;
+mod composer;
 mod config;
 mod layout;
+mod onboarding;
 mod profiles;
 mod pty;
+mod setup;
 mod ui;
+mod vibe;
 
 use anyhow::Result;
 use clap::Parser;
@@ -13,6 +17,7 @@ use crate::{
     app::App,
     cli::Cli,
     config::Config,
+    onboarding::OnboardingResult,
     profiles::{available_profiles, find_profile},
 };
 
@@ -35,6 +40,12 @@ fn main() -> Result<()> {
             println!("{name}\t{state}");
         }
         return Ok(());
+    }
+
+    if onboarding::should_run(&cli, &config) {
+        if onboarding::run(&mut config, cli.config.as_deref())? == OnboardingResult::Quit {
+            return Ok(());
+        }
     }
 
     let mut app = App::new(cli, config)?;

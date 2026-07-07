@@ -24,6 +24,7 @@ if (!fs.existsSync(exe)) {
 }
 
 const result = spawnSync(exe, process.argv.slice(2), {
+  cwd: process.cwd(),
   stdio: "inherit",
   windowsHide: false
 });
