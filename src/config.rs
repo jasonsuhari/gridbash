@@ -8,12 +8,14 @@ use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::{profiles::Profile, setup::SavedSetup};
+use crate::{auth::AuthConfig, profiles::Profile, setup::SavedSetup};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Defaults::is_empty")]
     pub defaults: Defaults,
+    #[serde(default, skip_serializing_if = "AuthConfig::is_empty")]
+    pub auth: AuthConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, Profile>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -97,6 +99,26 @@ mod tests {
         .expect("parse config");
 
         assert_eq!(config.defaults.profile.as_deref(), Some("powershell"));
+    }
+
+    #[test]
+    fn parses_auth_defaults() {
+        let config: Config = toml::from_str(
+            r#"
+            [auth]
+            home = "C:\\Users\\Jason\\.claude-profiles"
+            usage_status = true
+
+            [auth.defaults]
+            claude = "claude-1"
+            codex = "codex-2"
+            "#,
+        )
+        .expect("parse config");
+
+        assert_eq!(config.auth.defaults.claude.as_deref(), Some("claude-1"));
+        assert_eq!(config.auth.defaults.codex.as_deref(), Some("codex-2"));
+        assert_eq!(config.auth.usage_status, Some(true));
     }
 
     #[test]
