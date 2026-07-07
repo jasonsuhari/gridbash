@@ -31,6 +31,8 @@ use crate::{
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const ACTIVITY_DECAY_INTERVAL: Duration = Duration::from_millis(250);
+const OUTPUT_QUIET_AFTER: Duration = Duration::from_secs(3);
 
 pub struct App {
     config: Config,
@@ -363,11 +365,10 @@ impl App {
                         .panes
                         .iter_mut()
                         .find(|p| p.id() == pane && p.generation() == generation)
+                        && !target.exited
                     {
-                        if !target.exited {
-                            target.exited = true;
-                            changed = true;
-                        }
+                        target.exited = true;
+                        changed = true;
                     }
                 }
             }
@@ -381,15 +382,20 @@ impl App {
     }
 
     fn decay_activity(&mut self) -> bool {
-        if self.last_activity_decay.elapsed() < Duration::from_millis(250) {
+        if self.last_activity_decay.elapsed() < ACTIVITY_DECAY_INTERVAL {
             return false;
         }
 
-        let changed = self.panes.iter().any(|pane| pane.active);
+        let now = Instant::now();
+        let mut changed = false;
         for pane in &mut self.panes {
-            pane.active = false;
+            if pane.active {
+                pane.active = false;
+                changed = true;
+            }
+            changed |= pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER);
         }
-        self.last_activity_decay = Instant::now();
+        self.last_activity_decay = now;
         changed
     }
 
@@ -596,6 +602,10 @@ impl App {
 
     pub fn broadcast(&self) -> bool {
         self.broadcast
+    }
+
+    pub fn quiet_pane_count(&self) -> usize {
+        self.panes.iter().filter(|pane| pane.output_quiet()).count()
     }
 
     pub fn status(&self) -> &str {

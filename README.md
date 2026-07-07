@@ -26,6 +26,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Normal terminal keys pass through to focused or broadcast panes.
 - Modeless Alt shortcuts for pane focus, selection, broadcast, settings, and quit.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
+- Quiet-output badges call out panes that produced output and then stopped without treating them as exited.
 - Built-in launch profiles for common CLI coding agents.
 - Startup dimension picker with a live grid preview.
 
@@ -156,6 +157,8 @@ GridBash does not capture the mouse, so normal drag selection and copy behavior 
 | Alt+q | Quit |
 
 When broadcast is on, typing goes to selected panes only. If nothing is selected, input goes to the focused pane.
+
+Pane titles show `active` while fresh output is arriving, `quiet` after roughly three seconds without output, and `exited` after the child process ends. `quiet` is an output signal, not a guarantee that an agent has completed its task.
 
 The settings screen is currently a sample UI. Its switches, steppers, and choices can be changed, but they do not affect runtime behavior yet.
 

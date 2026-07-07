@@ -41,10 +41,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
-        } else if pane.active {
-            Style::default().fg(Color::Green)
         } else if pane.exited {
             Style::default().fg(Color::Red)
+        } else if pane.active {
+            Style::default().fg(Color::Green)
+        } else if pane.output_quiet() {
+            Style::default().fg(Color::Blue)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -53,6 +55,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             " exited"
         } else if pane.active {
             " active"
+        } else if pane.output_quiet() {
+            " quiet"
         } else if selected {
             " selected"
         } else {
@@ -114,6 +118,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         ),
         Span::raw(" | "),
         Span::raw(format!("{} selected", app.selected().len())),
+        Span::raw(" | "),
+        Span::raw(format!("{} quiet", app.quiet_pane_count())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(" | Alt+q quit"),
