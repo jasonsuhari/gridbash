@@ -160,16 +160,16 @@ impl Composer {
                 if self.home_cursor == 0 {
                     self.stage = Stage::Folders;
                     self.status = "Folders: Enter continues | a adds | d removes".into();
-                } else if let Some(name) = self.saved_names.get(self.home_cursor - 1) {
-                    if let Some(setup) = config.setups.get(name).cloned() {
-                        self.active_setup = Some(ActiveSetup {
-                            name: Some(name.clone()),
-                            setup,
-                            from_saved: true,
-                        });
-                        self.stage = Stage::Preview;
-                        self.status = "Enter launches | Esc returns".into();
-                    }
+                } else if let Some(name) = self.saved_names.get(self.home_cursor - 1)
+                    && let Some(setup) = config.setups.get(name).cloned()
+                {
+                    self.active_setup = Some(ActiveSetup {
+                        name: Some(name.clone()),
+                        setup,
+                        from_saved: true,
+                    });
+                    self.stage = Stage::Preview;
+                    self.status = "Enter launches | Esc returns".into();
                 }
             }
             _ => {}
