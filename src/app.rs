@@ -1,7 +1,8 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
     io::{self, Stdout, Write},
+    sync::mpsc as std_mpsc,
     time::{Duration, Instant},
 };
 
@@ -28,6 +29,7 @@ use crate::{
     pty::{PtyEvent, PtyPane},
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
+    usage::{self, UsageEvent, UsageTarget},
     worktrees::ManagedWorktreeOptions,
 };
 
@@ -57,6 +59,10 @@ pub struct App {
     next_pane_id: usize,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
+    usage_tx: std_mpsc::Sender<UsageEvent>,
+    usage_rx: std_mpsc::Receiver<UsageEvent>,
+    profile_usage: BTreeMap<String, String>,
+    api_spend_label: Option<String>,
     last_activity_decay: Instant,
 }
 
@@ -138,6 +144,13 @@ impl PaneSelection {
 enum GridAxis {
     Rows,
     Columns,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwapSelection {
+    NeedsMore,
+    TooMany,
+    Pair(usize, usize),
 }
 
 #[derive(Debug, Clone)]
@@ -395,6 +408,7 @@ impl App {
                 columns: 3,
             });
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (usage_tx, usage_rx) = std_mpsc::channel();
 
         Ok(Self {
             config,
@@ -413,15 +427,19 @@ impl App {
             settings: SettingsState::default(),
             rename: RenamePaneState::default(),
             status: if mouse_enabled {
-                "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+z sleep | Alt+o settings"
+                "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
                     .into()
             } else {
-                "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+z sleep | Alt+o settings"
+                "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
                     .into()
             },
             next_pane_id: 0,
             event_tx,
             event_rx,
+            usage_tx,
+            usage_rx,
+            profile_usage: BTreeMap::new(),
+            api_spend_label: None,
             last_activity_decay: Instant::now(),
         })
     }
@@ -468,8 +486,24 @@ impl App {
         for spec in &plan.panes {
             self.spawn_pane_spec(spec)?;
         }
+        self.start_usage_monitor(&plan);
 
         Ok(())
+    }
+
+    fn start_usage_monitor(&mut self, plan: &LaunchPlan) {
+        self.profile_usage.clear();
+        self.api_spend_label = None;
+
+        let targets = plan
+            .panes
+            .iter()
+            .map(|spec| UsageTarget {
+                profile_name: spec.profile_name.clone(),
+                command: spec.command.command.clone(),
+            })
+            .collect::<Vec<_>>();
+        usage::spawn_usage_monitor(targets, self.usage_tx.clone());
     }
 
     fn spawn_pane_spec(&mut self, spec: &PaneLaunchSpec) -> Result<()> {
@@ -494,6 +528,7 @@ impl App {
 
         loop {
             needs_render |= self.drain_pty_events();
+            needs_render |= self.drain_usage_events();
             needs_render |= self.decay_activity();
 
             if needs_render {
@@ -592,6 +627,33 @@ impl App {
 
         for pane in &mut self.panes {
             changed |= pane.poll_exit();
+        }
+
+        changed
+    }
+
+    fn drain_usage_events(&mut self) -> bool {
+        let mut changed = false;
+
+        while let Ok(event) = self.usage_rx.try_recv() {
+            match event {
+                UsageEvent::Profile {
+                    profile_name,
+                    label,
+                } => match label {
+                    Some(label) => {
+                        changed |= self.profile_usage.get(&profile_name) != Some(&label);
+                        self.profile_usage.insert(profile_name, label);
+                    }
+                    None => {
+                        changed |= self.profile_usage.remove(&profile_name).is_some();
+                    }
+                },
+                UsageEvent::ApiSpend { label } => {
+                    changed |= self.api_spend_label != label;
+                    self.api_spend_label = label;
+                }
+            }
         }
 
         changed
@@ -707,6 +769,10 @@ impl App {
                 self.toggle_sleep_for_targets();
                 Ok(Some(false))
             }
+            'x' => {
+                self.swap_selected_tiles();
+                Ok(Some(false))
+            }
             'o' => {
                 self.settings.open = true;
                 self.status = "settings open".into();
@@ -817,6 +883,45 @@ impl App {
         }
 
         self.rename.close();
+    }
+
+    fn swap_selected_tiles(&mut self) {
+        let (first, second) = match selected_swap_pair(&self.selected) {
+            SwapSelection::NeedsMore => {
+                self.status = "select two panes to swap".into();
+                return;
+            }
+            SwapSelection::TooMany => {
+                self.status = "deselect panes until only two are selected".into();
+                return;
+            }
+            SwapSelection::Pair(first, second) => (first, second),
+        };
+
+        if first >= self.panes.len() || second >= self.panes.len() {
+            self.status = "select two visible panes to swap".into();
+            return;
+        }
+
+        self.panes.swap(first, second);
+        if first < self.pane_names.len() && second < self.pane_names.len() {
+            self.pane_names.swap(first, second);
+        }
+        if let Some(selection) = self.text_selection {
+            self.text_selection = Some(MouseSelection {
+                pane: swapped_index(selection.pane, first, second),
+                ..selection
+            });
+        }
+        if let Some(plan) = self.launch_plan.as_mut()
+            && first < plan.panes.len()
+            && second < plan.panes.len()
+        {
+            plan.panes.swap(first, second);
+        }
+        swap_set_indices(&mut self.sleeping, first, second);
+        self.focus = swapped_index(self.focus, first, second);
+        self.status = format!("swapped panes {} and {}", first + 1, second + 1);
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -1353,6 +1458,26 @@ impl App {
         Some(truncate_chars(&format!("{label} | {summary}"), max_chars))
     }
 
+    pub fn pane_usage_label(&self, index: usize) -> Option<String> {
+        let mut parts = Vec::new();
+
+        if let Some(profile_name) = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .map(|pane| pane.profile_name.as_str())
+            && let Some(label) = self.profile_usage.get(profile_name)
+        {
+            parts.push(label.clone());
+        }
+
+        if let Some(label) = &self.api_spend_label {
+            parts.push(label.clone());
+        }
+
+        (!parts.is_empty()).then(|| parts.join(" | "))
+    }
+
     pub fn sync_pane_sizes(&mut self) {
         for (index, rect) in self.rects.iter().enumerate() {
             let Some(pane) = self.panes.get_mut(index) else {
@@ -1448,6 +1573,41 @@ fn resolved_current_dir() -> Result<std::path::PathBuf> {
 fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) {
     if !selected.insert(index) {
         selected.remove(&index);
+    }
+}
+
+fn selected_swap_pair(selected: &BTreeSet<usize>) -> SwapSelection {
+    match selected.len() {
+        0 | 1 => SwapSelection::NeedsMore,
+        2 => {
+            let mut selected = selected.iter().copied();
+            let first = selected.next().expect("pair has a first index");
+            let second = selected.next().expect("pair has a second index");
+            SwapSelection::Pair(first, second)
+        }
+        _ => SwapSelection::TooMany,
+    }
+}
+
+fn swap_set_indices(indices: &mut BTreeSet<usize>, first: usize, second: usize) {
+    let had_first = indices.remove(&first);
+    let had_second = indices.remove(&second);
+
+    if had_first {
+        indices.insert(second);
+    }
+    if had_second {
+        indices.insert(first);
+    }
+}
+
+fn swapped_index(index: usize, first: usize, second: usize) -> usize {
+    if index == first {
+        second
+    } else if index == second {
+        first
+    } else {
+        index
     }
 }
 
@@ -1697,6 +1857,44 @@ mod tests {
 
     fn selected(indices: &[usize]) -> BTreeSet<usize> {
         indices.iter().copied().collect()
+    }
+
+    #[test]
+    fn selected_swap_pair_requires_exactly_two_panes() {
+        assert_eq!(selected_swap_pair(&selected(&[])), SwapSelection::NeedsMore);
+        assert_eq!(
+            selected_swap_pair(&selected(&[1])),
+            SwapSelection::NeedsMore
+        );
+        assert_eq!(
+            selected_swap_pair(&selected(&[0, 1, 2])),
+            SwapSelection::TooMany
+        );
+    }
+
+    #[test]
+    fn selected_swap_pair_returns_selected_pair_in_order() {
+        assert_eq!(
+            selected_swap_pair(&selected(&[3, 1])),
+            SwapSelection::Pair(1, 3)
+        );
+    }
+
+    #[test]
+    fn swap_set_indices_moves_membership_between_swapped_panes() {
+        let mut indices = selected(&[0, 4]);
+        swap_set_indices(&mut indices, 0, 2);
+        assert_eq!(indices, selected(&[2, 4]));
+
+        swap_set_indices(&mut indices, 0, 2);
+        assert_eq!(indices, selected(&[0, 4]));
+    }
+
+    #[test]
+    fn swapped_index_follows_the_swapped_pair() {
+        assert_eq!(swapped_index(0, 0, 2), 2);
+        assert_eq!(swapped_index(2, 0, 2), 0);
+        assert_eq!(swapped_index(4, 0, 2), 4);
     }
 
     #[test]

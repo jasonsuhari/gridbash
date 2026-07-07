@@ -8,6 +8,7 @@ mod profiles;
 mod pty;
 mod setup;
 mod ui;
+mod usage;
 mod vibe;
 mod worktrees;
 
