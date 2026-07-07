@@ -1,0 +1,42 @@
+name: DCO
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  signoff:
+    name: Signed-off-by
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refs/pull/${{ github.event.pull_request.number }}/head
+      - name: Check commit sign-offs
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "${BASE_SHA}"
+
+          missing=""
+          while read -r sha; do
+            if ! git show -s --format=%B "${sha}" | grep -Eiq '^Signed-off-by: .+ <[^>]+>$'; then
+              subject="$(git show -s --format=%s "${sha}")"
+              missing="${missing}\n- ${sha:0:12} ${subject}"
+            fi
+          done < <(git rev-list --reverse "${BASE_SHA}..HEAD")
+
+          if [ -n "${missing}" ]; then
+            printf "The following commits are missing a DCO sign-off:%b\n\n" "${missing}"
+            echo "Add a sign-off with: git commit --amend --signoff"
+            echo "For multiple commits, rebase and sign off each commit."
+            exit 1
+          fi
+
+          echo "All commits include a Signed-off-by line."
