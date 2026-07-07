@@ -16,6 +16,9 @@
   },
   "files": [
     "npm/bin/",
+    "docs/devlogs/",
+    "docs/releases/",
+    "docs/RELEASING.md",
     "README.md",
     "LICENSE",
     "config.example.toml"

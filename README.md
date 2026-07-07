@@ -1,10 +1,21 @@
 # GridBash
 
+[![npm version](https://img.shields.io/npm/v/gridbash?label=npm)](https://www.npmjs.com/package/gridbash)
+[![GitHub release](https://img.shields.io/github/v/release/jasonsuhari/gridbash?label=github)](https://github.com/jasonsuhari/gridbash/releases)
+
 Fast, beautiful terminal grids for running lots of CLI agents at once.
 
 GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy development: launch a grid of Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, Git Bash, PowerShell, or any custom command, then select panes and broadcast input only where you want it.
 
 > V1 is intentionally single-process. Closing GridBash closes its child agents. Daemon detach/reattach is the next major frontier.
+
+## Release Status & Devlogs
+
+- Latest npm version is shown by the npm badge above and on the npm package page.
+- Latest GitHub release is shown by the GitHub release badge above and on the GitHub Releases page.
+- Devlogs live in `docs/devlogs/`.
+- Versioned release notes live in `docs/releases/` and are used for GitHub release notes.
+- npm packages include `docs/devlogs/` and `docs/releases/` so published package contents carry the logs too.
 
 ## Highlights
 
