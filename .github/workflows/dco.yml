@@ -26,6 +26,11 @@ jobs:
 
           missing=""
           while read -r sha; do
+            parent_count="$(git show -s --format=%P "${sha}" | wc -w)"
+            if [ "${parent_count}" -gt 1 ]; then
+              continue
+            fi
+
             if ! git show -s --format=%B "${sha}" | grep -Eiq '^Signed-off-by: .+ <[^>]+>$'; then
               subject="$(git show -s --format=%s "${sha}")"
               missing="${missing}\n- ${sha:0:12} ${subject}"
