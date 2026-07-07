@@ -1,0 +1,96 @@
+name: Delete Issue Branches
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  contents: write
+  issues: read
+
+jobs:
+  delete-related-branches:
+    name: Delete related branches
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete matching remote branches
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const repository = context.payload.repository;
+            const issueNumber = String(issue.number);
+            const defaultBranch = repository.default_branch;
+            const { owner, repo } = context.repo;
+
+            const escapedIssueNumber = issueNumber.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const explicitIssuePattern = new RegExp(
+              `(^|[\\/_\\.-])(?:issue|issues|gh|ticket)[\\/_\\.-]?${escapedIssueNumber}(?=$|[\\/_\\.-])`,
+              "i",
+            );
+            const leadingSegmentPattern = new RegExp(
+              `^${escapedIssueNumber}(?:$|[\\._-])`,
+            );
+
+            function isRelatedBranch(branchName) {
+              if (explicitIssuePattern.test(branchName)) {
+                return true;
+              }
+
+              return branchName
+                .split("/")
+                .some((segment) => leadingSegmentPattern.test(segment));
+            }
+
+            const branches = await github.paginate(github.rest.repos.listBranches, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+
+            const deleted = [];
+            const skipped = [];
+
+            for (const branch of branches) {
+              const name = branch.name;
+
+              if (!isRelatedBranch(name)) {
+                continue;
+              }
+
+              if (name === defaultBranch) {
+                skipped.push(`${name} is the default branch`);
+                continue;
+              }
+
+              if (branch.protected) {
+                skipped.push(`${name} is protected`);
+                continue;
+              }
+
+              try {
+                await github.rest.git.deleteRef({
+                  owner,
+                  repo,
+                  ref: `heads/${name}`,
+                });
+                deleted.push(name);
+                core.notice(`Deleted branch ${name} for closed issue #${issueNumber}.`);
+              } catch (error) {
+                skipped.push(`${name}: ${error.message}`);
+                core.warning(`Could not delete branch ${name}: ${error.message}`);
+              }
+            }
+
+            if (deleted.length === 0 && skipped.length === 0) {
+              core.info(`No matching branches found for closed issue #${issueNumber}.`);
+              return;
+            }
+
+            if (deleted.length > 0) {
+              core.info(`Deleted branches: ${deleted.join(", ")}`);
+            }
+
+            if (skipped.length > 0) {
+              core.info(`Skipped branches: ${skipped.join("; ")}`);
+            }
