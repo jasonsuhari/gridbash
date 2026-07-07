@@ -44,6 +44,7 @@ pub struct App {
     broadcast: bool,
     settings: SettingsState,
     status: String,
+    next_pane_id: usize,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
     last_activity_decay: Instant,
@@ -54,6 +55,12 @@ enum KeyOutcome {
     Continue,
     Render,
     Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridAxis {
+    Rows,
+    Columns,
 }
 
 #[derive(Debug, Clone)]
@@ -232,8 +239,9 @@ impl App {
             broadcast: false,
             settings: SettingsState::default(),
             status:
-                "Alt+arrows move | Alt+s select | Alt+a all/none | Alt+b broadcast | Alt+o settings"
+                "Alt+arrows move | Alt+r/c add row/col | Alt+R/C shrink | Alt+s select | Alt+b broadcast"
                     .into(),
+            next_pane_id: 0,
             event_tx,
             event_rx,
             last_activity_decay: Instant::now(),
@@ -274,24 +282,22 @@ impl App {
             .ok_or_else(|| anyhow!("no launch plan selected"))?;
         self.layout = GridLayout::new(plan.grid);
         self.panes.clear();
+        self.next_pane_id = 0;
 
-        for (index, spec) in plan.panes.iter().enumerate() {
-            self.spawn_pane_spec(index, spec, 0)?;
+        for spec in &plan.panes {
+            self.spawn_pane_spec(spec)?;
         }
 
         Ok(())
     }
 
-    fn spawn_pane_spec(
-        &mut self,
-        index: usize,
-        spec: &PaneLaunchSpec,
-        generation: u64,
-    ) -> Result<()> {
+    fn spawn_pane_spec(&mut self, spec: &PaneLaunchSpec) -> Result<()> {
         let launch = spec.resolved_command()?;
+        let id = PaneId(self.next_pane_id);
+        self.next_pane_id += 1;
         let pane = PtyPane::spawn(
-            PaneId(index),
-            generation,
+            id,
+            0,
             &launch.command,
             &launch.args,
             &spec.cwd,
@@ -415,7 +421,7 @@ impl App {
 
     fn handle_app_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
         match key.code {
-            KeyCode::Char(ch) => self.handle_alt_char(ch),
+            KeyCode::Char(ch) => self.handle_alt_char(ch, key.modifiers),
             KeyCode::Left => {
                 self.focus_previous();
                 self.status = format!("focused pane {}", self.focus + 1);
@@ -440,10 +446,20 @@ impl App {
         }
     }
 
-    fn handle_alt_char(&mut self, ch: char) -> Result<Option<bool>> {
+    fn handle_alt_char(&mut self, ch: char, modifiers: KeyModifiers) -> Result<Option<bool>> {
         let lower = ch.to_ascii_lowercase();
         match lower {
             'q' => Ok(Some(true)),
+            'r' if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let delta = if shifted_char(ch, modifiers) { -1 } else { 1 };
+                self.adjust_grid(GridAxis::Rows, delta)?;
+                Ok(Some(false))
+            }
+            'c' if !modifiers.contains(KeyModifiers::CONTROL) => {
+                let delta = if shifted_char(ch, modifiers) { -1 } else { 1 };
+                self.adjust_grid(GridAxis::Columns, delta)?;
+                Ok(Some(false))
+            }
             'b' => {
                 self.broadcast = !self.broadcast;
                 self.status = if self.broadcast {
@@ -522,6 +538,124 @@ impl App {
         } else {
             KeyOutcome::Continue
         })
+    }
+
+    fn adjust_grid(&mut self, axis: GridAxis, delta: isize) -> Result<()> {
+        let current = self.layout.size();
+        let Some(rows) =
+            adjust_dimension(current.rows, if axis == GridAxis::Rows { delta } else { 0 })
+        else {
+            self.status = "grid is capped at 100 cells".into();
+            return Ok(());
+        };
+        let Some(columns) = adjust_dimension(
+            current.columns,
+            if axis == GridAxis::Columns { delta } else { 0 },
+        ) else {
+            self.status = "grid is capped at 100 cells".into();
+            return Ok(());
+        };
+        let Some(next) = GridSize::new(rows, columns) else {
+            self.status = invalid_grid_status(rows, columns);
+            return Ok(());
+        };
+
+        if next == current {
+            return Ok(());
+        }
+
+        let before = self.panes.len();
+        if next.count() > self.panes.len() {
+            self.spawn_panes_to_fill(next.count())?;
+        } else if next.count() < self.panes.len() && !self.remove_overflow_panes(next.count(), next)
+        {
+            return Ok(());
+        }
+
+        self.layout.set_size(next);
+        if let Some(plan) = &mut self.launch_plan {
+            plan.grid = next;
+        }
+
+        let added = self.panes.len().saturating_sub(before);
+        let removed = before.saturating_sub(self.panes.len());
+        self.status = if added > 0 {
+            format!(
+                "grid resized to {}x{}; spawned {added} pane(s)",
+                next.rows, next.columns
+            )
+        } else if removed > 0 {
+            format!(
+                "grid resized to {}x{}; removed {removed} exited pane(s)",
+                next.rows, next.columns
+            )
+        } else {
+            format!(
+                "grid resized to {}x{}; {} pane(s)",
+                next.rows,
+                next.columns,
+                self.panes.len()
+            )
+        };
+
+        Ok(())
+    }
+
+    fn spawn_panes_to_fill(&mut self, target_count: usize) -> Result<()> {
+        let specs = self.pane_specs_to_fill(target_count)?;
+        for spec in specs {
+            self.spawn_pane_spec(&spec)?;
+        }
+        Ok(())
+    }
+
+    fn pane_specs_to_fill(&mut self, target_count: usize) -> Result<Vec<PaneLaunchSpec>> {
+        let plan = self
+            .launch_plan
+            .as_mut()
+            .ok_or_else(|| anyhow!("no launch plan selected"))?;
+        if plan.panes.is_empty() {
+            return Err(anyhow!("no pane template available"));
+        }
+
+        let templates = plan.panes.clone();
+        while plan.panes.len() < target_count {
+            let spec = templates[plan.panes.len() % templates.len()].clone();
+            plan.panes.push(spec);
+        }
+
+        Ok(plan.panes[self.panes.len()..target_count].to_vec())
+    }
+
+    fn remove_overflow_panes(&mut self, target_count: usize, next: GridSize) -> bool {
+        let running = self
+            .panes
+            .iter()
+            .skip(target_count)
+            .filter(|pane| !pane.exited)
+            .count();
+        if running > 0 {
+            self.status = format!(
+                "cannot shrink to {}x{}; {running} running pane(s) would be removed",
+                next.rows, next.columns
+            );
+            return false;
+        }
+
+        self.panes.truncate(target_count);
+        if let Some(plan) = &mut self.launch_plan {
+            plan.panes.truncate(target_count);
+        }
+        self.selected = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|index| *index < target_count)
+            .collect();
+        if self.focus >= target_count {
+            self.focus = target_count.saturating_sub(1);
+        }
+        true
     }
 
     fn route_input(&mut self, bytes: &[u8]) -> Result<()> {
@@ -713,6 +847,26 @@ fn resolved_current_dir() -> Result<std::path::PathBuf> {
 fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) {
     if !selected.insert(index) {
         selected.remove(&index);
+    }
+}
+
+fn shifted_char(ch: char, modifiers: KeyModifiers) -> bool {
+    ch.is_ascii_uppercase() || modifiers.contains(KeyModifiers::SHIFT)
+}
+
+fn adjust_dimension(value: usize, delta: isize) -> Option<usize> {
+    if delta < 0 {
+        value.checked_sub((-delta) as usize)
+    } else {
+        value.checked_add(delta as usize)
+    }
+}
+
+fn invalid_grid_status(rows: usize, columns: usize) -> String {
+    if rows == 0 || columns == 0 {
+        "grid needs at least 1 row and 1 column".into()
+    } else {
+        "grid is capped at 100 cells".into()
     }
 }
 
