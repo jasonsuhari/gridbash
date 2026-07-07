@@ -1,6 +1,13 @@
 [defaults]
 profile = "git-bash"
 
+[todos]
+idle_seconds = 90
+prompts = [
+  "Review the latest changes and summarize anything risky.",
+  "Run the fastest relevant validation and report failures.",
+]
+
 [profiles.codex-fast]
 command = "codex"
 args = ["--model", "gpt-5.4-mini"]
