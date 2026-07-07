@@ -8,7 +8,10 @@ use ratatui::{
 use std::path::Path;
 use vt100::Cell;
 
-use crate::app::{App, SettingsRow};
+use crate::{
+    app::{App, SettingsRow, SettingsTab},
+    auth::{AgentKind, AuthProfile},
+};
 
 pub struct DrawState {
     pub grid_area: Rect,
@@ -63,10 +66,21 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             .pane_folder(index)
             .map(label_name)
             .unwrap_or_else(|| folder_label(pane.cwd()));
+        let auth = app
+            .pane_auth(index)
+            .map(|name| format!(" | {name}"))
+            .unwrap_or_default();
         let title = if let Some(worktree) = app.pane_worktree(index) {
-            format!(" {} | {} | {}{} ", index + 1, folder, worktree, badge)
+            format!(
+                " {} | {} | {}{}{} ",
+                index + 1,
+                folder,
+                worktree,
+                auth,
+                badge
+            )
         } else {
-            format!(" {} | {}{} ", index + 1, folder, badge)
+            format!(" {} | {}{}{} ", index + 1, folder, auth, badge)
         };
 
         let block = Block::default()
@@ -124,7 +138,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     );
 
     if app.settings_open() {
-        render_settings(frame, area, &app.settings_rows());
+        render_settings(frame, area, app);
     }
 
     DrawState {
@@ -133,23 +147,69 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
 }
 
-fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow]) {
-    let modal = centered_rect(area, 72, 64);
+fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let modal = centered_rect(area, 84, 72);
     frame.render_widget(Clear, modal);
 
-    let mut lines = vec![
+    let mut lines = settings_header(app.settings_tab());
+    match app.settings_tab() {
+        SettingsTab::General => render_general_settings_lines(&mut lines, &app.settings_rows()),
+        SettingsTab::Auth => render_auth_settings_lines(&mut lines, app),
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Settings ");
+    frame.render_widget(
+        Paragraph::new(lines).block(block).style(
+            Style::default()
+                .fg(Color::Rgb(230, 237, 243))
+                .bg(Color::Rgb(11, 15, 20)),
+        ),
+        modal,
+    );
+}
+
+fn settings_header(active: SettingsTab) -> Vec<Line<'static>> {
+    vec![
         Line::from(vec![
-            Span::styled(
-                "Sample settings",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            tab_label("General", active == SettingsTab::General),
             Span::raw("  "),
-            Span::styled("not wired yet", Style::default().fg(Color::DarkGray)),
+            tab_label("Auth", active == SettingsTab::Auth),
+            Span::raw("  "),
+            Span::styled("Tab switches", Style::default().fg(Color::DarkGray)),
         ]),
         Line::from(""),
-    ];
+    ]
+}
+
+fn tab_label(label: &'static str, active: bool) -> Span<'static> {
+    let style = if active {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::LightCyan)
+            .bg(Color::Rgb(20, 35, 44))
+    };
+    Span::styled(format!(" {label} "), style)
+}
+
+fn render_general_settings_lines(lines: &mut Vec<Line<'static>>, rows: &[SettingsRow]) {
+    lines.push(Line::from(vec![
+        Span::styled(
+            "Runtime controls",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("local session only", Style::default().fg(Color::DarkGray)),
+    ]));
+    lines.push(Line::from(""));
 
     for row in rows {
         lines.push(settings_row(row));
@@ -166,19 +226,144 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow]) {
         Span::styled("Esc", Style::default().fg(Color::Yellow)),
         Span::raw(" close"),
     ]));
+}
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Settings ");
-    frame.render_widget(
-        Paragraph::new(lines).block(block).style(
+fn render_auth_settings_lines(lines: &mut Vec<Line<'static>>, app: &App) {
+    let refresh = if app.auth_refreshing() {
+        "refreshing"
+    } else {
+        "ready"
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            "Auth profiles",
             Style::default()
-                .fg(Color::Rgb(230, 237, 243))
-                .bg(Color::Rgb(11, 15, 20)),
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
-        modal,
-    );
+        Span::raw("  "),
+        Span::styled(refresh, Style::default().fg(Color::DarkGray)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("home ", Style::default().fg(Color::DarkGray)),
+        Span::styled(app.auth_home_label(), Style::default().fg(Color::Gray)),
+    ]));
+    lines.push(Line::from(""));
+
+    if app.auth_profiles().is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("No auth profiles found.", Style::default().fg(Color::Gray)),
+            Span::raw(" "),
+            Span::styled("n", Style::default().fg(Color::Yellow)),
+            Span::raw(" creates one."),
+        ]));
+    } else {
+        for (index, profile) in app.auth_profiles().iter().enumerate() {
+            lines.push(auth_profile_row(
+                profile,
+                index == app.auth_cursor(),
+                app.auth_default(profile.kind) == Some(profile.name.as_str()),
+            ));
+        }
+    }
+
+    if let Some(create) = app.auth_create() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Create ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                create.kind.display_name(),
+                Style::default().fg(kind_color(create.kind)),
+            ),
+            Span::raw(" profile  "),
+            Span::styled(create.name.clone(), Style::default().fg(Color::Yellow)),
+            Span::styled("_", Style::default().fg(Color::Yellow)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Tab", Style::default().fg(Color::Yellow)),
+            Span::raw(" kind  "),
+            Span::styled("Enter", Style::default().fg(Color::Yellow)),
+            Span::raw(" create  "),
+            Span::styled("Esc", Style::default().fg(Color::Yellow)),
+            Span::raw(" cancel"),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Up/Down", Style::default().fg(Color::Yellow)),
+        Span::raw(" move  "),
+        Span::styled("d", Style::default().fg(Color::Yellow)),
+        Span::raw(" default  "),
+        Span::styled("n", Style::default().fg(Color::Yellow)),
+        Span::raw(" new  "),
+        Span::styled("l", Style::default().fg(Color::Yellow)),
+        Span::raw(" login  "),
+        Span::styled("r", Style::default().fg(Color::Yellow)),
+        Span::raw(" refresh  "),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" close"),
+    ]));
+}
+
+fn auth_profile_row(profile: &AuthProfile, selected: bool, is_default: bool) -> Line<'static> {
+    let cursor = if selected { "> " } else { "  " };
+    let default = if is_default { "default" } else { "" };
+    let account = profile.account_label.as_deref().unwrap_or("no account");
+    let detail = profile.account_detail.as_deref().unwrap_or("");
+    let usage = profile
+        .usage
+        .as_ref()
+        .map(|usage| usage.display_label())
+        .unwrap_or_else(|| "usage n/a".into());
+    let label_style = if selected {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+
+    Line::from(vec![
+        Span::styled(
+            cursor,
+            if selected {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
+        ),
+        Span::styled(format!("{:<14}", profile.name), label_style),
+        Span::styled(
+            format!("{:<7}", profile.kind.as_str()),
+            Style::default().fg(kind_color(profile.kind)),
+        ),
+        Span::styled(
+            format!("{:<8}", default),
+            Style::default().fg(Color::LightCyan),
+        ),
+        Span::styled(
+            format!("{:<12}", profile.status_label()),
+            Style::default().fg(if profile.ready {
+                Color::Green
+            } else {
+                Color::Yellow
+            }),
+        ),
+        Span::styled(format!("{:<24}", account), Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("{:<8}", detail),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(usage, Style::default().fg(Color::LightCyan)),
+    ])
+}
+
+fn kind_color(kind: AgentKind) -> Color {
+    match kind {
+        AgentKind::Claude => Color::Magenta,
+        AgentKind::Codex => Color::Cyan,
+    }
 }
 
 fn settings_row(row: &SettingsRow) -> Line<'static> {

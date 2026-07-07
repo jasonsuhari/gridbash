@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
+use crate::{auth::AgentKind, config::Config};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
@@ -16,6 +16,8 @@ pub struct Profile {
     pub args: Vec<String>,
     #[serde(default)]
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_kind: Option<AgentKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -28,13 +30,21 @@ pub const TERMINAL_PROFILE_NAMES: &[&str] = &["git-bash", "pwsh", "powershell", 
 
 impl Profile {
     pub fn resolved_command(&self) -> Result<LaunchCommand> {
-        let exe = resolve_executable(&self.command)
+        let exe = self
+            .native_agent_executable()
+            .or_else(|| resolve_executable(&self.command))
             .ok_or_else(|| anyhow!("profile command not found on PATH: {}", self.command))?;
         Ok(wrap_for_windows_script(exe, &self.args))
     }
 
     pub fn display_name(&self, key: &str) -> String {
         self.title.clone().unwrap_or_else(|| key.to_string())
+    }
+
+    fn native_agent_executable(&self) -> Option<PathBuf> {
+        let kind = self.agent_kind?;
+        (self.command == kind.default_command())
+            .then(|| crate::auth::resolve_agent_executable(kind))?
     }
 }
 
@@ -133,6 +143,7 @@ fn builtin_profiles() -> BTreeMap<String, Profile> {
             command: "bash".into(),
             args: vec!["--login".into(), "-i".into()],
             title: Some("Git Bash".into()),
+            agent_kind: None,
         },
     );
     profiles.insert(
@@ -141,6 +152,7 @@ fn builtin_profiles() -> BTreeMap<String, Profile> {
             command: "pwsh".into(),
             args: vec!["-NoLogo".into()],
             title: Some("PowerShell 7".into()),
+            agent_kind: None,
         },
     );
     profiles.insert(
@@ -149,6 +161,7 @@ fn builtin_profiles() -> BTreeMap<String, Profile> {
             command: "powershell".into(),
             args: vec!["-NoLogo".into()],
             title: Some("PowerShell".into()),
+            agent_kind: None,
         },
     );
     profiles.insert(
@@ -157,11 +170,20 @@ fn builtin_profiles() -> BTreeMap<String, Profile> {
             command: "cmd".into(),
             args: vec![],
             title: Some("cmd".into()),
+            agent_kind: None,
         },
     );
 
-    for agent in [
-        "codex", "claude", "gemini", "opencode", "aider", "amp", "goose", "copilot", "cursor",
+    for (agent, agent_kind) in [
+        ("codex", Some(AgentKind::Codex)),
+        ("claude", Some(AgentKind::Claude)),
+        ("gemini", None),
+        ("opencode", None),
+        ("aider", None),
+        ("amp", None),
+        ("goose", None),
+        ("copilot", None),
+        ("cursor", None),
     ] {
         profiles.insert(
             agent.into(),
@@ -169,6 +191,7 @@ fn builtin_profiles() -> BTreeMap<String, Profile> {
                 command: agent.into(),
                 args: vec![],
                 title: Some(agent.into()),
+                agent_kind,
             },
         );
     }

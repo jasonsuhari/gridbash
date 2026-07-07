@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -7,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    auth::AgentKind,
     layout::GridSize,
     profiles::{LaunchCommand, Profile},
 };
@@ -36,9 +38,12 @@ pub struct PaneLaunchSpec {
     #[allow(dead_code)]
     pub profile_name: String,
     pub command: Profile,
+    pub env: BTreeMap<String, String>,
     pub cwd: PathBuf,
     pub folder_name: String,
     pub worktree_name: Option<String>,
+    pub auth_name: Option<String>,
+    pub auth_kind: Option<AgentKind>,
 }
 
 impl SavedSetup {
@@ -100,9 +105,12 @@ impl LaunchPlan {
             .map(|_| PaneLaunchSpec {
                 profile_name: profile_name.clone(),
                 command: command.clone(),
+                env: BTreeMap::new(),
                 cwd: cwd.clone(),
                 folder_name: folder_name.clone(),
                 worktree_name: worktree_name.clone(),
+                auth_name: None,
+                auth_kind: None,
             })
             .collect();
 
@@ -173,10 +181,14 @@ fn vibe_pane_spec(agent: &str, folder: &SetupFolder) -> PaneLaunchSpec {
             command: "vibe".into(),
             args: vec!["run".into(), agent.into(), "--".into()],
             title: Some(agent.into()),
+            agent_kind: None,
         },
+        env: BTreeMap::new(),
         cwd: folder.path.clone(),
         folder_name: folder.name.clone(),
         worktree_name: git_worktree_name(&folder.path),
+        auth_name: None,
+        auth_kind: None,
     }
 }
 
