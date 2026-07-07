@@ -9,6 +9,7 @@ mod pty;
 mod setup;
 mod ui;
 mod vibe;
+mod worktrees;
 
 use anyhow::Result;
 use clap::Parser;
