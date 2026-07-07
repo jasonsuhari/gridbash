@@ -43,7 +43,7 @@ jobs:
         id: pack
         shell: pwsh
         run: |
-          $raw = npm pack --json
+          $raw = npm pack --json --ignore-scripts
           $pack = ($raw | ConvertFrom-Json)[0].filename
           "tarball=$pack" >> $env:GITHUB_OUTPUT
 

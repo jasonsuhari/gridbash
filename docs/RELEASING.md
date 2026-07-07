@@ -87,3 +87,11 @@ Only do that for a local release experiment that has not been pushed.
 ## Common Blocker
 
 `node npm/scripts/prepare.js` copies the freshly built exe into `npm/bin/win32-x64/gridbash.exe`. Close any running GridBash window before releasing, otherwise Windows can lock the target exe and the copy step will fail with `EBUSY`.
+
+For local testing, use:
+
+```powershell
+npm run install:local
+```
+
+Do not use `npm install -g .` from worktrees. npm creates a global junction to the worktree that ran it, so a later agent can accidentally make the `gridbash` command launch an older branch.

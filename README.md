@@ -23,7 +23,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 From this repo:
 
 ```powershell
-npm install -g .
+npm run install:local
 ```
 
 Then run it from anywhere:
@@ -41,6 +41,12 @@ npm pack
 The package ships a Node command shim that launches the bundled Windows x64 `gridbash.exe`.
 
 Release automation and devlog workflow are documented in `docs/RELEASING.md`.
+
+Use `npm run install:local` for local development installs. It installs from a packed tarball so the global `gridbash` command points at a stable package copy, not whichever `.worktrees/` checkout last ran `npm install -g .`.
+
+## PR Workflow
+
+Pull requests can be merged directly after they have been reviewed. Before merging, check the diff, confirm the intent is clear, and make sure the relevant validation has passed.
 
 ## Install From Source
 

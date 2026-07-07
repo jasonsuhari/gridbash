@@ -36,7 +36,8 @@ function readFlag(name) {
 }
 
 function run(command, commandArgs, options = {}) {
-  const result = spawnSync(command, commandArgs, {
+  const invocation = commandInvocation(command, commandArgs);
+  const result = spawnSync(invocation.command, invocation.args, {
     cwd: root,
     stdio: options.capture ? "pipe" : "inherit",
     encoding: "utf8",
@@ -55,12 +56,35 @@ function run(command, commandArgs, options = {}) {
   return options.capture ? result.stdout.trim() : "";
 }
 
+function commandInvocation(command, args) {
+  if (process.platform !== "win32" || !command.endsWith(".cmd")) {
+    return { command, args };
+  }
+
+  return {
+    command: process.env.ComSpec || "cmd.exe",
+    args: ["/d", "/s", "/c", [command, ...args].map(quoteCmd).join(" ")],
+  };
+}
+
+function quoteCmd(value) {
+  if (!/[ \t"&|<>^]/.test(value)) {
+    return value;
+  }
+
+  return `"${value.replace(/"/g, '\\"')}"`;
+}
+
 function readJson(file) {
   return JSON.parse(fs.readFileSync(path.join(root, file), "utf8"));
 }
 
 function writeJson(file, value) {
   fs.writeFileSync(path.join(root, file), `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function npmCommand() {
+  return process.platform === "win32" ? "npm.cmd" : "npm";
 }
 
 function parseVersion(value) {
@@ -209,7 +233,7 @@ if (!flags.has("--skip-checks")) {
   run("cargo", ["clippy", "--", "-D", "warnings"]);
   run("cargo", ["test"]);
   run("node", ["npm/scripts/prepare.js"]);
-  run("npm", ["pack", "--dry-run"]);
+  run(npmCommand(), ["pack", "--dry-run", "--ignore-scripts"]);
 }
 
 run("git", [
