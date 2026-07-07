@@ -94,6 +94,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Use latest npm for trusted publishing
+        run: npm install -g npm@latest
+
       - run: cargo fmt --check
 
       - run: cargo clippy -- -D warnings
@@ -190,6 +193,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
+      - name: Use latest npm for trusted publishing
+        run: npm install -g npm@latest
 
       - run: cargo fmt --check
 
