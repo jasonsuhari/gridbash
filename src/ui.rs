@@ -66,10 +66,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             ""
         };
 
-        let folder = app
-            .pane_folder(index)
-            .map(label_name)
-            .unwrap_or_else(|| folder_label(pane.cwd()));
+        let folder = folder_label(pane.cwd());
         let title = if let Some(worktree) = app.pane_worktree(index) {
             format!(" {} | {} | {}{} ", index + 1, folder, worktree, badge)
         } else {

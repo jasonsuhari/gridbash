@@ -317,6 +317,7 @@ impl App {
         self.next_pane_id += 1;
 
         let pane = PtyPane::spawn(
+            &spec.profile_name,
             pane_id,
             generation,
             &launch.command,
@@ -787,12 +788,6 @@ impl App {
                 exited: !tab.panes.is_empty() && tab.panes.iter().all(|pane| pane.exited),
             })
             .collect()
-    }
-
-    pub fn pane_folder(&self, index: usize) -> Option<&str> {
-        self.active_tab()
-            .and_then(|tab| tab.launch_plan.panes.get(index))
-            .map(|pane| pane.folder_name.as_str())
     }
 
     pub fn pane_worktree(&self, index: usize) -> Option<&str> {
