@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     io::{self, Stdout},
+    path::PathBuf,
     sync::mpsc as std_mpsc,
     time::{Duration, Instant},
 };
@@ -33,18 +34,25 @@ use crate::{
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const TODO_INPUT_LIMIT: usize = 240;
+const MIN_TODO_IDLE_SECONDS: u64 = 15;
+const MAX_TODO_IDLE_SECONDS: u64 = 600;
+const TODO_IDLE_STEP_SECONDS: u64 = 15;
 
 pub struct App {
     config: Config,
+    config_path: Option<PathBuf>,
     launch_plan: Option<LaunchPlan>,
     layout: GridLayout,
     grid_area: Rect,
     panes: Vec<PtyPane>,
+    pane_idle: Vec<PaneIdleState>,
     focus: usize,
     selected: BTreeSet<usize>,
     sleeping: BTreeSet<usize>,
     rects: Vec<Rect>,
     settings: SettingsState,
+    follow_up: Option<FollowUpPromptState>,
     status: String,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
@@ -72,9 +80,85 @@ enum SwapSelection {
 #[derive(Debug, Clone)]
 pub struct SettingsRow {
     pub selected: bool,
-    pub label: &'static str,
+    pub group: SettingsGroup,
+    pub value_kind: SettingsValueKind,
+    pub editing: bool,
+    pub label: String,
     pub value: String,
-    pub hint: &'static str,
+    pub hint: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsGroup {
+    Display,
+    Workflow,
+    Todo,
+    Performance,
+    Theme,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsValueKind {
+    Switch,
+    Stepper,
+    Choice,
+    Text,
+    Action,
+}
+
+#[derive(Debug, Clone)]
+pub struct FollowUpDialog {
+    pub pane_number: usize,
+    pub prompt: String,
+    pub todo_position: usize,
+    pub todo_count: usize,
+    pub quiet_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PaneIdleState {
+    last_output_at: Instant,
+    snoozed_until: Option<Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FollowUpPromptState {
+    pane_index: usize,
+    todo_index: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsTarget {
+    CompactTitles,
+    ActivityBadges,
+    ConfirmQuit,
+    IdleFollowups,
+    IdleSeconds,
+    Todo(usize),
+    AddTodo,
+    PaneDensity,
+    Scrollback,
+    RefreshMs,
+    AccentColor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TodoEditState {
+    target: TodoEditTarget,
+    buffer: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TodoEditTarget {
+    Existing(usize),
+    New,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsChange {
+    None,
+    Render,
+    SaveTodos,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +168,10 @@ struct SettingsState {
     compact_titles: bool,
     activity_badges: bool,
     confirm_quit: bool,
+    idle_followups: bool,
+    idle_seconds: u64,
+    todo_prompts: Vec<String>,
+    todo_edit: Option<TodoEditState>,
     pane_density: i32,
     scrollback: i32,
     refresh_ms: i32,
@@ -98,6 +186,10 @@ impl Default for SettingsState {
             compact_titles: false,
             activity_badges: true,
             confirm_quit: false,
+            idle_followups: true,
+            idle_seconds: crate::config::TodoSettings::default_idle_seconds(),
+            todo_prompts: Vec::new(),
+            todo_edit: None,
             pane_density: 2,
             scrollback: 10_000,
             refresh_ms: 16,
@@ -107,112 +199,432 @@ impl Default for SettingsState {
 }
 
 impl SettingsState {
-    const ROW_COUNT: usize = 7;
     const ACCENTS: [&'static str; 4] = ["cyan", "yellow", "green", "magenta"];
 
-    fn move_cursor(&mut self, delta: isize) {
-        let current = self.cursor as isize;
-        self.cursor = (current + delta).clamp(0, Self::ROW_COUNT as isize - 1) as usize;
-    }
-
-    fn activate(&mut self) {
-        match self.cursor {
-            0 => self.compact_titles = !self.compact_titles,
-            1 => self.activity_badges = !self.activity_badges,
-            2 => self.confirm_quit = !self.confirm_quit,
-            6 => self.adjust(1),
-            _ => self.adjust(1),
+    fn from_config(config: &Config) -> Self {
+        Self {
+            idle_followups: config.todos.enabled,
+            idle_seconds: config
+                .todos
+                .idle_seconds
+                .clamp(MIN_TODO_IDLE_SECONDS, MAX_TODO_IDLE_SECONDS),
+            todo_prompts: config.todos.normalized_prompts(),
+            ..Self::default()
         }
     }
 
-    fn adjust(&mut self, delta: i32) {
-        match self.cursor {
-            0 => {
+    fn move_cursor(&mut self, delta: isize) {
+        self.cancel_todo_edit();
+        let row_count = self.row_targets().len();
+        if row_count == 0 {
+            self.cursor = 0;
+            return;
+        }
+
+        let current = self.cursor as isize;
+        self.cursor = (current + delta).clamp(0, row_count as isize - 1) as usize;
+    }
+
+    fn activate(&mut self) -> SettingsChange {
+        match self.selected_target() {
+            Some(SettingsTarget::CompactTitles) => {
+                self.compact_titles = !self.compact_titles;
+                SettingsChange::Render
+            }
+            Some(SettingsTarget::ActivityBadges) => {
+                self.activity_badges = !self.activity_badges;
+                SettingsChange::Render
+            }
+            Some(SettingsTarget::ConfirmQuit) => {
+                self.confirm_quit = !self.confirm_quit;
+                SettingsChange::Render
+            }
+            Some(SettingsTarget::IdleFollowups) => {
+                self.idle_followups = !self.idle_followups;
+                SettingsChange::SaveTodos
+            }
+            Some(SettingsTarget::Todo(index)) => {
+                self.start_todo_edit(TodoEditTarget::Existing(index));
+                SettingsChange::Render
+            }
+            Some(SettingsTarget::AddTodo) => {
+                self.start_todo_edit(TodoEditTarget::New);
+                SettingsChange::Render
+            }
+            Some(_) => self.adjust(1),
+            None => SettingsChange::None,
+        }
+    }
+
+    fn adjust(&mut self, delta: i32) -> SettingsChange {
+        self.cancel_todo_edit();
+        match self.selected_target() {
+            Some(SettingsTarget::CompactTitles) => {
                 if delta != 0 {
                     self.compact_titles = !self.compact_titles;
                 }
+                SettingsChange::Render
             }
-            1 => {
+            Some(SettingsTarget::ActivityBadges) => {
                 if delta != 0 {
                     self.activity_badges = !self.activity_badges;
                 }
+                SettingsChange::Render
             }
-            2 => {
+            Some(SettingsTarget::ConfirmQuit) => {
                 if delta != 0 {
                     self.confirm_quit = !self.confirm_quit;
                 }
+                SettingsChange::Render
             }
-            3 => self.pane_density = (self.pane_density + delta).clamp(1, 5),
-            4 => self.scrollback = (self.scrollback + delta * 1000).clamp(1_000, 50_000),
-            5 => self.refresh_ms = (self.refresh_ms + delta * 4).clamp(8, 100),
-            6 => {
+            Some(SettingsTarget::IdleFollowups) => {
+                if delta != 0 {
+                    self.idle_followups = !self.idle_followups;
+                }
+                SettingsChange::SaveTodos
+            }
+            Some(SettingsTarget::IdleSeconds) => {
+                let step = (delta as i64) * (TODO_IDLE_STEP_SECONDS as i64);
+                let next = (self.idle_seconds as i64 + step)
+                    .clamp(MIN_TODO_IDLE_SECONDS as i64, MAX_TODO_IDLE_SECONDS as i64)
+                    as u64;
+                self.idle_seconds = next;
+                SettingsChange::SaveTodos
+            }
+            Some(SettingsTarget::PaneDensity) => {
+                self.pane_density = (self.pane_density + delta).clamp(1, 5);
+                SettingsChange::Render
+            }
+            Some(SettingsTarget::Scrollback) => {
+                self.scrollback = (self.scrollback + delta * 1000).clamp(1_000, 50_000);
+                SettingsChange::Render
+            }
+            Some(SettingsTarget::RefreshMs) => {
+                self.refresh_ms = (self.refresh_ms + delta * 4).clamp(8, 100);
+                SettingsChange::Render
+            }
+            Some(SettingsTarget::AccentColor) => {
                 let count = Self::ACCENTS.len() as isize;
                 self.accent_index =
                     (self.accent_index as isize + delta as isize).rem_euclid(count) as usize;
+                SettingsChange::Render
             }
-            _ => {}
+            Some(SettingsTarget::Todo(index)) => {
+                self.start_todo_edit(TodoEditTarget::Existing(index));
+                SettingsChange::Render
+            }
+            Some(SettingsTarget::AddTodo) => {
+                self.start_todo_edit(TodoEditTarget::New);
+                SettingsChange::Render
+            }
+            None => SettingsChange::None,
         }
     }
 
+    fn delete_selected_todo(&mut self) -> SettingsChange {
+        self.cancel_todo_edit();
+        if let Some(SettingsTarget::Todo(index)) = self.selected_target()
+            && index < self.todo_prompts.len()
+        {
+            self.todo_prompts.remove(index);
+            self.clamp_cursor();
+            return SettingsChange::SaveTodos;
+        }
+
+        SettingsChange::None
+    }
+
+    fn editing_todo(&self) -> bool {
+        self.todo_edit.is_some()
+    }
+
+    fn cancel_todo_edit(&mut self) {
+        self.todo_edit = None;
+    }
+
+    fn insert_todo_text(&mut self, text: &str) -> bool {
+        let Some(edit) = self.todo_edit.as_mut() else {
+            return false;
+        };
+
+        let available = TODO_INPUT_LIMIT.saturating_sub(edit.buffer.len());
+        if available == 0 {
+            return false;
+        }
+
+        edit.buffer.extend(text.chars().take(available));
+        true
+    }
+
+    fn backspace_todo_text(&mut self) -> bool {
+        self.todo_edit
+            .as_mut()
+            .and_then(|edit| edit.buffer.pop())
+            .is_some()
+    }
+
+    fn commit_todo_edit(&mut self) -> bool {
+        let Some(edit) = self.todo_edit.take() else {
+            return false;
+        };
+
+        let prompt = edit.buffer.trim().to_string();
+        match edit.target {
+            TodoEditTarget::Existing(index) if prompt.is_empty() => {
+                if index < self.todo_prompts.len() {
+                    self.todo_prompts.remove(index);
+                    self.clamp_cursor();
+                    return true;
+                }
+            }
+            TodoEditTarget::Existing(index) => {
+                if let Some(existing) = self.todo_prompts.get_mut(index) {
+                    *existing = prompt;
+                    return true;
+                }
+            }
+            TodoEditTarget::New if !prompt.is_empty() => {
+                self.todo_prompts.push(prompt);
+                self.cursor = self.row_targets().len().saturating_sub(1);
+                return true;
+            }
+            TodoEditTarget::New => {}
+        }
+
+        false
+    }
+
+    fn todo_settings(&self) -> crate::config::TodoSettings {
+        crate::config::TodoSettings {
+            enabled: self.idle_followups,
+            idle_seconds: self.idle_seconds,
+            prompts: self.todo_prompts.clone(),
+        }
+    }
+
+    fn idle_delay(&self) -> Duration {
+        Duration::from_secs(
+            self.idle_seconds
+                .clamp(MIN_TODO_IDLE_SECONDS, MAX_TODO_IDLE_SECONDS),
+        )
+    }
+
+    fn selected_target(&self) -> Option<SettingsTarget> {
+        self.row_targets().get(self.cursor).copied()
+    }
+
+    fn row_targets(&self) -> Vec<SettingsTarget> {
+        let mut targets = vec![
+            SettingsTarget::CompactTitles,
+            SettingsTarget::ActivityBadges,
+            SettingsTarget::ConfirmQuit,
+            SettingsTarget::IdleFollowups,
+            SettingsTarget::IdleSeconds,
+        ];
+        targets.extend(
+            self.todo_prompts
+                .iter()
+                .enumerate()
+                .map(|(index, _)| SettingsTarget::Todo(index)),
+        );
+        targets.extend([
+            SettingsTarget::AddTodo,
+            SettingsTarget::PaneDensity,
+            SettingsTarget::Scrollback,
+            SettingsTarget::RefreshMs,
+            SettingsTarget::AccentColor,
+        ]);
+        targets
+    }
+
+    fn clamp_cursor(&mut self) {
+        let last = self.row_targets().len().saturating_sub(1);
+        self.cursor = self.cursor.min(last);
+    }
+
+    fn start_todo_edit(&mut self, target: TodoEditTarget) {
+        let buffer = match target {
+            TodoEditTarget::Existing(index) => {
+                self.todo_prompts.get(index).cloned().unwrap_or_default()
+            }
+            TodoEditTarget::New => String::new(),
+        };
+        self.todo_edit = Some(TodoEditState { target, buffer });
+    }
+
+    fn todo_edit_value(&self, target: SettingsTarget) -> Option<String> {
+        let edit = self.todo_edit.as_ref()?;
+        let matches = match (target, edit.target) {
+            (SettingsTarget::Todo(row), TodoEditTarget::Existing(editing)) => row == editing,
+            (SettingsTarget::AddTodo, TodoEditTarget::New) => true,
+            _ => false,
+        };
+
+        matches.then(|| format!("{}_", edit.buffer))
+    }
+
+    fn is_editing_target(&self, target: SettingsTarget) -> bool {
+        self.todo_edit_value(target).is_some()
+    }
+
     fn rows(&self) -> Vec<SettingsRow> {
-        vec![
-            self.row(
-                0,
-                "Compact pane titles",
-                switch_value(self.compact_titles),
-                "sample switch",
-            ),
-            self.row(
-                1,
-                "Activity badges",
-                switch_value(self.activity_badges),
-                "sample switch",
-            ),
-            self.row(
-                2,
-                "Confirm before quit",
-                switch_value(self.confirm_quit),
-                "sample switch",
-            ),
-            self.row(
-                3,
-                "Pane density",
-                self.pane_density.to_string(),
-                "-/+ sample stepper",
-            ),
-            self.row(
-                4,
-                "Scrollback rows",
-                self.scrollback.to_string(),
-                "-/+ sample stepper",
-            ),
-            self.row(
-                5,
-                "Refresh delay",
-                format!("{} ms", self.refresh_ms),
-                "-/+ sample stepper",
-            ),
-            self.row(
-                6,
-                "Accent color",
-                Self::ACCENTS[self.accent_index].to_string(),
-                "sample choice",
-            ),
-        ]
+        let mut rows = Vec::new();
+
+        rows.push(self.row(
+            SettingsTarget::CompactTitles,
+            SettingsGroup::Display,
+            SettingsValueKind::Switch,
+            "Compact pane titles",
+            switch_value(self.compact_titles),
+            "shorter labels in pane chrome",
+        ));
+        rows.push(self.row(
+            SettingsTarget::ActivityBadges,
+            SettingsGroup::Display,
+            SettingsValueKind::Switch,
+            "Activity badges",
+            switch_value(self.activity_badges),
+            "show live and selected state",
+        ));
+        rows.push(self.row(
+            SettingsTarget::ConfirmQuit,
+            SettingsGroup::Workflow,
+            SettingsValueKind::Switch,
+            "Confirm before quit",
+            switch_value(self.confirm_quit),
+            "extra guard for Alt+q",
+        ));
+        rows.push(self.row(
+            SettingsTarget::IdleFollowups,
+            SettingsGroup::Todo,
+            SettingsValueKind::Switch,
+            "Idle todo prompts",
+            switch_value(self.idle_followups),
+            "ask before sending queued follow-ups",
+        ));
+        rows.push(self.row(
+            SettingsTarget::IdleSeconds,
+            SettingsGroup::Todo,
+            SettingsValueKind::Stepper,
+            "Quiet delay",
+            format!("{} s", self.idle_seconds),
+            "time since last terminal output",
+        ));
+
+        for (index, prompt) in self.todo_prompts.iter().enumerate() {
+            let target = SettingsTarget::Todo(index);
+            let value = self
+                .todo_edit_value(target)
+                .unwrap_or_else(|| prompt.to_string());
+            let hint = if self.is_editing_target(target) {
+                "Enter save | Esc cancel"
+            } else {
+                "Enter edit | Del remove"
+            };
+            rows.push(self.row(
+                target,
+                SettingsGroup::Todo,
+                SettingsValueKind::Text,
+                format!("Todo {}", index + 1),
+                value,
+                hint,
+            ));
+        }
+
+        let add_target = SettingsTarget::AddTodo;
+        let add_value = self
+            .todo_edit_value(add_target)
+            .unwrap_or_else(|| "new prompt".to_string());
+        let add_hint = if self.is_editing_target(add_target) {
+            "Enter save | Esc cancel"
+        } else {
+            "Enter add"
+        };
+        rows.push(self.row(
+            add_target,
+            SettingsGroup::Todo,
+            if self.is_editing_target(add_target) {
+                SettingsValueKind::Text
+            } else {
+                SettingsValueKind::Action
+            },
+            "Add todo",
+            add_value,
+            add_hint,
+        ));
+
+        rows.push(self.row(
+            SettingsTarget::PaneDensity,
+            SettingsGroup::Performance,
+            SettingsValueKind::Stepper,
+            "Pane density",
+            self.pane_density.to_string(),
+            "spacing scale from 1 to 5",
+        ));
+        rows.push(self.row(
+            SettingsTarget::Scrollback,
+            SettingsGroup::Performance,
+            SettingsValueKind::Stepper,
+            "Scrollback rows",
+            self.scrollback.to_string(),
+            "history budget per pane",
+        ));
+        rows.push(self.row(
+            SettingsTarget::RefreshMs,
+            SettingsGroup::Performance,
+            SettingsValueKind::Stepper,
+            "Refresh delay",
+            format!("{} ms", self.refresh_ms),
+            "render loop throttle",
+        ));
+        rows.push(self.row(
+            SettingsTarget::AccentColor,
+            SettingsGroup::Theme,
+            SettingsValueKind::Choice,
+            "Accent color",
+            Self::ACCENTS[self.accent_index].to_string(),
+            "cycle the UI highlight",
+        ));
+
+        rows
     }
 
     fn row(
         &self,
-        index: usize,
-        label: &'static str,
+        target: SettingsTarget,
+        group: SettingsGroup,
+        value_kind: SettingsValueKind,
+        label: impl Into<String>,
         value: String,
-        hint: &'static str,
+        hint: impl Into<String>,
     ) -> SettingsRow {
         SettingsRow {
-            selected: self.cursor == index,
-            label,
+            selected: self.selected_target() == Some(target),
+            group,
+            value_kind,
+            editing: self.is_editing_target(target),
+            label: label.into(),
             value,
-            hint,
+            hint: hint.into(),
+        }
+    }
+}
+
+impl SettingsChange {
+    fn render(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    fn save_todos(self) -> bool {
+        matches!(self, Self::SaveTodos)
+    }
+}
+
+impl PaneIdleState {
+    fn new(now: Instant) -> Self {
+        Self {
+            last_output_at: now,
+            snoozed_until: None,
         }
     }
 }
@@ -224,6 +636,7 @@ fn switch_value(enabled: bool) -> String {
 impl App {
     pub fn new(cli: Cli, config: Config) -> Result<Self> {
         let launch_plan = resolve_direct_launch_plan(&cli, &config)?;
+        let config_path = cli.config.clone();
         let grid = launch_plan
             .as_ref()
             .map(|plan| plan.grid)
@@ -235,17 +648,20 @@ impl App {
         let (usage_tx, usage_rx) = std_mpsc::channel();
 
         Ok(Self {
+            settings: SettingsState::from_config(&config),
             config,
+            config_path,
             launch_plan,
             layout: GridLayout::new(grid),
             grid_area: Rect::default(),
             panes: Vec::new(),
+            pane_idle: Vec::new(),
             focus: 0,
             selected: BTreeSet::new(),
             sleeping: BTreeSet::new(),
             rects: Vec::new(),
-            settings: SettingsState::default(),
-            status: "Alt+arrows move | Alt+s select | Alt+x swap | Alt+z sleep | Alt+o settings"
+            follow_up: None,
+            status: "Alt+arrows move | Alt+s select | Alt+a all/none | Alt+x swap | Alt+z sleep | Alt+o settings"
                 .into(),
             event_tx,
             event_rx,
@@ -292,6 +708,8 @@ impl App {
         self.layout = GridLayout::new(plan.grid);
         self.panes.clear();
         self.sleeping.clear();
+        self.pane_idle.clear();
+        self.follow_up = None;
 
         for (index, spec) in plan.panes.iter().enumerate() {
             self.spawn_pane_spec(index, spec, 0)?;
@@ -332,6 +750,7 @@ impl App {
             self.event_tx.clone(),
         )?;
         self.panes.push(pane);
+        self.pane_idle.push(PaneIdleState::new(Instant::now()));
         Ok(())
     }
 
@@ -343,6 +762,7 @@ impl App {
             needs_render |= self.drain_pty_events();
             needs_render |= self.drain_usage_events();
             needs_render |= self.decay_activity();
+            needs_render |= self.update_follow_up_prompt();
 
             if needs_render {
                 terminal.draw(|frame| {
@@ -365,10 +785,15 @@ impl App {
                         }
                     }
                     Event::Resize(_, _) => needs_render = true,
-                    Event::Mouse(mouse) if !self.settings.open => {
+                    Event::Mouse(mouse) if !self.settings.open && self.follow_up.is_none() => {
                         needs_render |= self.handle_mouse(mouse);
                     }
-                    Event::Paste(text) if !self.settings.open => {
+                    Event::Paste(text) if self.settings.editing_todo() => {
+                        if self.settings.insert_todo_text(&text) {
+                            needs_render = true;
+                        }
+                    }
+                    Event::Paste(text) if !self.settings.open && self.follow_up.is_none() => {
                         self.route_input(text.as_bytes())?;
                     }
                     _ => {}
@@ -408,31 +833,48 @@ impl App {
                     generation,
                     bytes,
                 } => {
-                    if let Some(target) = self
+                    if let Some((index, target)) = self
                         .panes
                         .iter_mut()
-                        .find(|p| p.id() == pane && p.generation() == generation)
+                        .enumerate()
+                        .find(|(_, p)| p.id() == pane && p.generation() == generation)
                     {
                         target.process_output(&bytes);
+                        self.mark_pane_touched(index);
                         changed = true;
                     }
                 }
                 PtyEvent::Exited { pane, generation } => {
-                    if let Some(target) = self
+                    if let Some((index, target)) = self
                         .panes
                         .iter_mut()
-                        .find(|p| p.id() == pane && p.generation() == generation)
+                        .enumerate()
+                        .find(|(_, p)| p.id() == pane && p.generation() == generation)
                         && !target.exited
                     {
                         target.exited = true;
+                        if self
+                            .follow_up
+                            .is_some_and(|prompt| prompt.pane_index == index)
+                        {
+                            self.follow_up = None;
+                        }
                         changed = true;
                     }
                 }
             }
         }
 
-        for pane in &mut self.panes {
-            changed |= pane.poll_exit();
+        for (index, pane) in self.panes.iter_mut().enumerate() {
+            if pane.poll_exit() {
+                if self
+                    .follow_up
+                    .is_some_and(|prompt| prompt.pane_index == index)
+                {
+                    self.follow_up = None;
+                }
+                changed = true;
+            }
         }
 
         changed
@@ -479,6 +921,10 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if self.follow_up.is_some() {
+            return self.handle_follow_up_key(key);
+        }
+
         if self.settings.open {
             return self.handle_settings_key(key);
         }
@@ -595,6 +1041,11 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
             return Ok(KeyOutcome::Quit);
         }
+
+        if self.settings.editing_todo() {
+            return self.handle_todo_edit_key(key);
+        }
+
         if key.modifiers.contains(KeyModifiers::ALT)
             && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
         {
@@ -603,36 +1054,29 @@ impl App {
             return Ok(KeyOutcome::Render);
         }
 
-        let changed = match key.code {
+        let change = match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.settings.open = false;
                 self.status = "settings closed".into();
-                true
+                SettingsChange::Render
             }
             KeyCode::Up => {
                 self.settings.move_cursor(-1);
-                true
+                SettingsChange::Render
             }
             KeyCode::Down => {
                 self.settings.move_cursor(1);
-                true
+                SettingsChange::Render
             }
-            KeyCode::Left | KeyCode::Char('-') => {
-                self.settings.adjust(-1);
-                true
-            }
-            KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => {
-                self.settings.adjust(1);
-                true
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                self.settings.activate();
-                true
-            }
-            _ => false,
+            KeyCode::Left | KeyCode::Char('-') => self.settings.adjust(-1),
+            KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => self.settings.adjust(1),
+            KeyCode::Enter | KeyCode::Char(' ') => self.settings.activate(),
+            KeyCode::Delete => self.settings.delete_selected_todo(),
+            _ => SettingsChange::None,
         };
 
-        Ok(if changed {
+        self.apply_settings_change(change);
+        Ok(if change.render() {
             KeyOutcome::Render
         } else {
             KeyOutcome::Continue
@@ -656,7 +1100,110 @@ impl App {
 
         if self.sleeping.remove(&index) {
             self.focus = index;
+            self.mark_pane_touched(index);
             self.status = format!("woke pane {}", index + 1);
+            return true;
+        }
+
+        false
+    }
+
+    fn handle_todo_edit_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if key.modifiers.contains(KeyModifiers::ALT)
+            && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
+        {
+            self.settings.cancel_todo_edit();
+            self.settings.open = false;
+            self.status = "settings closed".into();
+            return Ok(KeyOutcome::Render);
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.settings.cancel_todo_edit();
+                self.status = "todo edit cancelled".into();
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Enter => {
+                let saved = self.settings.commit_todo_edit();
+                if saved {
+                    if self.save_todo_settings() {
+                        self.status = "todo prompt saved".into();
+                    }
+                } else {
+                    self.status = "empty todo ignored".into();
+                }
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Backspace => Ok(if self.settings.backspace_todo_text() {
+                KeyOutcome::Render
+            } else {
+                KeyOutcome::Continue
+            }),
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                let mut buffer = [0; 4];
+                let changed = self.settings.insert_todo_text(ch.encode_utf8(&mut buffer));
+                Ok(if changed {
+                    KeyOutcome::Render
+                } else {
+                    KeyOutcome::Continue
+                })
+            }
+            _ => Ok(KeyOutcome::Continue),
+        }
+    }
+
+    fn apply_settings_change(&mut self, change: SettingsChange) {
+        if change.save_todos() {
+            self.save_todo_settings();
+        }
+    }
+
+    fn save_todo_settings(&mut self) -> bool {
+        self.config.todos = self.settings.todo_settings();
+        match self.config.save(self.config_path.as_deref()) {
+            Ok(_) => true,
+            Err(error) => {
+                self.status = format!("failed to save todos: {error:#}");
+                false
+            }
+        }
+    }
+
+    fn update_follow_up_prompt(&mut self) -> bool {
+        if self.follow_up.is_some()
+            || self.settings.open
+            || !self.settings.idle_followups
+            || self.settings.todo_prompts.is_empty()
+        {
+            return false;
+        }
+
+        let now = Instant::now();
+        let idle_delay = self.settings.idle_delay();
+        for (index, pane) in self.panes.iter().enumerate() {
+            if pane.exited || self.sleeping.contains(&index) {
+                continue;
+            }
+
+            let Some(idle) = self.pane_idle.get(index) else {
+                continue;
+            };
+            if idle.snoozed_until.is_some_and(|until| now < until) {
+                continue;
+            }
+            if now.duration_since(idle.last_output_at) < idle_delay {
+                continue;
+            }
+
+            self.follow_up = Some(FollowUpPromptState {
+                pane_index: index,
+                todo_index: 0,
+            });
+            self.status = format!("pane {} is quiet; todo follow-up ready", index + 1);
             return true;
         }
 
@@ -675,6 +1222,12 @@ impl App {
                 self.sleeping.insert(*index);
                 self.selected.remove(index);
             }
+            if self
+                .follow_up
+                .is_some_and(|prompt| targets.contains(&prompt.pane_index))
+            {
+                self.follow_up = None;
+            }
 
             if self.sleeping.contains(&self.focus)
                 && let Some(index) = self.next_awake_pane(self.focus)
@@ -684,12 +1237,132 @@ impl App {
         } else {
             for index in &targets {
                 self.sleeping.remove(index);
+                self.mark_pane_touched(*index);
             }
             self.focus = targets[0];
         }
 
         let action = if should_sleep { "slept" } else { "woke" };
         self.status = format!("{} {} {}", action, targets.len(), pane_word(targets.len()));
+    }
+
+    fn handle_follow_up_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return Ok(KeyOutcome::Quit);
+        }
+
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.send_follow_up_prompt()?;
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char(']') => {
+                self.cycle_follow_up_prompt(1);
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('[') => {
+                self.cycle_follow_up_prompt(-1);
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Delete => {
+                self.delete_follow_up_prompt();
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.dismiss_follow_up_prompt();
+                Ok(KeyOutcome::Render)
+            }
+            _ => Ok(KeyOutcome::Continue),
+        }
+    }
+
+    fn send_follow_up_prompt(&mut self) -> Result<()> {
+        let Some(dialog) = self.follow_up.take() else {
+            return Ok(());
+        };
+        let Some(prompt) = self.settings.todo_prompts.get(dialog.todo_index).cloned() else {
+            self.status = "todo prompt no longer exists".into();
+            return Ok(());
+        };
+
+        let mut bytes = prompt.into_bytes();
+        bytes.push(b'\r');
+        self.panes
+            .get(dialog.pane_index)
+            .ok_or_else(|| anyhow!("invalid pane index {}", dialog.pane_index))?
+            .write(&bytes)?;
+        self.mark_pane_touched(dialog.pane_index);
+
+        if dialog.todo_index < self.settings.todo_prompts.len() {
+            self.settings.todo_prompts.remove(dialog.todo_index);
+            self.settings.clamp_cursor();
+            if self.save_todo_settings() {
+                self.status = format!("sent todo follow-up to pane {}", dialog.pane_index + 1);
+            }
+        } else {
+            self.status = format!("sent todo follow-up to pane {}", dialog.pane_index + 1);
+        }
+
+        Ok(())
+    }
+
+    fn dismiss_follow_up_prompt(&mut self) {
+        let Some(dialog) = self.follow_up.take() else {
+            return;
+        };
+        let delay = self.settings.idle_delay();
+        if let Some(idle) = self.pane_idle.get_mut(dialog.pane_index) {
+            idle.snoozed_until = Some(Instant::now() + delay);
+        }
+        self.status = format!("todo follow-up snoozed for pane {}", dialog.pane_index + 1);
+    }
+
+    fn delete_follow_up_prompt(&mut self) {
+        let Some(dialog) = self.follow_up.take() else {
+            return;
+        };
+        if dialog.todo_index < self.settings.todo_prompts.len() {
+            self.settings.todo_prompts.remove(dialog.todo_index);
+            self.settings.clamp_cursor();
+            if self.save_todo_settings() {
+                self.status = "todo prompt removed".into();
+            }
+        }
+        if let Some(idle) = self.pane_idle.get_mut(dialog.pane_index) {
+            idle.snoozed_until = Some(Instant::now() + self.settings.idle_delay());
+        }
+    }
+
+    fn cycle_follow_up_prompt(&mut self, delta: isize) {
+        let count = self.settings.todo_prompts.len();
+        let Some(dialog) = self.follow_up.as_mut() else {
+            return;
+        };
+        if count <= 1 {
+            return;
+        }
+
+        dialog.todo_index =
+            (dialog.todo_index as isize + delta).rem_euclid(count as isize) as usize;
+        self.status = format!(
+            "todo follow-up {}/{} for pane {}",
+            dialog.todo_index + 1,
+            count,
+            dialog.pane_index + 1
+        );
+    }
+
+    fn mark_pane_touched(&mut self, index: usize) {
+        if let Some(idle) = self.pane_idle.get_mut(index) {
+            idle.last_output_at = Instant::now();
+            idle.snoozed_until = None;
+        }
+        if self
+            .follow_up
+            .is_some_and(|prompt| prompt.pane_index == index)
+        {
+            self.follow_up = None;
+        }
     }
 
     fn route_input(&mut self, bytes: &[u8]) -> Result<()> {
@@ -699,6 +1372,7 @@ impl App {
                 .get(index)
                 .ok_or_else(|| anyhow!("invalid pane index {index}"))?
                 .write(bytes)?;
+            self.mark_pane_touched(index);
         }
         Ok(())
     }
@@ -795,6 +1469,24 @@ impl App {
 
     pub fn settings_rows(&self) -> Vec<SettingsRow> {
         self.settings.rows()
+    }
+
+    pub fn follow_up_dialog(&self) -> Option<FollowUpDialog> {
+        let prompt = self.follow_up.as_ref()?;
+        let todo = self.settings.todo_prompts.get(prompt.todo_index)?;
+        let quiet_seconds = self
+            .pane_idle
+            .get(prompt.pane_index)
+            .map(|idle| idle.last_output_at.elapsed().as_secs())
+            .unwrap_or_default();
+
+        Some(FollowUpDialog {
+            pane_number: prompt.pane_index + 1,
+            prompt: todo.clone(),
+            todo_position: prompt.todo_index + 1,
+            todo_count: self.settings.todo_prompts.len(),
+            quiet_seconds,
+        })
     }
 
     pub fn pane_folder(&self, index: usize) -> Option<&str> {

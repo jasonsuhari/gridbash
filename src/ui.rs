@@ -8,7 +8,16 @@ use ratatui::{
 use std::path::Path;
 use vt100::Cell;
 
-use crate::app::{App, SettingsRow};
+use crate::app::{App, FollowUpDialog, SettingsGroup, SettingsRow, SettingsValueKind};
+
+const APP_BG: Color = Color::Rgb(11, 15, 20);
+const SETTINGS_BG: Color = Color::Rgb(9, 14, 19);
+const SETTINGS_SURFACE: Color = Color::Rgb(14, 22, 29);
+const SETTINGS_ROW_ACTIVE: Color = Color::Rgb(25, 36, 44);
+const SETTINGS_SHADOW: Color = Color::Rgb(4, 6, 10);
+const SETTINGS_BORDER: Color = Color::Rgb(58, 210, 210);
+const SETTINGS_MUTED: Color = Color::Rgb(118, 135, 149);
+const SETTINGS_TEXT: Color = Color::Rgb(230, 237, 243);
 
 pub struct DrawState {
     pub grid_area: Rect,
@@ -111,12 +120,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | Alt+x swap | Alt+z sleep | hover wakes | Alt+q quit"),
     ]);
     frame.render_widget(
-        Paragraph::new(status).style(Style::default().bg(Color::Rgb(11, 15, 20))),
+        Paragraph::new(status).style(Style::default().bg(APP_BG)),
         status_area,
     );
 
     if app.settings_open() {
         render_settings(frame, area, &app.settings_rows());
+    } else if let Some(dialog) = app.follow_up_dialog() {
+        render_follow_up_dialog(frame, area, &dialog);
     }
 
     DrawState {
@@ -171,98 +182,609 @@ fn pane_chrome(
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow]) {
-    let modal = centered_rect(area, 72, 64);
+    let modal = settings_modal_rect(area, rows.len());
+    let shadow = settings_shadow_rect(area, modal);
+
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+
     frame.render_widget(Clear, modal);
 
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(SETTINGS_BORDER)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" GridBash Settings ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    frame.render_widget(
+        Paragraph::new(settings_lines(rows, inner.width)).style(settings_panel_style()),
+        inner,
+    );
+}
+
+fn render_follow_up_dialog(frame: &mut Frame<'_>, area: Rect, dialog: &FollowUpDialog) {
+    let modal = follow_up_modal_rect(area);
+    let shadow = settings_shadow_rect(area, modal);
+
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(SETTINGS_BORDER)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" Todo Follow-up ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    frame.render_widget(
+        Paragraph::new(follow_up_lines(dialog, inner.width)).style(settings_panel_style()),
+        inner,
+    );
+}
+
+fn follow_up_lines(dialog: &FollowUpDialog, width: u16) -> Vec<Line<'static>> {
+    let quiet = format!(
+        "Pane {} has been quiet for {}s.",
+        dialog.pane_number, dialog.quiet_seconds
+    );
+    let count = format!("Todo {}/{}", dialog.todo_position, dialog.todo_count);
+    let prompt_width = width.saturating_sub(4) as usize;
     let mut lines = vec![
         Line::from(vec![
+            Span::raw("  "),
             Span::styled(
-                "Sample settings",
+                quiet,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(SETTINGS_BORDER)
                     .add_modifier(Modifier::BOLD),
             ),
+        ]),
+        Line::from(vec![
             Span::raw("  "),
-            Span::styled("not wired yet", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "Send this queued prompt?",
+                Style::default().fg(SETTINGS_TEXT),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                count,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]),
         Line::from(""),
     ];
 
-    for row in rows {
-        lines.push(settings_row(row));
+    for line in wrap_dialog_text(&dialog.prompt, prompt_width, 3) {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(line, Style::default().fg(Color::LightCyan)),
+        ]));
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Up/Down", Style::default().fg(Color::Yellow)),
-        Span::raw(" move  "),
-        Span::styled("Space", Style::default().fg(Color::Yellow)),
-        Span::raw(" toggle  "),
-        Span::styled("-/+", Style::default().fg(Color::Yellow)),
-        Span::raw(" adjust  "),
-        Span::styled("Esc", Style::default().fg(Color::Yellow)),
-        Span::raw(" close"),
-    ]));
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Settings ");
-    frame.render_widget(
-        Paragraph::new(lines).block(block).style(
-            Style::default()
-                .fg(Color::Rgb(230, 237, 243))
-                .bg(Color::Rgb(11, 15, 20)),
-        ),
-        modal,
-    );
+    lines.push(follow_up_command_bar(width));
+    lines
 }
 
-fn settings_row(row: &SettingsRow) -> Line<'static> {
-    let cursor = if row.selected { "> " } else { "  " };
-    let cursor_style = if row.selected {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let label_style = if row.selected {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
+fn follow_up_command_bar(width: u16) -> Line<'static> {
+    if width < 54 {
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Enter"),
+            Span::styled(" send  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" no", Style::default().fg(Color::Gray)),
+        ]);
+    }
 
     Line::from(vec![
-        Span::styled(cursor, cursor_style),
-        Span::styled(format!("{:<24}", row.label), label_style),
-        Span::styled(
-            format!("{:>10}", row.value),
-            Style::default().fg(Color::LightCyan),
-        ),
-        Span::raw("   "),
-        Span::styled(row.hint, Style::default().fg(Color::DarkGray)),
+        Span::raw("  "),
+        command_key("Enter/Y"),
+        Span::styled(" send  ", Style::default().fg(Color::Gray)),
+        command_key("Tab"),
+        Span::styled(" next  ", Style::default().fg(Color::Gray)),
+        command_key("Del"),
+        Span::styled(" remove  ", Style::default().fg(Color::Gray)),
+        command_key("Esc/N"),
+        Span::styled(" no", Style::default().fg(Color::Gray)),
     ])
 }
 
-fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
-    let vertical = ratatui::layout::Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area);
-    let horizontal = ratatui::layout::Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(vertical[1]);
-    horizontal[1]
+fn settings_lines(rows: &[SettingsRow], width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "Grid controls",
+                Style::default()
+                    .fg(SETTINGS_BORDER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                "session preview",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(settings_summary(width), Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(""),
+    ];
+
+    push_settings_group(
+        &mut lines,
+        rows,
+        SettingsGroup::Display,
+        "DISPLAY",
+        "title bar and state signals",
+        width,
+    );
+    push_settings_group(
+        &mut lines,
+        rows,
+        SettingsGroup::Workflow,
+        "WORKFLOW",
+        "guard rails for high-speed sessions",
+        width,
+    );
+    push_settings_group(
+        &mut lines,
+        rows,
+        SettingsGroup::Todo,
+        "TODO",
+        "queued prompts for quiet panes",
+        width,
+    );
+    push_settings_group(
+        &mut lines,
+        rows,
+        SettingsGroup::Performance,
+        "PERFORMANCE",
+        "spacing and terminal budget",
+        width,
+    );
+    push_settings_group(
+        &mut lines,
+        rows,
+        SettingsGroup::Theme,
+        "THEME",
+        "one accent across the grid",
+        width,
+    );
+
+    lines.push(Line::from(""));
+    lines.push(settings_command_bar(width));
+    lines
+}
+
+fn settings_summary(width: u16) -> String {
+    let text = if width < 70 {
+        "Refine pane chrome, todo prompts, and highlight color."
+    } else {
+        "Refine pane chrome, idle follow-up todos, performance, and highlight color."
+    };
+    truncate_text(text, width.saturating_sub(2) as usize)
+}
+
+fn push_settings_group(
+    lines: &mut Vec<Line<'static>>,
+    rows: &[SettingsRow],
+    group: SettingsGroup,
+    title: &'static str,
+    helper: &'static str,
+    width: u16,
+) {
+    let group_rows = rows
+        .iter()
+        .filter(|row| row.group == group)
+        .collect::<Vec<_>>();
+    if group_rows.is_empty() {
+        return;
+    }
+
+    if lines.last().is_none_or(|line| line.width() != 0) {
+        lines.push(Line::from(""));
+    }
+    lines.push(settings_section(title, helper, width));
+    for row in group_rows {
+        lines.push(settings_row(row, width));
+    }
+}
+
+fn settings_section(title: &'static str, helper: &'static str, width: u16) -> Line<'static> {
+    let used = 2 + title.len() + 2;
+    let helper = width
+        .checked_sub(used as u16)
+        .filter(|available| *available >= 10)
+        .map(|available| truncate_text(helper, available as usize));
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(SETTINGS_BORDER)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    if let Some(helper) = helper {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(helper, Style::default().fg(SETTINGS_MUTED)));
+    }
+
+    Line::from(spans)
+}
+
+fn settings_row(row: &SettingsRow, width: u16) -> Line<'static> {
+    if row.group == SettingsGroup::Todo
+        && matches!(
+            row.value_kind,
+            SettingsValueKind::Text | SettingsValueKind::Action
+        )
+    {
+        return settings_todo_row(row, width);
+    }
+
+    let width = width as usize;
+    let narrow = width < 66;
+    let label_width = if narrow { 20 } else { 24 };
+    let value_width = if narrow { 10 } else { 13 };
+    let reserved = 2 + label_width + 2 + value_width + 2;
+    let hint_width = width.saturating_sub(reserved);
+    let marker = if row.selected { "> " } else { "  " };
+    let label = fixed_width(&row.label, label_width);
+    let value = fixed_width(&settings_value_label(row), value_width);
+    let hint = if hint_width >= 10 {
+        truncate_text(&row.hint, hint_width)
+    } else {
+        String::new()
+    };
+    let row_bg = row.selected.then_some(SETTINGS_ROW_ACTIVE);
+    let mut used = marker.len() + label.len() + 2 + value.len();
+    let mut spans = vec![
+        Span::styled(marker.to_string(), row_style(Color::Yellow, row_bg, false)),
+        Span::styled(label, row_style(SETTINGS_TEXT, row_bg, row.selected)),
+        Span::styled("  ", row_style(SETTINGS_TEXT, row_bg, false)),
+        Span::styled(value, settings_value_style(row)),
+    ];
+
+    if !hint.is_empty() {
+        used += 2 + hint.len();
+        spans.push(Span::styled("  ", row_style(SETTINGS_TEXT, row_bg, false)));
+        spans.push(Span::styled(hint, row_style(SETTINGS_MUTED, row_bg, false)));
+    }
+
+    if used < width {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            row_style(SETTINGS_TEXT, row_bg, false),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+fn settings_todo_row(row: &SettingsRow, width: u16) -> Line<'static> {
+    let width = width as usize;
+    let marker = if row.selected { "> " } else { "  " };
+    let label_width = if width < 66 { 10 } else { 12 };
+    let hint_width = if row.selected && width >= 72 { 24 } else { 0 };
+    let hint_gap = if hint_width > 0 { 2 } else { 0 };
+    let reserved = marker.len() + label_width + 2 + hint_width + hint_gap;
+    let value_width = width.saturating_sub(reserved);
+    let row_bg = row.selected.then_some(SETTINGS_ROW_ACTIVE);
+    let label = fixed_width(&row.label, label_width);
+    let value = fixed_width(&settings_value_label(row), value_width);
+    let mut used = marker.len() + label.len() + 2 + value.len();
+    let mut spans = vec![
+        Span::styled(marker.to_string(), row_style(Color::Yellow, row_bg, false)),
+        Span::styled(label, row_style(SETTINGS_TEXT, row_bg, row.selected)),
+        Span::styled("  ", row_style(SETTINGS_TEXT, row_bg, false)),
+        Span::styled(value, settings_value_style(row)),
+    ];
+
+    if hint_width > 0 {
+        let hint = fixed_width(&row.hint, hint_width);
+        used += 2 + hint.len();
+        spans.push(Span::styled("  ", row_style(SETTINGS_TEXT, row_bg, false)));
+        spans.push(Span::styled(hint, row_style(SETTINGS_MUTED, row_bg, false)));
+    }
+
+    if used < width {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            row_style(SETTINGS_TEXT, row_bg, false),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+fn settings_command_bar(width: u16) -> Line<'static> {
+    if width < 50 {
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Arrows"),
+            Span::styled(" adjust  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" close", Style::default().fg(Color::Gray)),
+        ]);
+    }
+
+    if width < 62 {
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Up/Down"),
+            Span::styled(" move  ", Style::default().fg(Color::Gray)),
+            command_key("Left/Right"),
+            Span::styled(" adjust  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" close", Style::default().fg(Color::Gray)),
+        ]);
+    }
+
+    Line::from(vec![
+        Span::raw("  "),
+        command_key("Up/Down"),
+        Span::styled(" move  ", Style::default().fg(Color::Gray)),
+        command_key("Enter/Space"),
+        Span::styled(" toggle  ", Style::default().fg(Color::Gray)),
+        command_key("Left/Right"),
+        Span::styled(" adjust  ", Style::default().fg(Color::Gray)),
+        command_key("Del"),
+        Span::styled(" remove  ", Style::default().fg(Color::Gray)),
+        command_key("Esc"),
+        Span::styled(" close", Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn command_key(label: &'static str) -> Span<'static> {
+    Span::styled(
+        format!(" {label} "),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn settings_value_label(row: &SettingsRow) -> String {
+    match row.value_kind {
+        SettingsValueKind::Switch => format!("[ {} ]", row.value),
+        SettingsValueKind::Choice => format!("< {} >", row.value),
+        SettingsValueKind::Stepper => format!("- {} +", row.value),
+        SettingsValueKind::Action => format!("[ {} ]", row.value),
+        SettingsValueKind::Text if row.value.is_empty() => "(empty)".into(),
+        SettingsValueKind::Text => row.value.clone(),
+    }
+}
+
+fn settings_value_style(row: &SettingsRow) -> Style {
+    let mut style = match row.value_kind {
+        SettingsValueKind::Switch if row.value == "on" => Style::default()
+            .fg(Color::Black)
+            .bg(SETTINGS_BORDER)
+            .add_modifier(Modifier::BOLD),
+        SettingsValueKind::Switch => Style::default().fg(SETTINGS_MUTED).bg(SETTINGS_SURFACE),
+        SettingsValueKind::Choice if row.value == "cyan" => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        SettingsValueKind::Choice if row.value == "yellow" => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        SettingsValueKind::Choice if row.value == "green" => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        SettingsValueKind::Choice if row.value == "magenta" => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+        SettingsValueKind::Text if row.editing => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        SettingsValueKind::Action if row.selected => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        _ if row.selected => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        _ => Style::default()
+            .fg(Color::LightCyan)
+            .bg(SETTINGS_SURFACE)
+            .add_modifier(Modifier::BOLD),
+    };
+
+    if row.selected && row.value_kind == SettingsValueKind::Switch && row.value == "off" {
+        style = style.fg(Color::White);
+    }
+
+    style
+}
+
+fn row_style(fg: Color, bg: Option<Color>, bold: bool) -> Style {
+    let style = if let Some(bg) = bg {
+        Style::default().fg(fg).bg(bg)
+    } else {
+        Style::default().fg(fg)
+    };
+
+    if bold {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+fn settings_panel_style() -> Style {
+    Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)
+}
+
+fn settings_modal_rect(area: Rect, row_count: usize) -> Rect {
+    let width = area.width.saturating_sub(4).min(88).max(area.width.min(1));
+    let desired_height = (row_count as u16).saturating_add(14).max(21);
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(desired_height)
+        .max(area.height.min(1));
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn follow_up_modal_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(4).min(74).max(area.width.min(1));
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(12)
+        .max(area.height.min(1));
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn settings_shadow_rect(area: Rect, modal: Rect) -> Rect {
+    let offset_x = if modal.x.saturating_add(modal.width).saturating_add(2)
+        <= area.x.saturating_add(area.width)
+    {
+        2
+    } else {
+        0
+    };
+    let offset_y = if modal.y.saturating_add(modal.height).saturating_add(1)
+        <= area.y.saturating_add(area.height)
+    {
+        1
+    } else {
+        0
+    };
+
+    Rect {
+        x: modal.x.saturating_add(offset_x),
+        y: modal.y.saturating_add(offset_y),
+        width: modal.width,
+        height: modal.height,
+    }
+}
+
+fn fixed_width(text: &str, width: usize) -> String {
+    let text = truncate_text(text, width);
+    format!("{text:<width$}")
+}
+
+fn truncate_text(text: &str, width: usize) -> String {
+    if text.len() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    format!("{}...", &text[..width - 3])
+}
+
+fn wrap_dialog_text(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    if width == 0 || max_lines == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        let next_len = if current.is_empty() {
+            word.len()
+        } else {
+            current.len() + 1 + word.len()
+        };
+
+        if next_len <= width {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+            continue;
+        }
+
+        if !current.is_empty() {
+            lines.push(current);
+            current = String::new();
+        }
+
+        if word.len() > width {
+            lines.push(truncate_text(word, width));
+        } else {
+            current.push_str(word);
+        }
+
+        if lines.len() == max_lines {
+            break;
+        }
+    }
+
+    if !current.is_empty() && lines.len() < max_lines {
+        lines.push(current);
+    }
+
+    if lines.is_empty() {
+        lines.push("(empty prompt)".into());
+    }
+    if lines.len() == max_lines
+        && text.len() > lines.join(" ").len()
+        && let Some(last) = lines.last_mut()
+    {
+        *last = truncate_text(last, width.saturating_sub(3));
+        last.push_str("...");
+    }
+
+    lines
 }
 
 fn folder_label(cwd: &Path) -> String {
@@ -308,11 +830,7 @@ fn render_screen(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen) {
         .collect::<Vec<_>>();
 
     frame.render_widget(
-        Paragraph::new(lines).style(
-            Style::default()
-                .fg(Color::Rgb(230, 237, 243))
-                .bg(Color::Rgb(11, 15, 20)),
-        ),
+        Paragraph::new(lines).style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
         area,
     );
 }
