@@ -15,14 +15,3 @@ title = "Claude Review"
 command = "bash"
 args = ["--login", "-i"]
 title = "Git Bash"
-
-[setups.gridbash-swarm]
-agents = ["claude-1", "claude-2", "codex-2"]
-
-[[setups.gridbash-swarm.folders]]
-name = "gridbash"
-path = "C:\\Users\\Jason\\Documents\\GitHub\\gridbash"
-
-[[setups.gridbash-swarm.folders]]
-name = "fluent"
-path = "C:\\Users\\Jason\\Documents\\GitHub\\fluent"
