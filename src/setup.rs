@@ -61,6 +61,7 @@ impl SavedSetup {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn launch_plan(&self) -> Result<LaunchPlan> {
         self.validate()?;
         let panes = self
@@ -143,6 +144,7 @@ fn run_git(path: &Path, args: &[&str]) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+#[allow(dead_code)]
 pub fn sanitize_setup_name(value: &str) -> Option<String> {
     let normalized = value
         .trim()
@@ -165,6 +167,7 @@ pub fn sanitize_setup_name(value: &str) -> Option<String> {
     (!normalized.is_empty()).then_some(normalized)
 }
 
+#[allow(dead_code)]
 fn vibe_pane_spec(agent: &str, folder: &SetupFolder) -> PaneLaunchSpec {
     PaneLaunchSpec {
         profile_name: agent.to_string(),

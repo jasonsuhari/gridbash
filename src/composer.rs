@@ -1,4 +1,9 @@
-use std::{env, io::Stdout, path::PathBuf, time::Duration};
+use std::{
+    env,
+    io::Stdout,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
@@ -11,12 +16,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
-use crate::{
-    config::Config,
-    layout::{GridLayout, GridSize},
-    profiles::find_profile,
-    setup::LaunchPlan,
-};
+use crate::{config::Config, layout::GridSize, profiles::find_profile, setup::LaunchPlan};
 
 type ComposerTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -29,7 +29,6 @@ pub struct Composer {
     rows: usize,
     columns: usize,
     active_field: DimensionField,
-    status: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +50,6 @@ impl Composer {
             rows: DEFAULT_ROWS,
             columns: DEFAULT_COLUMNS,
             active_field: DimensionField::Rows,
-            status: "Left/Right choose rows or columns | Up/Down changes | Enter launches".into(),
         }
     }
 
@@ -61,7 +59,7 @@ impl Composer {
         config: &Config,
     ) -> Result<Option<LaunchPlan>> {
         loop {
-            terminal.draw(|frame| self.draw(frame, config))?;
+            terminal.draw(|frame| self.draw(frame))?;
 
             if !event::poll(Duration::from_millis(50))? {
                 continue;
@@ -88,12 +86,10 @@ impl Composer {
             KeyCode::Enter => self.launch_plan(config).map(ComposerEvent::Launch),
             KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => {
                 self.active_field = DimensionField::Rows;
-                self.status = "Editing rows".into();
                 Ok(ComposerEvent::Continue)
             }
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => {
                 self.active_field = DimensionField::Columns;
-                self.status = "Editing columns".into();
                 Ok(ComposerEvent::Continue)
             }
             KeyCode::Up | KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('k') => {
@@ -106,12 +102,10 @@ impl Composer {
             }
             KeyCode::Char('r') => {
                 self.active_field = DimensionField::Rows;
-                self.status = "Editing rows".into();
                 Ok(ComposerEvent::Continue)
             }
             KeyCode::Char('c') => {
                 self.active_field = DimensionField::Columns;
-                self.status = "Editing columns".into();
                 Ok(ComposerEvent::Continue)
             }
             KeyCode::Char(ch) if ch.is_ascii_digit() => {
@@ -128,12 +122,6 @@ impl Composer {
             DimensionField::Columns => &mut self.columns,
         };
         *value = (*value as isize + delta).clamp(1, MAX_DIMENSION as isize) as usize;
-        self.status = format!(
-            "Grid set to {} row(s) x {} column(s): {} panes",
-            self.rows,
-            self.columns,
-            self.rows * self.columns
-        );
     }
 
     fn set_active_from_digit(&mut self, ch: char) {
@@ -148,12 +136,6 @@ impl Composer {
             DimensionField::Rows => self.rows = value.min(MAX_DIMENSION),
             DimensionField::Columns => self.columns = value.min(MAX_DIMENSION),
         }
-        self.status = format!(
-            "Grid set to {} row(s) x {} column(s): {} panes",
-            self.rows,
-            self.columns,
-            self.rows * self.columns
-        );
     }
 
     fn launch_plan(&self, config: &Config) -> Result<LaunchPlan> {
@@ -170,7 +152,7 @@ impl Composer {
         ))
     }
 
-    fn draw(&self, frame: &mut Frame<'_>, config: &Config) {
+    fn draw(&self, frame: &mut Frame<'_>) {
         let area = frame.area();
         frame.render_widget(background(), area);
 
@@ -187,22 +169,19 @@ impl Composer {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4),
+                Constraint::Length(3),
                 Constraint::Min(8),
                 Constraint::Length(5),
-                Constraint::Length(2),
             ])
             .split(inner);
 
-        self.draw_header(frame, chunks[0], config);
+        self.draw_header(frame, chunks[0]);
         self.draw_preview(frame, chunks[1]);
         self.draw_controls(frame, chunks[2]);
-        frame.render_widget(status_bar(&self.status), chunks[3]);
     }
 
-    fn draw_header(&self, frame: &mut Frame<'_>, area: Rect, config: &Config) {
-        let cwd = self.current_dir.display().to_string();
-        let profile = startup_profile_name(config);
+    fn draw_header(&self, frame: &mut Frame<'_>, area: Rect) {
+        let cwd = display_path(&self.current_dir);
         let lines = vec![
             Line::from(vec![
                 Span::styled(
@@ -221,10 +200,6 @@ impl Composer {
                 Span::styled("cwd ", Style::default().fg(Color::DarkGray)),
                 Span::styled(cwd, Style::default().fg(Color::Gray)),
             ]),
-            Line::from(vec![
-                Span::styled("profile ", Style::default().fg(Color::DarkGray)),
-                Span::styled(profile, Style::default().fg(Color::Gray)),
-            ]),
         ];
 
         frame.render_widget(Paragraph::new(lines).style(panel_style()), area);
@@ -236,31 +211,14 @@ impl Composer {
             rows: self.rows,
             columns: self.columns,
         };
-        let rects = GridLayout::new(grid).rects(preview_area, grid.count());
+        let rects = square_preview_rects(preview_area, grid);
 
         for (index, rect) in rects.into_iter().enumerate() {
             if rect.width == 0 || rect.height == 0 {
                 continue;
             }
 
-            let border = if index == 0 {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Rgb(54, 162, 183))
-            };
-            let title = if rect.width >= 8 {
-                format!(" {} ", index + 1)
-            } else {
-                String::new()
-            };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .border_style(border)
-                .style(Style::default().bg(Color::Rgb(13, 24, 31)));
-            frame.render_widget(block, rect);
+            frame.render_widget(dithered_square(index, rect), rect);
         }
     }
 
@@ -268,13 +226,13 @@ impl Composer {
         let lines = vec![
             Line::from(""),
             Line::from(vec![
-                control_box(self.active_field == DimensionField::Rows, self.rows, "r"),
+                control_box(self.active_field == DimensionField::Rows, self.rows),
+                Span::raw(" "),
+                Span::styled("rows", Style::default().fg(Color::Gray)),
                 Span::styled("  x  ", Style::default().fg(Color::DarkGray)),
-                control_box(
-                    self.active_field == DimensionField::Columns,
-                    self.columns,
-                    "c",
-                ),
+                control_box(self.active_field == DimensionField::Columns, self.columns),
+                Span::raw(" "),
+                Span::styled("cols", Style::default().fg(Color::Gray)),
             ]),
             Line::from(""),
             Line::from(vec![
@@ -296,6 +254,11 @@ impl Composer {
     }
 }
 
+fn display_path(path: &Path) -> String {
+    let text = path.display().to_string();
+    text.strip_prefix(r"\\?\").unwrap_or(&text).to_string()
+}
+
 fn startup_profile_name(config: &Config) -> String {
     env::var("GRIDBASH_PROFILE")
         .ok()
@@ -303,7 +266,7 @@ fn startup_profile_name(config: &Config) -> String {
         .unwrap_or_else(|| "git-bash".into())
 }
 
-fn control_box<'a>(active: bool, value: usize, label: &'static str) -> Span<'a> {
+fn control_box(active: bool, value: usize) -> Span<'static> {
     let style = if active {
         Style::default()
             .fg(Color::Black)
@@ -316,15 +279,7 @@ fn control_box<'a>(active: bool, value: usize, label: &'static str) -> Span<'a> 
             .add_modifier(Modifier::BOLD)
     };
 
-    Span::styled(format!(" {value:>2} {label} "), style)
-}
-
-fn status_bar<'a>(status: &str) -> Paragraph<'a> {
-    Paragraph::new(Line::from(vec![
-        Span::raw(" "),
-        Span::styled(status.to_string(), Style::default().fg(Color::Gray)),
-    ]))
-    .style(panel_style())
+    Span::styled(format!(" {value:>2} "), style)
 }
 
 fn background() -> Paragraph<'static> {
@@ -364,4 +319,79 @@ fn inset(area: Rect, x: u16, y: u16) -> Rect {
         width: area.width.saturating_sub(x.saturating_mul(2)),
         height: area.height.saturating_sub(y.saturating_mul(2)),
     }
+}
+
+fn square_preview_rects(area: Rect, grid: GridSize) -> Vec<Rect> {
+    let rows = grid.rows as u16;
+    let columns = grid.columns as u16;
+    if rows == 0 || columns == 0 || area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+
+    let gap_y = if area.height >= rows.saturating_mul(2).saturating_sub(1) {
+        1
+    } else {
+        0
+    };
+    let gap_x = if area.width >= columns.saturating_mul(4).saturating_sub(2) {
+        2
+    } else if area.width >= columns.saturating_mul(3).saturating_sub(1) {
+        1
+    } else {
+        0
+    };
+
+    let row_gaps = rows.saturating_sub(1).saturating_mul(gap_y);
+    let column_gaps = columns.saturating_sub(1).saturating_mul(gap_x);
+    let height_fit = area.height.saturating_sub(row_gaps) / rows;
+    let width_fit = area.width.saturating_sub(column_gaps) / columns / 2;
+    let side_height = height_fit.min(width_fit).max(1);
+    let side_width = side_height.saturating_mul(2).max(1);
+    let total_height = rows
+        .saturating_mul(side_height)
+        .saturating_add(row_gaps)
+        .min(area.height);
+    let total_width = columns
+        .saturating_mul(side_width)
+        .saturating_add(column_gaps)
+        .min(area.width);
+    let start_y = area.y + area.height.saturating_sub(total_height) / 2;
+    let start_x = area.x + area.width.saturating_sub(total_width) / 2;
+
+    let mut rects = Vec::with_capacity(grid.count());
+    for row in 0..rows {
+        for column in 0..columns {
+            rects.push(Rect {
+                x: start_x + column.saturating_mul(side_width.saturating_add(gap_x)),
+                y: start_y + row.saturating_mul(side_height.saturating_add(gap_y)),
+                width: side_width,
+                height: side_height,
+            });
+        }
+    }
+    rects
+}
+
+fn dithered_square(index: usize, rect: Rect) -> Paragraph<'static> {
+    let lines = (0..rect.height)
+        .map(|y| {
+            let mut text = String::with_capacity(rect.width as usize);
+            for x in 0..rect.width {
+                let ch = match (x + y + index as u16) % 4 {
+                    0 => '#',
+                    1 => '.',
+                    2 => ':',
+                    _ => '.',
+                };
+                text.push(ch);
+            }
+            Line::from(text)
+        })
+        .collect::<Vec<_>>();
+
+    Paragraph::new(lines).style(
+        Style::default()
+            .fg(Color::Rgb(78, 198, 220))
+            .bg(Color::Rgb(12, 58, 72)),
+    )
 }
