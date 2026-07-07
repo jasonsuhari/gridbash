@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridBash OpenVid Demo Source</title>
+  <style>
+    html,
+    body {
+      width: 1920px;
+      height: 1080px;
+      margin: 0;
+      overflow: hidden;
+      background: #0b1118;
+    }
+
+    svg {
+      display: block;
+      width: 1920px;
+      height: 1080px;
+      font-family: "Segoe UI", Arial, sans-serif;
+      text-rendering: geometricPrecision;
+    }
+
+    .mono {
+      font-family: Consolas, "Cascadia Mono", monospace;
+    }
+  </style>
+</head>
+<body>
+<svg id="stage" viewBox="0 0 1920 1080" aria-label="GridBash product demo">
+  <defs>
+    <linearGradient id="bgGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0b1118"/>
+      <stop offset="55%" stop-color="#171225"/>
+      <stop offset="100%" stop-color="#101922"/>
+    </linearGradient>
+    <linearGradient id="headerGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#1f232b"/>
+      <stop offset="100%" stop-color="#13171e"/>
+    </linearGradient>
+    <filter id="windowShadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="24" stdDeviation="22" flood-color="#000000" flood-opacity="0.42"/>
+    </filter>
+  </defs>
+  <rect width="1920" height="1080" fill="url(#bgGradient)"/>
+  <polygon id="accentA" points="-80,160 780,20 540,360 -120,480" fill="#29d392" opacity="0.12"/>
+  <polygon id="accentB" points="1260,0 2060,0 1900,400 1120,310" fill="#48a5ff" opacity="0.11"/>
+  <polygon id="accentC" points="220,950 1140,820 1780,1160 0,1160" fill="#ffba49" opacity="0.09"/>
+
+  <g id="camera">
+    <g id="window" filter="url(#windowShadow)">
+      <rect x="142" y="170" width="1636" height="820" rx="34" fill="#0c0e12"/>
+      <rect x="142" y="170" width="1636" height="70" rx="34" fill="url(#headerGradient)"/>
+      <rect x="142" y="206" width="1636" height="36" fill="#12151c"/>
+      <rect x="142" y="170" width="1636" height="820" rx="34" fill="none" stroke="rgba(255,255,255,0.12)" stroke-width="1.5"/>
+      <circle cx="178" cy="205" r="7" fill="#ff5f56"/>
+      <circle cx="206" cy="205" r="7" fill="#ffbd2e"/>
+      <circle cx="234" cy="205" r="7" fill="#27c93f"/>
+      <text x="272" y="213" fill="#d6dde6" font-size="18">GridBash - 2x3 agent workspace</text>
+      <text x="1258" y="213" fill="#8e9aaa" font-size="18">Alt+B broadcast   Alt+S select   Alt+Arrows focus</text>
+      <g id="setup"></g>
+      <g id="grid"></g>
+    </g>
+  </g>
+
+  <g id="overlay"></g>
+</svg>
+
+<script>
+const NS = "http://www.w3.org/2000/svg";
+const setupGroup = document.getElementById("setup");
+const gridGroup = document.getElementById("grid");
+const overlayGroup = document.getElementById("overlay");
+const camera = document.getElementById("camera");
+const accentA = document.getElementById("accentA");
+const accentB = document.getElementById("accentB");
+
+const inner = { x: 168, y: 242, w: 1584, h: 710 };
+const paneTitles = ["codex-review", "claude-impl", "gemini-search", "powershell", "aider-docs", "opencode-ci"];
+const paneLines = [
+  ["$ cargo test", "layout::tests ... PASS", "profiles::detect ... PASS", "all tests passed"],
+  ["$ inspect composer", "folders synced", "vibe profiles ready", "patch prepared"],
+  ["$ scan roadmap", "broadcast controls found", "docs refs collected", "done"],
+  ["$ gridbash --list-profiles", "git-bash pwsh cmd codex", "claude gemini aider goose", "ready"],
+  ["$ update README", "install notes checked", "controls table current", "done"],
+  ["$ npm pack --dry-run", "bundle includes gridbash.exe", "package metadata ok", "done"],
+];
+
+function ease(x) {
+  const n = Math.max(0, Math.min(1, x));
+  return n * n * (3 - 2 * n);
+}
+
+function lerp(a, b, t) {
+  return a + (b - a) * ease(t);
+}
+
+function el(tag, attrs = {}, text) {
+  const node = document.createElementNS(NS, tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    node.setAttribute(key, value);
+  }
+  if (text !== undefined) {
+    node.textContent = text;
+  }
+  return node;
+}
+
+function rounded(x, y, width, height, rx, fill, extra = {}) {
+  return el("rect", { x, y, width, height, rx, fill, ...extra });
+}
+
+function buildSetup() {
+  setupGroup.appendChild(rounded(inner.x, inner.y, inner.w, inner.h, 0, "#090c12"));
+  const sidebar = { x: inner.x + 24, y: inner.y + 24, w: 310, h: inner.h - 48 };
+  const main = { x: sidebar.x + sidebar.w + 26, y: inner.y + 24, w: inner.w - sidebar.w - 76, h: inner.h - 48 };
+  setupGroup.appendChild(rounded(sidebar.x, sidebar.y, sidebar.w, sidebar.h, 20, "#10141d"));
+  setupGroup.appendChild(el("text", { x: sidebar.x + 26, y: sidebar.y + 58, fill: "#f0f4f9", "font-size": 34, "font-weight": 700 }, "Composer"));
+  setupGroup.appendChild(el("text", { x: sidebar.x + 28, y: sidebar.y + 96, fill: "#8a97a6", "font-size": 18 }, "Build a grid before launching agents."));
+
+  const steps = ["Folders", "Profiles", "Preview", "Launch"];
+  setupGroup.steps = steps.map((step, index) => {
+    const row = rounded(sidebar.x + 22, sidebar.y + 132 + index * 70, sidebar.w - 44, 50, 14, "#171c26");
+    const dot = el("circle", { cx: sidebar.x + 49, cy: sidebar.y + 157 + index * 70, r: 11, fill: "#505c6c" });
+    const label = el("text", { x: sidebar.x + 76, y: sidebar.y + 164 + index * 70, fill: "#aebaca", "font-size": 24 }, step);
+    setupGroup.append(row, dot, label);
+    return { row, dot, label };
+  });
+
+  setupGroup.appendChild(rounded(main.x, main.y, main.w, main.h, 20, "#0d1016", { stroke: "rgba(255,255,255,0.09)" }));
+  setupGroup.heading = el("text", { x: main.x + 38, y: main.y + 72, fill: "#f0f4f9", "font-size": 34, "font-weight": 700 });
+  setupGroup.subhead = el("text", { x: main.x + 38, y: main.y + 124, fill: "#96a3b5", "font-size": 24 });
+  setupGroup.append(setupGroup.heading, setupGroup.subhead);
+  setupGroup.rows = Array.from({ length: 4 }, (_, index) => {
+    const row = rounded(main.x + 38, main.y + 164 + index * 78, main.w - 76, 56, 14, "#161b24");
+    const box = rounded(main.x + 56, main.y + 180 + index * 78, 24, 24, 6, "#293747");
+    const mark = el("text", { x: main.x + 62, y: main.y + 200 + index * 78, fill: "#051410", "font-size": 18 }, "x");
+    const label = el("text", { x: main.x + 96, y: main.y + 200 + index * 78, fill: "#dee5ee", "font-size": 22, class: "mono" });
+    setupGroup.append(row, box, mark, label);
+    return { row, box, mark, label };
+  });
+  setupGroup.launchButton = rounded(main.x + 38, main.y + 176, main.w - 76, 94, 20, "#29d392");
+  setupGroup.launchText = el("text", { x: main.x + main.w / 2, y: main.y + 234, fill: "#051410", "font-size": 34, "font-weight": 700, "text-anchor": "middle" }, "Enter  Launch 2x3 grid");
+  setupGroup.command = el("text", { x: main.x + 56, y: main.y + 364, fill: "#a6fada", "font-size": 22, class: "mono" }, "gridbash 2x3 --profile codex --cwd .\\");
+  setupGroup.append(setupGroup.launchButton, setupGroup.launchText, setupGroup.command);
+}
+
+function buildGrid() {
+  gridGroup.appendChild(rounded(inner.x, inner.y, inner.w, inner.h, 0, "#090c12"));
+  const gap = 12;
+  const paneW = (inner.w - gap * 2) / 3;
+  const paneH = (inner.h - gap) / 2;
+  gridGroup.panes = [];
+  for (let row = 0; row < 2; row += 1) {
+    for (let col = 0; col < 3; col += 1) {
+      const index = row * 3 + col;
+      const x = inner.x + col * (paneW + gap);
+      const y = inner.y + row * (paneH + gap);
+      const group = el("g");
+      const base = rounded(x, y, paneW, paneH, 12, "#080b11");
+      const header = rounded(x, y, paneW, 38, 12, "#121720");
+      const cover = el("rect", { x, y: y + 22, width: paneW, height: 18, fill: "#121720" });
+      const border = rounded(x, y, paneW, paneH, 12, "none", { stroke: "rgba(255,255,255,0.08)", "stroke-width": 1 });
+      const title = el("text", { x: x + 14, y: y + 26, fill: "#e6eef6", "font-size": 18, class: "mono" }, paneTitles[index]);
+      const tag = rounded(x + paneW - 100, y + 8, 82, 22, 8, "#29d392");
+      const tagText = el("text", { x: x + paneW - 59, y: y + 24, fill: "#061f16", "font-size": 15, "text-anchor": "middle" }, "selected");
+      const lineNodes = paneLines[index].map((line, lineIndex) => {
+        const color = line.startsWith("$") ? "#29d392" : line.includes("PASS") || line.includes("done") ? "#ffca5c" : "#b4c0d0";
+        const node = el("text", { x: x + 16, y: y + 74 + lineIndex * 27, fill: color, "font-size": 18, class: "mono" }, line);
+        group.appendChild(node);
+        return node;
+      });
+      group.prepend(base, header, cover, border, title, tag, tagText);
+      gridGroup.appendChild(group);
+      gridGroup.panes.push({ header, cover, border, tag, tagText, lineNodes });
+    }
+  }
+  gridGroup.broadcast = el("g");
+  gridGroup.broadcast.appendChild(rounded(inner.x + 270, inner.y + 20, inner.w - 540, 72, 20, "#29d392", { opacity: 0.94 }));
+  gridGroup.broadcast.appendChild(el("text", { x: inner.x + inner.w / 2, y: inner.y + 65, fill: "#041611", "font-size": 24, "text-anchor": "middle" }, "Broadcast ON to 4 selected panes: cargo test --all"));
+  gridGroup.done = el("g");
+  gridGroup.done.appendChild(rounded(inner.x + 450, inner.y + 594, 684, 70, 20, "#ffca5c", { opacity: 0.95 }));
+  gridGroup.done.appendChild(el("text", { x: inner.x + 792, y: inner.y + 638, fill: "#221502", "font-size": 24, "text-anchor": "middle" }, "Six live panes, one focused workflow"));
+  gridGroup.append(gridGroup.broadcast, gridGroup.done);
+}
+
+function buildOverlay() {
+  overlayGroup.title = el("text", { x: 142, y: 106, fill: "#f6f9fc", "font-size": 54, "font-weight": 800 }, "GridBash");
+  overlayGroup.tagline = el("text", { x: 146, y: 154, fill: "#b5c2d2", "font-size": 24 }, "Fast terminal grids for running lots of CLI agents at once.");
+  overlayGroup.endCard = el("g");
+  overlayGroup.endCard.appendChild(rounded(486, 64, 948, 82, 22, "#0a0e15", { opacity: 0.76 }));
+  overlayGroup.endCard.appendChild(el("text", { x: 960, y: 114, fill: "#eff6fc", "font-size": 24, "text-anchor": "middle" }, "GridBash: select panes, broadcast commands, keep every agent visible."));
+  overlayGroup.append(overlayGroup.title, overlayGroup.tagline, overlayGroup.endCard);
+}
+
+function renderSetup(t) {
+  const active = t > 4.4 ? 3 : t > 3.2 ? 2 : t > 1.9 ? 1 : 0;
+  setupGroup.steps.forEach((step, index) => {
+    const selected = index === active;
+    step.row.setAttribute("fill", selected ? "#1f5448" : "#171c26");
+    step.dot.setAttribute("fill", selected ? "#29d392" : "#505c6c");
+    step.label.setAttribute("fill", selected ? "#f0fff9" : "#aebaca");
+  });
+
+  const scenes = [
+    {
+      heading: "Choose folders",
+      subhead: "GridBash starts from the repo you launched in, then lets you add more.",
+      rows: ["C:\\Users\\Jason\\Documents\\GitHub\\gridbash", "C:\\Users\\Jason\\Documents\\GitHub\\fluent", "C:\\Users\\Jason\\Documents\\GitHub\\api", ""],
+      checks: [true, true, true, false],
+    },
+    {
+      heading: "Pick agent profiles",
+      subhead: "Use logged-in vibe profiles or a built-in terminal profile.",
+      rows: ["codex-review", "claude-implementation", "gemini-search", "powershell"],
+      checks: [true, true, true, false],
+    },
+    {
+      heading: "Preview pane assignment",
+      subhead: "Each pane gets the right folder and command before launch.",
+      rows: ["1  gridbash  -> codex-review", "2  fluent    -> claude-implementation", "3  api       -> gemini-search", "4  gridbash  -> powershell"],
+      checks: [true, true, true, true],
+    },
+    {
+      heading: "Ready to launch",
+      subhead: "Save the setup, press Enter, and GridBash opens the live PTY grid.",
+      rows: ["", "", "", ""],
+      checks: [false, false, false, false],
+    },
+  ];
+  const scene = scenes[active];
+  setupGroup.heading.textContent = scene.heading;
+  setupGroup.subhead.textContent = scene.subhead;
+  setupGroup.rows.forEach((row, index) => {
+    row.label.textContent = scene.rows[index];
+    row.row.setAttribute("opacity", active === 3 ? "0" : "1");
+    row.box.setAttribute("opacity", active === 3 ? "0" : "1");
+    row.mark.setAttribute("opacity", active === 3 || !scene.checks[index] ? "0" : "1");
+    row.box.setAttribute("fill", scene.checks[index] ? "#29d392" : "#2d3746");
+  });
+  const launchOpacity = active === 3 ? 1 : 0;
+  setupGroup.launchButton.setAttribute("opacity", launchOpacity);
+  setupGroup.launchText.setAttribute("opacity", launchOpacity);
+  setupGroup.command.setAttribute("opacity", launchOpacity);
+}
+
+function renderGrid(t) {
+  gridGroup.panes.forEach((pane, index) => {
+    const selected = t > 9.2 && [0, 1, 4, 5].includes(index);
+    const focused = t > 7.4 && index === 1;
+    const headerFill = focused ? "#22485c" : selected ? "#1f4137" : "#121720";
+    pane.header.setAttribute("fill", headerFill);
+    pane.cover.setAttribute("fill", headerFill);
+    pane.border.setAttribute("stroke", focused ? "rgba(77,190,255,0.82)" : selected ? "rgba(41,211,146,0.74)" : "rgba(255,255,255,0.08)");
+    pane.border.setAttribute("stroke-width", focused ? "3" : "1");
+    pane.tag.setAttribute("opacity", selected ? "1" : "0");
+    pane.tagText.setAttribute("opacity", selected ? "1" : "0");
+    const visibleLines = t > 13.2 ? pane.lineNodes.length : Math.max(0, Math.min(pane.lineNodes.length, Math.floor((t - 5.6 - index * 0.18) * 2.4)));
+    pane.lineNodes.forEach((node, lineIndex) => {
+      node.setAttribute("opacity", lineIndex < visibleLines ? "1" : "0");
+    });
+  });
+
+  let bar = t > 10 && t < 15.2 ? ease((t - 10) / 0.7) : 0;
+  if (t > 14.5) {
+    bar = 1 - ease((t - 14.5) / 0.7);
+  }
+  gridGroup.broadcast.setAttribute("opacity", Math.max(0, Math.min(1, bar)));
+  gridGroup.done.setAttribute("opacity", t > 14 ? ease((t - 14) / 1) : 0);
+}
+
+function renderCamera(t) {
+  let scale = 1;
+  let cx = 960;
+  let cy = 540;
+  if (t > 7 && t < 10) {
+    const p = (t - 7) / 3;
+    scale = lerp(1, 1.12, p);
+    cy = lerp(540, 570, p);
+  } else if (t >= 10 && t < 14.5) {
+    const p = (t - 10) / 1.2;
+    scale = lerp(1.12, 1.34, p);
+    cx = lerp(960, 990, p);
+    cy = lerp(570, 440, p);
+  } else if (t >= 14.5) {
+    const p = (t - 14.5) / 2.2;
+    scale = lerp(1.34, 1, p);
+    cx = lerp(990, 960, p);
+    cy = lerp(440, 540, p);
+  }
+  camera.setAttribute("transform", `translate(960 540) scale(${scale}) translate(${-cx} ${-cy})`);
+}
+
+function renderOverlay(t) {
+  let intro = t < 3.9 ? 1 : t < 4.8 ? 1 - ease((t - 3.9) / 0.9) : 0;
+  overlayGroup.title.setAttribute("opacity", intro);
+  overlayGroup.tagline.setAttribute("opacity", intro);
+  overlayGroup.endCard.setAttribute("opacity", t > 15 ? ease((t - 15) / 1) : 0);
+}
+
+function render(t) {
+  accentA.setAttribute("transform", `translate(${20 * Math.sin(t * 0.7)} 0)`);
+  accentB.setAttribute("transform", `translate(${-20 * Math.sin(t * 0.7)} 0)`);
+  setupGroup.setAttribute("opacity", t < 5.2 ? "1" : "0");
+  gridGroup.setAttribute("opacity", t < 5.2 ? "0" : "1");
+  renderSetup(t);
+  renderGrid(t);
+  renderCamera(t);
+  renderOverlay(t);
+}
+
+buildSetup();
+buildGrid();
+buildOverlay();
+window.__setDemoTime = async (t) => {
+  render(t);
+  await document.fonts.ready;
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+};
+window.__gridbashDemoReady = true;
+render(0);
+</script>
+</body>
+</html>
