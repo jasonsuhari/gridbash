@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     layout::GridSize,
-    profiles::{LaunchCommand, Profile},
+    profiles::{AGENT_PROFILE_NAMES, LaunchCommand, Profile},
+    worktrees::{ManagedWorktreeOptions, ensure_pane_worktrees},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +88,21 @@ impl SetupFolder {
 }
 
 impl LaunchPlan {
+    pub fn from_launch_options(
+        profile_name: String,
+        command: Profile,
+        cwd: PathBuf,
+        count: usize,
+        grid: GridSize,
+        worktrees: Option<&ManagedWorktreeOptions>,
+    ) -> Result<Self> {
+        if let Some(options) = worktrees {
+            return Self::managed_worktrees(profile_name, command, cwd, count, grid, options);
+        }
+
+        Ok(Self::legacy(profile_name, command, cwd, count, grid))
+    }
+
     pub fn legacy(
         profile_name: String,
         command: Profile,
@@ -108,11 +124,62 @@ impl LaunchPlan {
 
         Self { panes, grid }
     }
+
+    fn managed_worktrees(
+        profile_name: String,
+        command: Profile,
+        cwd: PathBuf,
+        count: usize,
+        grid: GridSize,
+        options: &ManagedWorktreeOptions,
+    ) -> Result<Self> {
+        let panes = ensure_pane_worktrees(&cwd, count, options)?
+            .into_iter()
+            .map(|worktree| PaneLaunchSpec {
+                profile_name: profile_name.clone(),
+                command: command.clone(),
+                cwd: worktree.cwd,
+                folder_name: worktree.folder_name,
+                worktree_name: Some(worktree.branch_name),
+            })
+            .collect();
+
+        Ok(Self { panes, grid })
+    }
 }
 
 impl PaneLaunchSpec {
     pub fn resolved_command(&self) -> Result<LaunchCommand> {
         self.command.resolved_command()
+    }
+
+    pub fn agent_label(&self) -> Option<String> {
+        if command_basename(&self.command.command).as_deref() == Some("vibe") {
+            return self
+                .command
+                .args
+                .windows(2)
+                .find_map(|args| (args[0] == "run").then(|| args[1].clone()))
+                .or_else(|| self.command.title.clone())
+                .or_else(|| Some(self.profile_name.clone()))
+                .map(clean_agent_label);
+        }
+
+        if is_agent_like(&self.profile_name)
+            || self.command.title.as_deref().is_some_and(is_agent_like)
+            || command_basename(&self.command.command)
+                .as_deref()
+                .is_some_and(is_agent_like)
+        {
+            return Some(clean_agent_label(
+                self.command
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| self.profile_name.clone()),
+            ));
+        }
+
+        None
     }
 }
 
@@ -142,6 +209,47 @@ fn run_git(path: &Path, args: &[&str]) -> Option<String> {
 
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (!value.is_empty()).then_some(value)
+}
+
+fn command_basename(command: &str) -> Option<String> {
+    let path = Path::new(command);
+    let file_name = path
+        .file_stem()
+        .or_else(|| path.file_name())
+        .and_then(|value| value.to_str())?;
+    Some(file_name.to_ascii_lowercase())
+}
+
+fn is_agent_like(value: &str) -> bool {
+    let normalized = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let parts = normalized
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+
+    AGENT_PROFILE_NAMES.iter().any(|agent| {
+        parts
+            .iter()
+            .any(|part| *part == *agent || part.starts_with(agent))
+    })
+}
+
+fn clean_agent_label(value: String) -> String {
+    let trimmed = value.trim().trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "vibe".into()
+    } else {
+        trimmed
+    }
 }
 
 #[allow(dead_code)]
@@ -235,6 +343,60 @@ mod tests {
         let plan = setup.launch_plan().expect("launch plan");
         assert_eq!(plan.panes[0].command.command, "vibe");
         assert_eq!(plan.panes[0].command.args, vec!["run", "claude-1", "--"]);
+    }
+
+    #[test]
+    fn detects_vibe_agent_panes() {
+        let cwd = env::current_dir().expect("cwd");
+        let spec = PaneLaunchSpec {
+            profile_name: "claude-1".into(),
+            command: Profile {
+                command: "vibe".into(),
+                args: vec!["run".into(), "claude-1".into(), "--".into()],
+                title: Some("claude-1".into()),
+            },
+            cwd,
+            folder_name: "repo".into(),
+            worktree_name: None,
+        };
+
+        assert_eq!(spec.agent_label().as_deref(), Some("claude-1"));
+    }
+
+    #[test]
+    fn detects_custom_agent_profiles() {
+        let cwd = env::current_dir().expect("cwd");
+        let spec = PaneLaunchSpec {
+            profile_name: "review".into(),
+            command: Profile {
+                command: "codex".into(),
+                args: vec!["--model".into(), "gpt-5.5".into()],
+                title: Some("Codex Review".into()),
+            },
+            cwd,
+            folder_name: "repo".into(),
+            worktree_name: None,
+        };
+
+        assert_eq!(spec.agent_label().as_deref(), Some("Codex Review"));
+    }
+
+    #[test]
+    fn ignores_plain_terminal_profiles() {
+        let cwd = env::current_dir().expect("cwd");
+        let spec = PaneLaunchSpec {
+            profile_name: "git-bash".into(),
+            command: Profile {
+                command: "bash".into(),
+                args: vec!["--login".into()],
+                title: Some("Git Bash".into()),
+            },
+            cwd,
+            folder_name: "repo".into(),
+            worktree_name: None,
+        };
+
+        assert_eq!(spec.agent_label(), None);
     }
 
     #[test]

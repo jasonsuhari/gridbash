@@ -67,6 +67,12 @@ impl GridLayout {
         self.size
     }
 
+    pub fn set_size(&mut self, size: GridSize) {
+        self.size = size;
+        resize_weights(&mut self.row_weights, size.rows);
+        resize_weights(&mut self.column_weights, size.columns);
+    }
+
     pub fn rects(&self, area: Rect, count: usize) -> Vec<Rect> {
         weighted_grid_rects(
             area,
@@ -205,6 +211,10 @@ fn weighted_lengths(total: u16, weights: &[u16]) -> Vec<u16> {
     lengths
 }
 
+fn resize_weights(weights: &mut Vec<u16>, len: usize) {
+    weights.resize(len, 1000);
+}
+
 #[allow(dead_code)]
 fn drag_pair(weights: &mut [u16], index: usize, total_pixels: u16, target_pixels: u16) {
     if index + 1 >= weights.len() || total_pixels == 0 {
@@ -279,5 +289,31 @@ mod tests {
         layout.drag_divider(Divider::Column(0), Rect::new(0, 0, 100, 10), 70, 0);
         let rects = layout.rects(Rect::new(0, 0, 100, 10), 2);
         assert!(rects[0].width > rects[1].width);
+    }
+
+    #[test]
+    fn resizing_layout_preserves_existing_weights() {
+        let mut layout = GridLayout::new(GridSize {
+            rows: 1,
+            columns: 2,
+        });
+        layout.drag_divider(Divider::Column(0), Rect::new(0, 0, 100, 10), 70, 0);
+        let original_columns = layout.column_weights.clone();
+
+        layout.set_size(GridSize {
+            rows: 2,
+            columns: 3,
+        });
+        assert_eq!(layout.size().rows, 2);
+        assert_eq!(layout.size().columns, 3);
+        assert_eq!(&layout.column_weights[..2], &original_columns[..]);
+        assert_eq!(layout.column_weights[2], 1000);
+
+        layout.set_size(GridSize {
+            rows: 1,
+            columns: 1,
+        });
+        assert_eq!(layout.row_weights.len(), 1);
+        assert_eq!(layout.column_weights.len(), 1);
     }
 }

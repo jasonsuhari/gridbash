@@ -10,6 +10,7 @@ mod setup;
 mod ui;
 mod usage;
 mod vibe;
+mod worktrees;
 
 use anyhow::Result;
 use clap::Parser;

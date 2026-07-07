@@ -26,6 +26,14 @@ pub struct Cli {
     #[arg(long)]
     pub cwd: Option<PathBuf>,
 
+    /// Launch each pane in its own managed git worktree.
+    #[arg(long)]
+    pub worktrees: bool,
+
+    /// Prefix for managed worktree folders and branches.
+    #[arg(long, default_value = "gridbash")]
+    pub worktree_prefix: String,
+
     /// Load a custom config TOML file.
     #[arg(long)]
     pub config: Option<PathBuf>,
@@ -34,7 +42,7 @@ pub struct Cli {
     #[arg(long, default_value = "dark")]
     pub theme: String,
 
-    /// Compatibility flag. GridBash no longer captures mouse input by default.
+    /// Compatibility flag. Leave mouse selection to the host terminal instead of GridBash.
     #[arg(long, hide = true)]
     pub no_mouse: bool,
 
