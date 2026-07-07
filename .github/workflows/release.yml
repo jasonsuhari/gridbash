@@ -49,6 +49,23 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          $requested = "${{ inputs.version }}"
+          if ($requested -match "^\d+\.\d+\.\d+(?:-.+)?$") {
+            $existingTag = "v$requested"
+            git fetch origin "refs/tags/${existingTag}:refs/tags/${existingTag}" --force 2>$null
+            $tagExists = $LASTEXITCODE -eq 0
+            if (-not $tagExists) {
+              git rev-parse --verify $existingTag *> $null
+              $tagExists = $LASTEXITCODE -eq 0
+            }
+
+            if ($tagExists) {
+              Write-Output "$existingTag already exists; skipping release preparation and publishing that tag."
+              "tag=$existingTag" >> $env:GITHUB_OUTPUT
+              exit 0
+            }
+          }
+
           $releaseArgs = @("${{ inputs.version }}", "--push", "--yes")
           if ("${{ inputs.notes }}") {
             $releaseArgs += @("--notes", "${{ inputs.notes }}")
@@ -89,8 +106,20 @@ jobs:
         id: pack
         shell: pwsh
         run: |
-          $raw = npm pack --json --ignore-scripts
-          $pack = ($raw | ConvertFrom-Json)[0].filename
+          $raw = npm pack --json --ignore-scripts 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $raw | Write-Output
+            exit $LASTEXITCODE
+          }
+
+          $text = $raw | Out-String
+          $match = [regex]::Match($text, '(?s)\[\s*\{.*?"filename"\s*:\s*"(?<filename>[^"]+)"')
+          if (-not $match.Success) {
+            $text | Write-Output
+            throw "Could not parse npm pack filename."
+          }
+
+          $pack = $match.Groups["filename"].Value
           "tarball=$pack" >> $env:GITHUB_OUTPUT
 
       - name: Publish npm package
@@ -174,8 +203,20 @@ jobs:
         id: pack
         shell: pwsh
         run: |
-          $raw = npm pack --json --ignore-scripts
-          $pack = ($raw | ConvertFrom-Json)[0].filename
+          $raw = npm pack --json --ignore-scripts 2>&1
+          if ($LASTEXITCODE -ne 0) {
+            $raw | Write-Output
+            exit $LASTEXITCODE
+          }
+
+          $text = $raw | Out-String
+          $match = [regex]::Match($text, '(?s)\[\s*\{.*?"filename"\s*:\s*"(?<filename>[^"]+)"')
+          if (-not $match.Success) {
+            $text | Write-Output
+            throw "Could not parse npm pack filename."
+          }
+
+          $pack = $match.Groups["filename"].Value
           "tarball=$pack" >> $env:GITHUB_OUTPUT
 
       - name: Resolve release notes
