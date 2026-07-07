@@ -6,6 +6,7 @@ mod layout;
 mod onboarding;
 mod profiles;
 mod pty;
+mod session;
 mod setup;
 mod ui;
 mod usage;
@@ -17,10 +18,11 @@ use clap::Parser;
 
 use crate::{
     app::App,
-    cli::Cli,
+    cli::{Cli, Command},
     config::Config,
     onboarding::OnboardingResult,
     profiles::{available_profiles, find_profile},
+    session::select_resume_session,
 };
 
 fn main() -> Result<()> {
@@ -42,6 +44,15 @@ fn main() -> Result<()> {
             println!("{name}\t{state}");
         }
         return Ok(());
+    }
+
+    if let Some(Command::Resume(args)) = &cli.command {
+        let Some(record) = select_resume_session(args)? else {
+            return Ok(());
+        };
+
+        let mut app = App::resume(config, record, !cli.no_mouse)?;
+        return app.run();
     }
 
     if onboarding::should_run(&cli, &config)

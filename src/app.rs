@@ -27,6 +27,7 @@ use crate::{
     layout::{GridLayout, GridSize, PaneId, pane_at},
     profiles::find_profile,
     pty::{PtyEvent, PtyPane},
+    session::{SavedPaneHistory, SessionRecord, SessionRecorder},
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
     usage::{self, UsageEvent, UsageTarget},
@@ -56,6 +57,8 @@ pub struct App {
     settings: SettingsState,
     rename: RenamePaneState,
     status: String,
+    restored_histories: Vec<SavedPaneHistory>,
+    session_recorder: Option<SessionRecorder>,
     next_pane_id: usize,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
@@ -392,6 +395,16 @@ fn switch_value(enabled: bool) -> String {
     if enabled { "on".into() } else { "off".into() }
 }
 
+fn default_status(mouse_enabled: bool) -> String {
+    if mouse_enabled {
+        "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
+            .into()
+    } else {
+        "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
+            .into()
+    }
+}
+
 impl App {
     pub fn new(cli: Cli, config: Config) -> Result<Self> {
         let worktrees = cli
@@ -407,10 +420,51 @@ impl App {
                 rows: 2,
                 columns: 3,
             });
+        Ok(Self::from_parts(
+            config,
+            worktrees,
+            launch_plan,
+            grid,
+            mouse_enabled,
+            Vec::new(),
+            None,
+            default_status(mouse_enabled),
+        ))
+    }
+
+    pub fn resume(config: Config, record: SessionRecord, mouse_enabled: bool) -> Result<Self> {
+        let launch_plan = record.session.launch_plan()?;
+        let grid = launch_plan.grid;
+        let restored_histories = record.session.pane_histories();
+        let session_id = record.session.id.clone();
+        let recorder = SessionRecorder::continue_record(record);
+
+        Ok(Self::from_parts(
+            config,
+            None,
+            Some(launch_plan),
+            grid,
+            mouse_enabled,
+            restored_histories,
+            Some(recorder),
+            format!("resumed session {session_id}"),
+        ))
+    }
+
+    fn from_parts(
+        config: Config,
+        worktrees: Option<ManagedWorktreeOptions>,
+        launch_plan: Option<LaunchPlan>,
+        grid: GridSize,
+        mouse_enabled: bool,
+        restored_histories: Vec<SavedPaneHistory>,
+        session_recorder: Option<SessionRecorder>,
+        status: String,
+    ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (usage_tx, usage_rx) = std_mpsc::channel();
 
-        Ok(Self {
+        Self {
             config,
             worktrees,
             launch_plan,
@@ -426,13 +480,9 @@ impl App {
             mouse_enabled,
             settings: SettingsState::default(),
             rename: RenamePaneState::default(),
-            status: if mouse_enabled {
-                "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
-                    .into()
-            } else {
-                "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
-                    .into()
-            },
+            status,
+            restored_histories,
+            session_recorder,
             next_pane_id: 0,
             event_tx,
             event_rx,
@@ -441,7 +491,7 @@ impl App {
             profile_usage: BTreeMap::new(),
             api_spend_label: None,
             last_activity_decay: Instant::now(),
-        })
+        }
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -463,12 +513,20 @@ impl App {
 
         self.spawn_initial_panes()?;
         self.sync_initial_pane_sizes(terminal)?;
-        self.run_loop(terminal)
+
+        let run_result = self.run_loop(terminal);
+        let save_result = self.save_session_snapshot();
+        match (run_result, save_result) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
     }
 
     fn set_launch_plan(&mut self, plan: LaunchPlan) {
         self.layout = GridLayout::new(plan.grid);
         self.launch_plan = Some(plan);
+        self.restored_histories.clear();
     }
 
     fn spawn_initial_panes(&mut self) -> Result<()> {
@@ -482,13 +540,15 @@ impl App {
         self.text_selection = None;
         self.sleeping.clear();
         self.next_pane_id = 0;
+        self.start_session_recorder(&plan)?;
 
-        for spec in &plan.panes {
-            self.spawn_pane_spec(spec)?;
+        for (index, spec) in plan.panes.iter().enumerate() {
+            self.spawn_pane_spec(index, spec)?;
         }
+        self.restored_histories.clear();
         self.start_usage_monitor(&plan);
 
-        Ok(())
+        self.save_session_snapshot()
     }
 
     fn start_usage_monitor(&mut self, plan: &LaunchPlan) {
@@ -506,7 +566,7 @@ impl App {
         usage::spawn_usage_monitor(targets, self.usage_tx.clone());
     }
 
-    fn spawn_pane_spec(&mut self, spec: &PaneLaunchSpec) -> Result<()> {
+    fn spawn_pane_spec(&mut self, index: usize, spec: &PaneLaunchSpec) -> Result<()> {
         let launch = spec.resolved_command()?;
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
@@ -518,6 +578,10 @@ impl App {
             &spec.cwd,
             self.event_tx.clone(),
         )?;
+        let mut pane = pane;
+        if let Some(history) = self.restored_histories.get(index) {
+            pane.restore_history_display(&history.output_tail, &history.input_history);
+        }
         self.panes.push(pane);
         Ok(())
     }
@@ -1206,7 +1270,8 @@ impl App {
     fn spawn_panes_to_fill(&mut self, target_count: usize) -> Result<()> {
         let specs = self.pane_specs_to_fill(target_count)?;
         for spec in specs {
-            self.spawn_pane_spec(&spec)?;
+            let index = self.panes.len();
+            self.spawn_pane_spec(index, &spec)?;
         }
         self.pane_names.resize(self.panes.len(), None);
         Ok(())
@@ -1306,10 +1371,13 @@ impl App {
     fn route_input(&mut self, bytes: &[u8]) -> Result<()> {
         let targets = self.input_targets();
         for index in targets {
-            self.panes
-                .get(index)
-                .ok_or_else(|| anyhow!("invalid pane index {index}"))?
-                .write(bytes)?;
+            let pane = self
+                .panes
+                .get_mut(index)
+                .ok_or_else(|| anyhow!("invalid pane index {index}"))?;
+            pane.record_input(bytes);
+            pane.write(bytes)
+                .with_context(|| format!("failed to route input to pane {}", index + 1))?;
         }
         Ok(())
     }
@@ -1498,6 +1566,25 @@ impl App {
         self.rects = self.pane_rects(self.grid_area);
         self.sync_pane_sizes();
         Ok(())
+    }
+
+    fn start_session_recorder(&mut self, plan: &LaunchPlan) -> Result<()> {
+        if self.session_recorder.is_none() {
+            self.session_recorder = Some(SessionRecorder::start_new(plan)?);
+        }
+        Ok(())
+    }
+
+    fn save_session_snapshot(&mut self) -> Result<()> {
+        let Some(plan) = self.launch_plan.clone() else {
+            return Ok(());
+        };
+        let Some(recorder) = self.session_recorder.as_mut() else {
+            return Ok(());
+        };
+
+        recorder.update(&plan, &self.panes);
+        recorder.save()
     }
 }
 
