@@ -30,6 +30,12 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Startup dimension picker with a live grid preview.
 - Optional managed git worktrees so every pane can work in an isolated checkout.
 
+## Demo
+
+Watch the OpenVid-style demo: [`docs/assets/gridbash-openvid-demo.mp4`](docs/assets/gridbash-openvid-demo.mp4).
+
+The source scene and OpenVid recreation recipe are in [`docs/demo/openvid-gridbash-demo.md`](docs/demo/openvid-gridbash-demo.md).
+
 ## Install With npm
 
 From this repo:
