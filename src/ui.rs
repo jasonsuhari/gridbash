@@ -532,6 +532,26 @@ fn settings_panel_style() -> Style {
     Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)
 }
 
+fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(vertical[1]);
+    horizontal[1]
+}
+
 fn settings_modal_rect(area: Rect, row_count: usize) -> Rect {
     let width = area.width.saturating_sub(4).min(88).max(area.width.min(1));
     let desired_height = (row_count as u16).saturating_add(14).max(21);
