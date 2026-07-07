@@ -25,6 +25,9 @@ pub struct LaunchCommand {
 }
 
 pub const TERMINAL_PROFILE_NAMES: &[&str] = &["git-bash", "pwsh", "powershell", "cmd"];
+pub const AGENT_PROFILE_NAMES: &[&str] = &[
+    "codex", "claude", "gemini", "opencode", "aider", "amp", "goose", "copilot", "cursor",
+];
 
 impl Profile {
     pub fn resolved_command(&self) -> Result<LaunchCommand> {
@@ -160,15 +163,13 @@ fn builtin_profiles() -> BTreeMap<String, Profile> {
         },
     );
 
-    for agent in [
-        "codex", "claude", "gemini", "opencode", "aider", "amp", "goose", "copilot", "cursor",
-    ] {
+    for agent in AGENT_PROFILE_NAMES {
         profiles.insert(
-            agent.into(),
+            (*agent).into(),
             Profile {
-                command: agent.into(),
+                command: (*agent).into(),
                 args: vec![],
-                title: Some(agent.into()),
+                title: Some((*agent).into()),
             },
         );
     }
