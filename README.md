@@ -193,6 +193,14 @@ Default profile resolution order:
 
 GridBash is inspired by agent-first multiplexers such as Mato and terminal workspaces such as Zellij, but V1 takes a different path: Windows-native, single binary, visual selection, selected broadcast, and a hard bias toward fast multi-agent grids.
 
+## Community
+
+- Read `CONTRIBUTING.md` before opening a pull request.
+- See `docs/ROADMAP.md` for the release roadmap.
+- Use GitHub Issues for actionable bugs, tasks, and feature requests.
+- Use GitHub Discussions for questions, ideas, and longer design conversation.
+- Follow `SECURITY.md` for private vulnerability reports.
+
 ## Legacy Launcher
 
 The old Windows Terminal launcher is still useful for quick split-pane grids, but it cannot support true selected broadcast because Windows Terminal does not expose subset pane selection. The Rust app is the path forward.
