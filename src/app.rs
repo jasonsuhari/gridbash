@@ -26,6 +26,7 @@ use crate::{
     pty::{PtyEvent, PtyPane},
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
+    worktrees::ManagedWorktreeOptions,
 };
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -34,6 +35,7 @@ const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 
 pub struct App {
     config: Config,
+    worktrees: Option<ManagedWorktreeOptions>,
     launch_plan: Option<LaunchPlan>,
     layout: GridLayout,
     grid_area: Rect,
@@ -209,7 +211,11 @@ fn switch_value(enabled: bool) -> String {
 
 impl App {
     pub fn new(cli: Cli, config: Config) -> Result<Self> {
-        let launch_plan = resolve_direct_launch_plan(&cli, &config)?;
+        let worktrees = cli
+            .worktrees
+            .then(|| ManagedWorktreeOptions::new(cli.worktree_prefix.clone()))
+            .transpose()?;
+        let launch_plan = resolve_direct_launch_plan(&cli, &config, worktrees.as_ref())?;
         let grid = launch_plan
             .as_ref()
             .map(|plan| plan.grid)
@@ -221,6 +227,7 @@ impl App {
 
         Ok(Self {
             config,
+            worktrees,
             launch_plan,
             layout: GridLayout::new(grid),
             grid_area: Rect::default(),
@@ -246,7 +253,7 @@ impl App {
     fn run_in_terminal(&mut self, terminal: &mut Tui) -> Result<()> {
         if self.launch_plan.is_none() {
             let current_dir = resolved_current_dir()?;
-            let mut composer = Composer::new(current_dir);
+            let mut composer = Composer::new(current_dir, self.worktrees.clone());
             let Some(plan) = composer.run(terminal, &self.config)? else {
                 return Ok(());
             };
@@ -644,7 +651,11 @@ fn resolve_grid(cli: &Cli) -> Result<GridSize> {
     })
 }
 
-fn resolve_direct_launch_plan(cli: &Cli, config: &Config) -> Result<Option<LaunchPlan>> {
+fn resolve_direct_launch_plan(
+    cli: &Cli,
+    config: &Config,
+    worktrees: Option<&ManagedWorktreeOptions>,
+) -> Result<Option<LaunchPlan>> {
     if !uses_direct_launch(cli) {
         return Ok(None);
     }
@@ -659,13 +670,14 @@ fn resolve_direct_launch_plan(cli: &Cli, config: &Config) -> Result<Option<Launc
     let cwd = cwd.canonicalize().unwrap_or(cwd);
     let pane_count = cli.count.unwrap_or_else(|| grid.count()).clamp(1, 100);
 
-    Ok(Some(LaunchPlan::legacy(
+    Ok(Some(LaunchPlan::from_launch_options(
         profile_name,
         profile,
         cwd,
         pane_count,
         grid,
-    )))
+        worktrees,
+    )?))
 }
 
 fn uses_direct_launch(cli: &Cli) -> bool {

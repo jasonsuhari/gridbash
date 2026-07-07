@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     layout::GridSize,
     profiles::{LaunchCommand, Profile},
+    worktrees::{ManagedWorktreeOptions, ensure_pane_worktrees},
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +88,21 @@ impl SetupFolder {
 }
 
 impl LaunchPlan {
+    pub fn from_launch_options(
+        profile_name: String,
+        command: Profile,
+        cwd: PathBuf,
+        count: usize,
+        grid: GridSize,
+        worktrees: Option<&ManagedWorktreeOptions>,
+    ) -> Result<Self> {
+        if let Some(options) = worktrees {
+            return Self::managed_worktrees(profile_name, command, cwd, count, grid, options);
+        }
+
+        Ok(Self::legacy(profile_name, command, cwd, count, grid))
+    }
+
     pub fn legacy(
         profile_name: String,
         command: Profile,
@@ -107,6 +123,28 @@ impl LaunchPlan {
             .collect();
 
         Self { panes, grid }
+    }
+
+    fn managed_worktrees(
+        profile_name: String,
+        command: Profile,
+        cwd: PathBuf,
+        count: usize,
+        grid: GridSize,
+        options: &ManagedWorktreeOptions,
+    ) -> Result<Self> {
+        let panes = ensure_pane_worktrees(&cwd, count, options)?
+            .into_iter()
+            .map(|worktree| PaneLaunchSpec {
+                profile_name: profile_name.clone(),
+                command: command.clone(),
+                cwd: worktree.cwd,
+                folder_name: worktree.folder_name,
+                worktree_name: Some(worktree.branch_name),
+            })
+            .collect();
+
+        Ok(Self { panes, grid })
     }
 }
 
