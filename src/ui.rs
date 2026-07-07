@@ -57,10 +57,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             chrome.badge,
         );
 
-        let block = Block::default()
+        let mut block = Block::default()
             .borders(Borders::ALL)
             .border_style(chrome.border_style)
             .title(title);
+        if let Some(footer) =
+            app.pane_conversation_footer(index, rect.width.saturating_sub(4) as usize)
+        {
+            block = block.title_bottom(conversation_footer(footer, focused || selected));
+        }
 
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
@@ -345,6 +350,23 @@ fn settings_lines(rows: &[SettingsRow], width: u16) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
     lines.push(settings_command_bar(width));
     lines
+}
+
+fn conversation_footer(summary: String, emphasized: bool) -> Line<'static> {
+    let summary_style = if emphasized {
+        Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+
+    Line::from(vec![
+        Span::raw(" "),
+        Span::styled("conv ", Style::default().fg(Color::Cyan)),
+        Span::styled(summary, summary_style),
+        Span::raw(" "),
+    ])
 }
 
 fn settings_summary(width: u16) -> String {
