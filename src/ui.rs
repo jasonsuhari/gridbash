@@ -15,8 +15,8 @@ pub struct DrawState {
     pub pane_rects: Vec<Rect>,
 }
 
-const QUIET_MARKER: &str = " ◦";
-const QUIET_BORDER: Color = Color::Rgb(78, 96, 122);
+const QUIET_MARKER: &str = " ●";
+const QUIET_BORDER: Color = Color::Rgb(156, 112, 255);
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
@@ -49,7 +49,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         } else if pane.active {
             Style::default().fg(Color::Green)
         } else if pane.output_quiet() {
-            Style::default().fg(QUIET_BORDER)
+            Style::default()
+                .fg(QUIET_BORDER)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
