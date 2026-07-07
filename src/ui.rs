@@ -33,45 +33,27 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
 
         let focused = app.focus() == index;
         let selected = app.selected().contains(&index);
-        let border_style = if selected {
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else if focused {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else if pane.active {
-            Style::default().fg(Color::Green)
-        } else if pane.exited {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
-        let badge = if pane.exited {
-            " exited"
-        } else if pane.active {
-            " active"
-        } else if selected {
-            " selected"
-        } else {
-            ""
-        };
+        let chrome = pane_chrome(selected, focused, pane.active, pane.exited);
 
         let folder = app
             .pane_folder(index)
             .map(label_name)
             .unwrap_or_else(|| folder_label(pane.cwd()));
         let title = if let Some(worktree) = app.pane_worktree(index) {
-            format!(" {} | {} | {}{} ", index + 1, folder, worktree, badge)
+            format!(
+                " {} | {} | {}{} ",
+                index + 1,
+                folder,
+                worktree,
+                chrome.badge
+            )
         } else {
-            format!(" {} | {}{} ", index + 1, folder, badge)
+            format!(" {} | {}{} ", index + 1, folder, chrome.badge)
         };
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(border_style)
+            .border_style(chrome.border_style)
             .title(title);
 
         let inner = block.inner(rect);
@@ -130,6 +112,41 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     DrawState {
         grid_area,
         pane_rects: rects,
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct PaneChrome {
+    border_style: Style,
+    badge: &'static str,
+}
+
+fn pane_chrome(selected: bool, focused: bool, _active: bool, exited: bool) -> PaneChrome {
+    let border_style = if selected {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if exited {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let badge = if exited {
+        " exited"
+    } else if selected {
+        " selected"
+    } else {
+        ""
+    };
+
+    PaneChrome {
+        border_style,
+        badge,
     }
 }
 
@@ -418,4 +435,23 @@ fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen
         .y
         .saturating_add(row.min(area.height.saturating_sub(1)));
     frame.set_cursor_position((x, y));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_activity_does_not_change_idle_pane_chrome() {
+        assert_eq!(
+            pane_chrome(false, false, false, false),
+            pane_chrome(false, false, true, false)
+        );
+    }
+
+    #[test]
+    fn selected_and_exited_badges_remain_visible() {
+        assert_eq!(pane_chrome(true, false, true, false).badge, " selected");
+        assert_eq!(pane_chrome(true, false, true, true).badge, " exited");
+    }
 }
