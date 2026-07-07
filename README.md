@@ -22,9 +22,9 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Real PTY-backed panes through Windows ConPTY via `portable-pty`.
 - Up to 100 panes in one terminal process.
 - Configurable default terminal profile: Git Bash, PowerShell, cmd, agents, or custom.
-- Native host-terminal text selection with no mouse-capture mode.
+- Pane-contained drag selection that copies selected terminal text without crossing into sibling panes.
 - Normal terminal keys pass through to the focused pane, or to selected panes when multiple panes are selected.
-- Modeless Alt shortcuts for pane focus, selection, settings, and quit.
+- Modeless Alt shortcuts for pane focus, selection, rename, settings, and quit.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
 - Built-in launch profiles for common CLI coding agents.
 - Startup dimension picker with a live grid preview.
@@ -159,11 +159,11 @@ You can also run `gridbash --worktrees` and choose the grid dimensions in the st
 
 ## Controls
 
-GridBash does not capture the mouse, so normal drag selection and copy behavior stays owned by your host terminal. App controls use Alt shortcuts and do not require switching modes.
+GridBash captures drag selection so selected text stays inside the pane where the drag started. Releasing the drag sends the selected terminal text to the host clipboard through the standard OSC 52 terminal clipboard sequence. App controls use Alt shortcuts and do not require switching modes.
 
 | Input | Action |
 | --- | --- |
-| Drag mouse | Select/copy terminal text in the host terminal |
+| Drag mouse | Select/copy terminal text within the source pane |
 | Alt+Left / Alt+Right | Focus previous / next pane |
 | Alt+Up / Alt+Down | Focus pane above / below |
 | Alt+s | Toggle focused pane selection |

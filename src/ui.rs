@@ -8,7 +8,7 @@ use ratatui::{
 use std::path::Path;
 use vt100::Cell;
 
-use crate::app::{App, RenamePaneView, SettingsRow};
+use crate::app::{App, PaneSelection, RenamePaneView, SettingsRow};
 
 const APP_BG: Color = Color::Rgb(11, 15, 20);
 const SETTINGS_BG: Color = Color::Rgb(9, 14, 19);
@@ -64,7 +64,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
 
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
-        render_screen(frame, inner, pane.screen());
+        render_screen(frame, inner, pane.screen(), app.selection_for_pane(index));
 
         if focused && !modal_open {
             set_terminal_cursor(frame, inner, pane.screen());
@@ -631,13 +631,18 @@ fn label_name(name: &str) -> String {
     label
 }
 
-fn render_screen(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen) {
+fn render_screen(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    screen: &vt100::Screen,
+    selection: Option<PaneSelection>,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
     let lines = (0..area.height)
-        .map(|row| render_screen_row(screen, row, area.width))
+        .map(|row| render_screen_row(screen, row, area.width, selection))
         .collect::<Vec<_>>();
 
     frame.render_widget(
@@ -646,7 +651,12 @@ fn render_screen(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen) {
     );
 }
 
-fn render_screen_row<'a>(screen: &vt100::Screen, row: u16, width: u16) -> Line<'a> {
+fn render_screen_row<'a>(
+    screen: &vt100::Screen,
+    row: u16,
+    width: u16,
+    selection: Option<PaneSelection>,
+) -> Line<'a> {
     let mut spans = Vec::new();
     let mut current_style: Option<Style> = None;
     let mut current_text = String::new();
@@ -657,7 +667,7 @@ fn render_screen_row<'a>(screen: &vt100::Screen, row: u16, width: u16) -> Line<'
                 &mut spans,
                 &mut current_style,
                 &mut current_text,
-                Style::default(),
+                selection_style(Style::default(), selection, row, column),
                 " ",
             );
             continue;
@@ -676,7 +686,7 @@ fn render_screen_row<'a>(screen: &vt100::Screen, row: u16, width: u16) -> Line<'
             &mut spans,
             &mut current_style,
             &mut current_text,
-            cell_style(cell),
+            selection_style(cell_style(cell), selection, row, column),
             text,
         );
     }
@@ -739,6 +749,17 @@ fn cell_style(cell: &Cell) -> Style {
     }
 
     style
+}
+
+fn selection_style(style: Style, selection: Option<PaneSelection>, row: u16, column: u16) -> Style {
+    if selection.is_some_and(|selection| selection.contains(row, column)) {
+        style
+            .fg(Color::Black)
+            .bg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
 }
 
 fn vt_color(color: vt100::Color, default: Color) -> Color {
