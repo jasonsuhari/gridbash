@@ -30,6 +30,8 @@ use crate::{
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
+const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+
 pub struct App {
     config: Config,
     launch_plan: Option<LaunchPlan>,
@@ -45,6 +47,13 @@ pub struct App {
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
     last_activity_decay: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyOutcome {
+    Continue,
+    Render,
+    Quit,
 }
 
 #[derive(Debug, Clone)]
@@ -293,25 +302,32 @@ impl App {
     }
 
     fn run_loop(&mut self, terminal: &mut Tui) -> Result<()> {
+        let mut needs_render = true;
+
         loop {
-            self.drain_pty_events();
-            self.decay_activity();
+            needs_render |= self.drain_pty_events();
+            needs_render |= self.decay_activity();
 
-            terminal.draw(|frame| {
-                let draw_state = ui::draw(frame, self);
-                self.grid_area = draw_state.grid_area;
-                self.rects = draw_state.pane_rects;
-            })?;
-            self.sync_pane_sizes();
+            if needs_render {
+                terminal.draw(|frame| {
+                    let draw_state = ui::draw(frame, self);
+                    self.grid_area = draw_state.grid_area;
+                    self.rects = draw_state.pane_rects;
+                })?;
+                self.sync_pane_sizes();
+                needs_render = false;
+            }
 
-            if event::poll(Duration::from_millis(16))? {
+            if event::poll(INPUT_POLL_INTERVAL)? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        if self.handle_key(key)? {
-                            break;
+                        match self.handle_key(key)? {
+                            KeyOutcome::Continue => {}
+                            KeyOutcome::Render => needs_render = true,
+                            KeyOutcome::Quit => break,
                         }
                     }
-                    Event::Resize(_, _) => {}
+                    Event::Resize(_, _) => needs_render = true,
                     Event::Paste(text) if !self.settings.open => {
                         self.route_input(text.as_bytes())?;
                     }
@@ -323,7 +339,9 @@ impl App {
         Ok(())
     }
 
-    fn drain_pty_events(&mut self) {
+    fn drain_pty_events(&mut self) -> bool {
+        let mut changed = false;
+
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
                 PtyEvent::Output {
@@ -337,6 +355,7 @@ impl App {
                         .find(|p| p.id() == pane && p.generation() == generation)
                     {
                         target.process_output(&bytes);
+                        changed = true;
                     }
                 }
                 PtyEvent::Exited { pane, generation } => {
@@ -345,29 +364,36 @@ impl App {
                         .iter_mut()
                         .find(|p| p.id() == pane && p.generation() == generation)
                     {
-                        target.exited = true;
+                        if !target.exited {
+                            target.exited = true;
+                            changed = true;
+                        }
                     }
                 }
             }
         }
 
         for pane in &mut self.panes {
-            pane.poll_exit();
+            changed |= pane.poll_exit();
         }
+
+        changed
     }
 
-    fn decay_activity(&mut self) {
+    fn decay_activity(&mut self) -> bool {
         if self.last_activity_decay.elapsed() < Duration::from_millis(250) {
-            return;
+            return false;
         }
 
+        let changed = self.panes.iter().any(|pane| pane.active);
         for pane in &mut self.panes {
             pane.active = false;
         }
         self.last_activity_decay = Instant::now();
+        changed
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+    fn handle_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
         if self.settings.open {
             return self.handle_settings_key(key);
         }
@@ -375,13 +401,17 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT)
             && let Some(quit) = self.handle_app_key(key)?
         {
-            return Ok(quit);
+            return Ok(if quit {
+                KeyOutcome::Quit
+            } else {
+                KeyOutcome::Render
+            });
         }
 
         if let Some(bytes) = terminal_key_bytes(key) {
             self.route_input(&bytes)?;
         }
-        Ok(false)
+        Ok(KeyOutcome::Continue)
     }
 
     fn handle_app_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
@@ -447,32 +477,52 @@ impl App {
         }
     }
 
-    fn handle_settings_key(&mut self, key: KeyEvent) -> Result<bool> {
+    fn handle_settings_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
         if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
-            return Ok(true);
+            return Ok(KeyOutcome::Quit);
         }
         if key.modifiers.contains(KeyModifiers::ALT)
             && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
         {
             self.settings.open = false;
             self.status = "settings closed".into();
-            return Ok(false);
+            return Ok(KeyOutcome::Render);
         }
 
-        match key.code {
+        let changed = match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.settings.open = false;
                 self.status = "settings closed".into();
+                true
             }
-            KeyCode::Up => self.settings.move_cursor(-1),
-            KeyCode::Down => self.settings.move_cursor(1),
-            KeyCode::Left | KeyCode::Char('-') => self.settings.adjust(-1),
-            KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => self.settings.adjust(1),
-            KeyCode::Enter | KeyCode::Char(' ') => self.settings.activate(),
-            _ => {}
-        }
+            KeyCode::Up => {
+                self.settings.move_cursor(-1);
+                true
+            }
+            KeyCode::Down => {
+                self.settings.move_cursor(1);
+                true
+            }
+            KeyCode::Left | KeyCode::Char('-') => {
+                self.settings.adjust(-1);
+                true
+            }
+            KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.settings.adjust(1);
+                true
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.settings.activate();
+                true
+            }
+            _ => false,
+        };
 
-        Ok(false)
+        Ok(if changed {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        })
     }
 
     fn route_input(&mut self, bytes: &[u8]) -> Result<()> {

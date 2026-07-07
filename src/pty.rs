@@ -148,14 +148,17 @@ impl PtyPane {
         Ok(())
     }
 
-    pub fn poll_exit(&mut self) {
+    pub fn poll_exit(&mut self) -> bool {
         if self.exited {
-            return;
+            return false;
         }
 
         if matches!(self.child.try_wait(), Ok(Some(_))) {
             self.exited = true;
+            return true;
         }
+
+        false
     }
 
     fn answer_terminal_queries(&mut self, bytes: &[u8]) {
