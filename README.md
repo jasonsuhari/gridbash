@@ -22,7 +22,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Real PTY-backed panes through Windows ConPTY via `portable-pty`.
 - Up to 100 panes in one terminal process.
 - Configurable default terminal profile: Git Bash, PowerShell, cmd, agents, or custom.
-- Native host-terminal text selection with no mouse-capture mode.
+- Native host-terminal text selection, with temporary mouse capture only while sleeping panes need hover wake.
 - Normal terminal keys pass through to the focused pane, or to selected panes when multiple panes are selected.
 - Modeless Alt shortcuts for pane focus, selection, settings, and quit.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
@@ -142,7 +142,7 @@ Passing grid, count, profile, or cwd arguments bypasses the startup picker and u
 
 ## Controls
 
-GridBash does not capture the mouse, so normal drag selection and copy behavior stays owned by your host terminal. App controls use Alt shortcuts and do not require switching modes.
+GridBash normally leaves mouse selection and copy behavior owned by your host terminal. When one or more panes are asleep, it temporarily captures mouse motion so hovering a sleeping pane can wake it, then releases mouse capture after the last sleeping pane wakes.
 
 | Input | Action |
 | --- | --- |
@@ -151,6 +151,8 @@ GridBash does not capture the mouse, so normal drag selection and copy behavior 
 | Alt+Up / Alt+Down | Focus pane above / below |
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
+| Alt+z | Put the focused pane to sleep; when multiple panes are selected, sleep the selected panes |
+| Hover sleeping pane | Wake the pane and make its terminal contents visible again |
 | Alt+o | Open sample settings |
 | Alt+q | Quit |
 
