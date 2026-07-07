@@ -42,7 +42,7 @@ pub struct Cli {
     #[arg(long, default_value = "dark")]
     pub theme: String,
 
-    /// Compatibility flag. GridBash no longer captures mouse input by default.
+    /// Compatibility flag. Leave mouse selection to the host terminal instead of GridBash.
     #[arg(long, hide = true)]
     pub no_mouse: bool,
 

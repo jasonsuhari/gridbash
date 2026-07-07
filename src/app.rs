@@ -1,15 +1,16 @@
 use std::{
     collections::BTreeSet,
     env,
-    io::{self, Stdout},
+    io::{self, Stdout, Write},
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -21,7 +22,7 @@ use crate::{
     cli::{Cli, GridMode},
     composer::Composer,
     config::Config,
-    layout::{GridLayout, GridSize, PaneId},
+    layout::{GridLayout, GridSize, PaneId, pane_at},
     profiles::find_profile,
     pty::{PtyEvent, PtyPane},
     setup::{LaunchPlan, PaneLaunchSpec},
@@ -44,7 +45,9 @@ pub struct App {
     focus: usize,
     selected: BTreeSet<usize>,
     pane_names: Vec<Option<String>>,
+    text_selection: Option<MouseSelection>,
     rects: Vec<Rect>,
+    mouse_enabled: bool,
     settings: SettingsState,
     rename: RenamePaneState,
     status: String,
@@ -58,6 +61,73 @@ enum KeyOutcome {
     Continue,
     Render,
     Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CellPoint {
+    row: u16,
+    column: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaneCell {
+    pane: usize,
+    point: CellPoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MouseSelection {
+    pane: usize,
+    anchor: CellPoint,
+    cursor: CellPoint,
+    active: bool,
+    moved: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneSelection {
+    pub start_row: u16,
+    pub start_column: u16,
+    pub end_row: u16,
+    pub end_column: u16,
+}
+
+impl MouseSelection {
+    fn range(self) -> PaneSelection {
+        let (start, end) =
+            if (self.anchor.row, self.anchor.column) <= (self.cursor.row, self.cursor.column) {
+                (self.anchor, self.cursor)
+            } else {
+                (self.cursor, self.anchor)
+            };
+
+        PaneSelection {
+            start_row: start.row,
+            start_column: start.column,
+            end_row: end.row,
+            end_column: end.column,
+        }
+    }
+}
+
+impl PaneSelection {
+    pub fn contains(self, row: u16, column: u16) -> bool {
+        if row < self.start_row || row > self.end_row {
+            return false;
+        }
+
+        if self.start_row == self.end_row {
+            return column >= self.start_column && column <= self.end_column;
+        }
+
+        if row == self.start_row {
+            return column >= self.start_column;
+        }
+        if row == self.end_row {
+            return column <= self.end_column;
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -306,6 +376,7 @@ impl App {
             .then(|| ManagedWorktreeOptions::new(cli.worktree_prefix.clone()))
             .transpose()?;
         let launch_plan = resolve_direct_launch_plan(&cli, &config, worktrees.as_ref())?;
+        let mouse_enabled = !cli.no_mouse;
         let grid = launch_plan
             .as_ref()
             .map(|plan| plan.grid)
@@ -325,12 +396,18 @@ impl App {
             focus: 0,
             selected: BTreeSet::new(),
             pane_names: Vec::new(),
+            text_selection: None,
             rects: Vec::new(),
+            mouse_enabled,
             settings: SettingsState::default(),
             rename: RenamePaneState::default(),
-            status:
+            status: if mouse_enabled {
+                "Drag copies within pane | Alt+arrows move | Alt+s select | Alt+r rename | Alt+o settings"
+                    .into()
+            } else {
                 "Alt+arrows move | Alt+s select | Alt+a all/none | Alt+r rename | Alt+o settings"
-                    .into(),
+                    .into()
+            },
             event_tx,
             event_rx,
             last_activity_decay: Instant::now(),
@@ -338,9 +415,9 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        let mut terminal = setup_terminal()?;
+        let mut terminal = setup_terminal(self.mouse_enabled)?;
         let result = self.run_in_terminal(&mut terminal);
-        teardown_terminal(&mut terminal)?;
+        teardown_terminal(&mut terminal, self.mouse_enabled)?;
         result
     }
 
@@ -433,6 +510,9 @@ impl App {
                     Event::Paste(text) if !self.settings.open => {
                         self.route_input(text.as_bytes())?;
                     }
+                    Event::Mouse(mouse) if self.mouse_enabled && !self.settings.open => {
+                        needs_render |= self.handle_mouse(mouse, terminal)?;
+                    }
                     _ => {}
                 }
             }
@@ -499,8 +579,11 @@ impl App {
             return self.handle_rename_key(key);
         }
 
+        let selection_cleared = self.clear_text_selection();
+
         if self.settings.open {
-            return self.handle_settings_key(key);
+            let outcome = self.handle_settings_key(key)?;
+            return Ok(render_if_selection_cleared(outcome, selection_cleared));
         }
 
         if key.modifiers.contains(KeyModifiers::ALT)
@@ -516,7 +599,11 @@ impl App {
         if let Some(bytes) = terminal_key_bytes(key) {
             self.route_input(&bytes)?;
         }
-        Ok(KeyOutcome::Continue)
+        Ok(if selection_cleared {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        })
     }
 
     fn handle_app_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
@@ -724,6 +811,154 @@ impl App {
         })
     }
 
+    fn handle_mouse(&mut self, mouse: MouseEvent, terminal: &mut Tui) -> Result<bool> {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(cell) = self.pane_cell_at(mouse.column, mouse.row) {
+                    self.focus = cell.pane;
+                    self.text_selection = Some(MouseSelection {
+                        pane: cell.pane,
+                        anchor: cell.point,
+                        cursor: cell.point,
+                        active: true,
+                        moved: false,
+                    });
+                    self.status = format!("selecting text in pane {}", cell.pane + 1);
+                    return Ok(true);
+                }
+
+                if let Some(index) = pane_at(&self.rects, mouse.column, mouse.row) {
+                    let changed = self.focus != index || self.clear_text_selection();
+                    self.focus = index;
+                    self.status = format!("focused pane {}", index + 1);
+                    return Ok(changed);
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.update_text_selection(mouse.column, mouse.row) {
+                    return Ok(true);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                return self.finish_text_selection(mouse.column, mouse.row, terminal);
+            }
+            _ => {}
+        }
+
+        Ok(false)
+    }
+
+    fn pane_cell_at(&self, x: u16, y: u16) -> Option<PaneCell> {
+        let pane = pane_at(&self.rects, x, y)?;
+        let rect = self.rects.get(pane).copied()?;
+        let inner = pane_inner_rect(rect)?;
+
+        if x < inner.x
+            || x >= inner.x.saturating_add(inner.width)
+            || y < inner.y
+            || y >= inner.y.saturating_add(inner.height)
+        {
+            return None;
+        }
+
+        Some(PaneCell {
+            pane,
+            point: CellPoint {
+                row: y.saturating_sub(inner.y),
+                column: x.saturating_sub(inner.x),
+            },
+        })
+    }
+
+    fn clamped_pane_cell(&self, pane: usize, x: u16, y: u16) -> Option<CellPoint> {
+        let rect = self.rects.get(pane).copied()?;
+        let inner = pane_inner_rect(rect)?;
+        let max_x = inner.x.saturating_add(inner.width.saturating_sub(1));
+        let max_y = inner.y.saturating_add(inner.height.saturating_sub(1));
+
+        Some(CellPoint {
+            row: y.clamp(inner.y, max_y).saturating_sub(inner.y),
+            column: x.clamp(inner.x, max_x).saturating_sub(inner.x),
+        })
+    }
+
+    fn update_text_selection(&mut self, x: u16, y: u16) -> bool {
+        let Some(selection) = self.text_selection else {
+            return false;
+        };
+        if !selection.active {
+            return false;
+        }
+
+        let Some(cursor) = self.clamped_pane_cell(selection.pane, x, y) else {
+            return false;
+        };
+
+        self.text_selection = Some(MouseSelection {
+            cursor,
+            moved: true,
+            ..selection
+        });
+        true
+    }
+
+    fn finish_text_selection(&mut self, x: u16, y: u16, terminal: &mut Tui) -> Result<bool> {
+        let Some(selection) = self.text_selection else {
+            return Ok(false);
+        };
+        if !selection.active {
+            return Ok(false);
+        }
+
+        let cursor = self
+            .clamped_pane_cell(selection.pane, x, y)
+            .unwrap_or(selection.cursor);
+        let selection = MouseSelection {
+            cursor,
+            active: false,
+            ..selection
+        };
+        if !selection.moved {
+            self.text_selection = None;
+            self.status = format!("focused pane {}", selection.pane + 1);
+            return Ok(true);
+        }
+
+        self.text_selection = Some(selection);
+
+        let text = self.selected_text(selection);
+        if text.is_empty() {
+            self.status = format!("selection empty in pane {}", selection.pane + 1);
+        } else {
+            copy_to_clipboard(terminal, &text)?;
+            self.status = format!(
+                "copied {} chars from pane {}",
+                text.chars().count(),
+                selection.pane + 1
+            );
+        }
+
+        Ok(true)
+    }
+
+    fn selected_text(&self, selection: MouseSelection) -> String {
+        let Some(pane) = self.panes.get(selection.pane) else {
+            return String::new();
+        };
+        let width = self
+            .rects
+            .get(selection.pane)
+            .and_then(|rect| pane_inner_rect(*rect))
+            .map(|inner| inner.width)
+            .unwrap_or(0);
+
+        extract_selection_text(pane.screen(), selection.range(), width)
+    }
+
+    fn clear_text_selection(&mut self) -> bool {
+        self.text_selection.take().is_some()
+    }
+
     fn route_input(&mut self, bytes: &[u8]) -> Result<()> {
         let targets = self.input_targets();
         for index in targets {
@@ -787,6 +1022,12 @@ impl App {
 
     pub fn selected(&self) -> &BTreeSet<usize> {
         &self.selected
+    }
+
+    pub fn selection_for_pane(&self, index: usize) -> Option<PaneSelection> {
+        self.text_selection
+            .filter(|selection| selection.pane == index)
+            .map(MouseSelection::range)
     }
 
     pub fn status(&self) -> &str {
@@ -964,6 +1205,111 @@ fn char_to_byte_index(value: &str, cursor: usize) -> usize {
         .unwrap_or(value.len())
 }
 
+fn render_if_selection_cleared(outcome: KeyOutcome, selection_cleared: bool) -> KeyOutcome {
+    match outcome {
+        KeyOutcome::Continue if selection_cleared => KeyOutcome::Render,
+        _ => outcome,
+    }
+}
+
+fn pane_inner_rect(rect: Rect) -> Option<Rect> {
+    let width = rect.width.checked_sub(2)?;
+    let height = rect.height.checked_sub(2)?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    Some(Rect {
+        x: rect.x.saturating_add(1),
+        y: rect.y.saturating_add(1),
+        width,
+        height,
+    })
+}
+
+fn extract_selection_text(screen: &vt100::Screen, selection: PaneSelection, width: u16) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let last_column = width.saturating_sub(1);
+    let mut lines = Vec::new();
+    for row in selection.start_row..=selection.end_row {
+        let start_column = if row == selection.start_row {
+            selection.start_column.min(last_column)
+        } else {
+            0
+        };
+        let end_column = if row == selection.end_row {
+            selection.end_column.min(last_column)
+        } else {
+            last_column
+        };
+
+        let mut line = String::new();
+        for column in start_column..=end_column {
+            let Some(cell) = screen.cell(row, column) else {
+                line.push(' ');
+                continue;
+            };
+
+            if cell.is_wide_continuation() {
+                continue;
+            }
+
+            if cell.has_contents() {
+                line.push_str(cell.contents());
+            } else {
+                line.push(' ');
+            }
+        }
+        lines.push(line.trim_end().to_string());
+    }
+
+    lines.join("\n").trim_end().to_string()
+}
+
+fn copy_to_clipboard(terminal: &mut Tui, text: &str) -> Result<()> {
+    write!(
+        terminal.backend_mut(),
+        "\x1b]52;c;{}\x07",
+        base64_encode(text.as_bytes())
+    )
+    .context("failed to send terminal clipboard sequence")?;
+    terminal
+        .backend_mut()
+        .flush()
+        .context("failed to flush terminal clipboard sequence")?;
+    Ok(())
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        let value = ((first as u32) << 16) | ((second as u32) << 8) | third as u32;
+
+        output.push(TABLE[((value >> 18) & 0x3f) as usize] as char);
+        output.push(TABLE[((value >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[((value >> 6) & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(value & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+
+    output
+}
+
 fn control_byte(ch: char) -> Option<u8> {
     let lower = ch.to_ascii_lowercase();
     if lower.is_ascii_lowercase() {
@@ -1084,16 +1430,22 @@ mod tests {
     }
 }
 
-fn setup_terminal() -> Result<Tui> {
+fn setup_terminal(enable_mouse: bool) -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    if enable_mouse {
+        execute!(stdout, EnableMouseCapture)?;
+    }
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend).context("failed to create terminal")
 }
 
-fn teardown_terminal(terminal: &mut Tui) -> Result<()> {
+fn teardown_terminal(terminal: &mut Tui, enable_mouse: bool) -> Result<()> {
     disable_raw_mode()?;
+    if enable_mouse {
+        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    }
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
@@ -1101,4 +1453,84 @@ fn teardown_terminal(terminal: &mut Tui) -> Result<()> {
     )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn pane_selection_contains_single_and_multi_line_ranges() {
+        let single = PaneSelection {
+            start_row: 1,
+            start_column: 2,
+            end_row: 1,
+            end_column: 4,
+        };
+        assert!(!single.contains(1, 1));
+        assert!(single.contains(1, 2));
+        assert!(single.contains(1, 4));
+        assert!(!single.contains(1, 5));
+
+        let multi = PaneSelection {
+            start_row: 1,
+            start_column: 3,
+            end_row: 3,
+            end_column: 2,
+        };
+        assert!(!multi.contains(1, 2));
+        assert!(multi.contains(1, 3));
+        assert!(multi.contains(2, 0));
+        assert!(multi.contains(3, 2));
+        assert!(!multi.contains(3, 3));
+    }
+
+    #[test]
+    fn mouse_selection_normalizes_anchor_and_cursor() {
+        let selection = MouseSelection {
+            pane: 0,
+            anchor: CellPoint { row: 3, column: 4 },
+            cursor: CellPoint { row: 1, column: 2 },
+            active: false,
+            moved: true,
+        };
+
+        assert_eq!(
+            selection.range(),
+            PaneSelection {
+                start_row: 1,
+                start_column: 2,
+                end_row: 3,
+                end_column: 4
+            }
+        );
+    }
+
+    #[test]
+    fn selected_text_uses_only_the_selection_width() {
+        let mut parser = vt100::Parser::new(3, 10, 100);
+        parser.process(b"hello\r\nworld");
+
+        let text = extract_selection_text(
+            parser.screen(),
+            PaneSelection {
+                start_row: 0,
+                start_column: 1,
+                end_row: 1,
+                end_column: 3,
+            },
+            10,
+        );
+
+        assert_eq!(text, "ello\nworl");
+    }
+
+    #[test]
+    fn base64_encoder_handles_padding() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"pane text"), "cGFuZSB0ZXh0");
+    }
 }
