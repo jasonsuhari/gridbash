@@ -51,10 +51,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             .pane_folder(index)
             .map(label_name)
             .unwrap_or_else(|| folder_label(pane.cwd()));
+        let usage = app.pane_usage_label(index);
         let title = pane_title(
             &app.pane_label(index),
             &folder,
             app.pane_worktree(index),
+            usage.as_deref(),
             chrome.badge,
         );
 
@@ -114,7 +116,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(" | Alt+z sleep | hover wakes | Alt+q quit"),
+        Span::raw(" | Alt+x swap | Alt+z sleep | hover wakes | Alt+q quit"),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
@@ -134,11 +136,18 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
 }
 
-fn pane_title(label: &str, folder: &str, worktree: Option<&str>, badge: &str) -> String {
+fn pane_title(
+    label: &str,
+    folder: &str,
+    worktree: Option<&str>,
+    usage: Option<&str>,
+    badge: &str,
+) -> String {
+    let usage = usage.map(|label| format!(" | {label}")).unwrap_or_default();
     if let Some(worktree) = worktree {
-        format!(" {label} | {folder} | {worktree}{badge} ")
+        format!(" {label} | {folder} | {worktree}{usage}{badge} ")
     } else {
-        format!(" {label} | {folder}{badge} ")
+        format!(" {label} | {folder}{usage}{badge} ")
     }
 }
 
@@ -904,12 +913,16 @@ mod tests {
     #[test]
     fn pane_title_uses_custom_label_in_number_slot() {
         assert_eq!(
-            pane_title("api", "gridbash/", Some("feat/rename-panes"), ""),
+            pane_title("api", "gridbash/", Some("feat/rename-panes"), None, ""),
             " api | gridbash/ | feat/rename-panes "
         );
         assert_eq!(
-            pane_title("1", "gridbash/", None, " selected"),
+            pane_title("1", "gridbash/", None, None, " selected"),
             " 1 | gridbash/ selected "
+        );
+        assert_eq!(
+            pane_title("2", "gridbash/", None, Some("5h 80% left"), " selected"),
+            " 2 | gridbash/ | 5h 80% left selected "
         );
     }
 }
