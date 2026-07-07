@@ -151,10 +151,13 @@ GridBash does not capture the mouse, so normal drag selection and copy behavior 
 | Alt+Up / Alt+Down | Focus pane above / below |
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
+| Alt+r | Rename the focused pane |
 | Alt+o | Open sample settings |
 | Alt+q | Quit |
 
 Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane.
+
+Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
 
 The settings screen is currently a sample UI. Its switches, steppers, and choices can be changed, but they do not affect runtime behavior yet.
 
