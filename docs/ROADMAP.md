@@ -4,7 +4,7 @@
 
 - Windows-native single process.
 - Real PTY panes.
-- Mouse selection and selected broadcast.
+- Mouse selection and selected multi-pane input.
 - Built-in CLI agent profiles.
 - Demo-ready dark theme.
 - Release as a single Windows x64 executable.

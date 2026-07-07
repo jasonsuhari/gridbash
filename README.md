@@ -5,7 +5,7 @@
 
 Fast, beautiful terminal grids for running lots of CLI agents at once.
 
-GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy development: launch a grid of Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, Git Bash, PowerShell, or any custom command, then select panes and broadcast input only where you want it.
+GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy development: launch a grid of Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, Git Bash, PowerShell, or any custom command, then select panes and send input only where you want it.
 
 > V1 is intentionally single-process. Closing GridBash closes its child agents. Daemon detach/reattach is the next major frontier.
 
@@ -23,8 +23,8 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Up to 100 panes in one terminal process.
 - Configurable default terminal profile: Git Bash, PowerShell, cmd, agents, or custom.
 - Native host-terminal text selection with no mouse-capture mode.
-- Normal terminal keys pass through to focused or broadcast panes.
-- Modeless Alt shortcuts for pane focus, selection, broadcast, settings, and quit.
+- Normal terminal keys pass through to the focused pane, or to selected panes when multiple panes are selected.
+- Modeless Alt shortcuts for pane focus, selection, settings, and quit.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
 - Built-in launch profiles for common CLI coding agents.
 - Startup dimension picker with a live grid preview.
@@ -151,11 +151,10 @@ GridBash does not capture the mouse, so normal drag selection and copy behavior 
 | Alt+Up / Alt+Down | Focus pane above / below |
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
-| Alt+b | Toggle selected broadcast mode |
 | Alt+o | Open sample settings |
 | Alt+q | Quit |
 
-When broadcast is on, typing goes to selected panes only. If nothing is selected, input goes to the focused pane.
+Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane.
 
 The settings screen is currently a sample UI. Its switches, steppers, and choices can be changed, but they do not affect runtime behavior yet.
 
@@ -201,7 +200,7 @@ Default profile resolution order:
 
 ## Design Goals
 
-GridBash is inspired by agent-first multiplexers such as Mato and terminal workspaces such as Zellij, but V1 takes a different path: Windows-native, single binary, visual selection, selected broadcast, and a hard bias toward fast multi-agent grids.
+GridBash is inspired by agent-first multiplexers such as Mato and terminal workspaces such as Zellij, but V1 takes a different path: Windows-native, single binary, visual selection, scoped multi-pane input, and a hard bias toward fast multi-agent grids.
 
 ## Community
 
@@ -213,4 +212,4 @@ GridBash is inspired by agent-first multiplexers such as Mato and terminal works
 
 ## Legacy Launcher
 
-The old Windows Terminal launcher is still useful for quick split-pane grids, but it cannot support true selected broadcast because Windows Terminal does not expose subset pane selection. The Rust app is the path forward.
+The old Windows Terminal launcher is still useful for quick split-pane grids, but it cannot support true subset pane input because Windows Terminal does not expose subset pane selection. The Rust app is the path forward.
