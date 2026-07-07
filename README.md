@@ -147,14 +147,15 @@ GridBash does not capture the mouse, so normal drag selection and copy behavior 
 | Input | Action |
 | --- | --- |
 | Drag mouse | Select/copy terminal text in the host terminal |
-| Alt+Left / Alt+Right | Focus previous / next pane |
-| Alt+Up / Alt+Down | Focus pane above / below |
+| Alt+Left / Alt+Right | Focus previous / next pane or command line |
+| Alt+Up / Alt+Down | Focus pane above / below, or move to/from the command line |
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
+| Alt+e / Alt+x | Expand or hide command output |
 | Alt+o | Open sample settings |
 | Alt+q | Quit |
 
-Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane.
+Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane. When the one-line command bar is focused, typing stays in that bar; Enter runs the command from the cwd shown in the prompt and keeps output hidden until expanded.
 
 The settings screen is currently a sample UI. Its switches, steppers, and choices can be changed, but they do not affect runtime behavior yet.
 
