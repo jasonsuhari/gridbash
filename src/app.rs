@@ -2,7 +2,6 @@ use std::{
     collections::BTreeSet,
     env,
     io::{self, Stdout},
-    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -20,10 +19,12 @@ use tokio::sync::mpsc;
 
 use crate::{
     cli::{Cli, GridMode},
+    composer::Composer,
     config::Config,
     layout::{GridLayout, GridSize, PaneId},
-    profiles::{available_profiles, find_profile},
+    profiles::find_profile,
     pty::{PtyEvent, PtyPane},
+    setup::{LaunchPlan, PaneLaunchSpec},
     ui,
 };
 
@@ -32,9 +33,7 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 pub struct App {
     cli: Cli,
     config: Config,
-    cwd: PathBuf,
-    profile_names: Vec<String>,
-    target_profile_index: usize,
+    launch_plan: Option<LaunchPlan>,
     layout: GridLayout,
     grid_area: Rect,
     panes: Vec<PtyPane>,
@@ -42,37 +41,181 @@ pub struct App {
     selected: BTreeSet<usize>,
     rects: Vec<Rect>,
     broadcast: bool,
+    settings: SettingsState,
     status: String,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
     last_activity_decay: Instant,
 }
 
+#[derive(Debug, Clone)]
+pub struct SettingsRow {
+    pub selected: bool,
+    pub label: &'static str,
+    pub value: String,
+    pub hint: &'static str,
+}
+
+#[derive(Debug, Clone)]
+struct SettingsState {
+    open: bool,
+    cursor: usize,
+    compact_titles: bool,
+    activity_badges: bool,
+    confirm_quit: bool,
+    pane_density: i32,
+    scrollback: i32,
+    refresh_ms: i32,
+    accent_index: usize,
+}
+
+impl Default for SettingsState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            cursor: 0,
+            compact_titles: false,
+            activity_badges: true,
+            confirm_quit: false,
+            pane_density: 2,
+            scrollback: 10_000,
+            refresh_ms: 16,
+            accent_index: 0,
+        }
+    }
+}
+
+impl SettingsState {
+    const ROW_COUNT: usize = 7;
+    const ACCENTS: [&'static str; 4] = ["cyan", "yellow", "green", "magenta"];
+
+    fn move_cursor(&mut self, delta: isize) {
+        let current = self.cursor as isize;
+        self.cursor = (current + delta).clamp(0, Self::ROW_COUNT as isize - 1) as usize;
+    }
+
+    fn activate(&mut self) {
+        match self.cursor {
+            0 => self.compact_titles = !self.compact_titles,
+            1 => self.activity_badges = !self.activity_badges,
+            2 => self.confirm_quit = !self.confirm_quit,
+            6 => self.adjust(1),
+            _ => self.adjust(1),
+        }
+    }
+
+    fn adjust(&mut self, delta: i32) {
+        match self.cursor {
+            0 => {
+                if delta != 0 {
+                    self.compact_titles = !self.compact_titles;
+                }
+            }
+            1 => {
+                if delta != 0 {
+                    self.activity_badges = !self.activity_badges;
+                }
+            }
+            2 => {
+                if delta != 0 {
+                    self.confirm_quit = !self.confirm_quit;
+                }
+            }
+            3 => self.pane_density = (self.pane_density + delta).clamp(1, 5),
+            4 => self.scrollback = (self.scrollback + delta * 1000).clamp(1_000, 50_000),
+            5 => self.refresh_ms = (self.refresh_ms + delta * 4).clamp(8, 100),
+            6 => {
+                let count = Self::ACCENTS.len() as isize;
+                self.accent_index =
+                    (self.accent_index as isize + delta as isize).rem_euclid(count) as usize;
+            }
+            _ => {}
+        }
+    }
+
+    fn rows(&self) -> Vec<SettingsRow> {
+        vec![
+            self.row(
+                0,
+                "Compact pane titles",
+                switch_value(self.compact_titles),
+                "sample switch",
+            ),
+            self.row(
+                1,
+                "Activity badges",
+                switch_value(self.activity_badges),
+                "sample switch",
+            ),
+            self.row(
+                2,
+                "Confirm before quit",
+                switch_value(self.confirm_quit),
+                "sample switch",
+            ),
+            self.row(
+                3,
+                "Pane density",
+                self.pane_density.to_string(),
+                "-/+ sample stepper",
+            ),
+            self.row(
+                4,
+                "Scrollback rows",
+                self.scrollback.to_string(),
+                "-/+ sample stepper",
+            ),
+            self.row(
+                5,
+                "Refresh delay",
+                format!("{} ms", self.refresh_ms),
+                "-/+ sample stepper",
+            ),
+            self.row(
+                6,
+                "Accent color",
+                Self::ACCENTS[self.accent_index].to_string(),
+                "sample choice",
+            ),
+        ]
+    }
+
+    fn row(
+        &self,
+        index: usize,
+        label: &'static str,
+        value: String,
+        hint: &'static str,
+    ) -> SettingsRow {
+        SettingsRow {
+            selected: self.cursor == index,
+            label,
+            value,
+            hint,
+        }
+    }
+}
+
+fn switch_value(enabled: bool) -> String {
+    if enabled { "on".into() } else { "off".into() }
+}
+
 impl App {
     pub fn new(cli: Cli, config: Config) -> Result<Self> {
-        let grid = resolve_grid(&cli)?;
+        let launch_plan = resolve_direct_launch_plan(&cli, &config)?;
+        let grid = launch_plan
+            .as_ref()
+            .map(|plan| plan.grid)
+            .unwrap_or(GridSize {
+                rows: 2,
+                columns: 3,
+            });
         let (event_tx, event_rx) = mpsc::unbounded_channel();
-        let profile_name = resolve_profile_name(&cli, &config);
-        find_profile(&config, &profile_name)?;
-        let cwd = cli
-            .cwd
-            .clone()
-            .unwrap_or(env::current_dir().context("failed to resolve current directory")?);
-        let mut profile_names = available_profile_names(&config);
-        if !profile_names.iter().any(|name| name == &profile_name) {
-            profile_names.push(profile_name.clone());
-        }
-        let target_profile_index = profile_names
-            .iter()
-            .position(|name| name == &profile_name)
-            .unwrap_or(0);
 
         Ok(Self {
             cli,
             config,
-            cwd,
-            profile_names,
-            target_profile_index,
+            launch_plan,
             layout: GridLayout::new(grid),
             grid_area: Rect::default(),
             panes: Vec::new(),
@@ -80,8 +223,10 @@ impl App {
             selected: BTreeSet::new(),
             rects: Vec::new(),
             broadcast: false,
-            status: "mouse selects text | Alt+t terminal | Alt+Enter apply | Alt+b broadcast"
-                .into(),
+            settings: SettingsState::default(),
+            status:
+                "Alt+arrows move | Alt+s select | Alt+a all/none | Alt+b broadcast | Alt+o settings"
+                    .into(),
             event_tx,
             event_rx,
             last_activity_decay: Instant::now(),
@@ -89,43 +234,62 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        self.spawn_initial_panes()?;
-
         let mut terminal = setup_terminal()?;
-        self.sync_initial_pane_sizes(&terminal)?;
-        let result = self.run_loop(&mut terminal);
+        let result = self.run_in_terminal(&mut terminal);
         teardown_terminal(&mut terminal)?;
         result
     }
 
-    fn spawn_initial_panes(&mut self) -> Result<()> {
-        let pane_count = self
-            .cli
-            .count
-            .unwrap_or_else(|| self.layout.size().count())
-            .clamp(1, 100);
-        let cwd = self.cwd.clone();
-        let profile_name = self.target_profile_name().to_string();
+    fn run_in_terminal(&mut self, terminal: &mut Tui) -> Result<()> {
+        if self.launch_plan.is_none() {
+            let current_dir = resolved_current_dir()?;
+            let mut composer = Composer::new(&self.config, current_dir);
+            let Some(plan) =
+                composer.run(terminal, &mut self.config, self.cli.config.as_deref())?
+            else {
+                return Ok(());
+            };
+            self.set_launch_plan(plan);
+        }
 
-        for index in 0..pane_count {
-            self.spawn_pane(index, &profile_name, cwd.clone())?;
+        self.spawn_initial_panes()?;
+        self.sync_initial_pane_sizes(terminal)?;
+        self.run_loop(terminal)
+    }
+
+    fn set_launch_plan(&mut self, plan: LaunchPlan) {
+        self.layout = GridLayout::new(plan.grid);
+        self.launch_plan = Some(plan);
+    }
+
+    fn spawn_initial_panes(&mut self) -> Result<()> {
+        let plan = self
+            .launch_plan
+            .clone()
+            .ok_or_else(|| anyhow!("no launch plan selected"))?;
+        self.layout = GridLayout::new(plan.grid);
+        self.panes.clear();
+
+        for (index, spec) in plan.panes.iter().enumerate() {
+            self.spawn_pane_spec(index, spec, 0)?;
         }
 
         Ok(())
     }
 
-    fn spawn_pane(&mut self, index: usize, profile_name: &str, cwd: PathBuf) -> Result<()> {
-        let profile = find_profile(&self.config, profile_name)?;
-        let launch = profile.resolved_command()?;
-        let title = format!("{} {}", profile.display_name(profile_name), index + 1);
+    fn spawn_pane_spec(
+        &mut self,
+        index: usize,
+        spec: &PaneLaunchSpec,
+        generation: u64,
+    ) -> Result<()> {
+        let launch = spec.resolved_command()?;
         let pane = PtyPane::spawn(
             PaneId(index),
-            0,
-            profile_name,
-            title,
+            generation,
             &launch.command,
             &launch.args,
-            &cwd,
+            &spec.cwd,
             self.event_tx.clone(),
         )?;
         self.panes.push(pane);
@@ -152,7 +316,11 @@ impl App {
                         }
                     }
                     Event::Resize(_, _) => {}
-                    Event::Paste(text) => self.route_input(text.as_bytes())?,
+                    Event::Paste(text) => {
+                        if !self.settings.open {
+                            self.route_input(text.as_bytes())?;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -206,6 +374,10 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if self.settings.open {
+            return self.handle_settings_key(key);
+        }
+
         if key.modifiers.contains(KeyModifiers::ALT)
             && let Some(quit) = self.handle_app_key(key)?
         {
@@ -219,33 +391,8 @@ impl App {
     }
 
     fn handle_app_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
-        let shifted = key.modifiers.contains(KeyModifiers::SHIFT);
         match key.code {
-            KeyCode::Char(ch) => self.handle_alt_char(ch, shifted),
-            KeyCode::Enter => {
-                self.apply_target_profile();
-                Ok(Some(false))
-            }
-            KeyCode::Left if shifted => {
-                self.layout.adjust_focused(self.focus, -1, 0);
-                self.status = "focused column narrowed".into();
-                Ok(Some(false))
-            }
-            KeyCode::Right if shifted => {
-                self.layout.adjust_focused(self.focus, 1, 0);
-                self.status = "focused column widened".into();
-                Ok(Some(false))
-            }
-            KeyCode::Up if shifted => {
-                self.layout.adjust_focused(self.focus, 0, -1);
-                self.status = "focused row shortened".into();
-                Ok(Some(false))
-            }
-            KeyCode::Down if shifted => {
-                self.layout.adjust_focused(self.focus, 0, 1);
-                self.status = "focused row heightened".into();
-                Ok(Some(false))
-            }
+            KeyCode::Char(ch) => self.handle_alt_char(ch),
             KeyCode::Left => {
                 self.focus_previous();
                 self.status = format!("focused pane {}", self.focus + 1);
@@ -270,7 +417,7 @@ impl App {
         }
     }
 
-    fn handle_alt_char(&mut self, ch: char, shifted: bool) -> Result<Option<bool>> {
+    fn handle_alt_char(&mut self, ch: char) -> Result<Option<bool>> {
         let lower = ch.to_ascii_lowercase();
         match lower {
             'q' => Ok(Some(true)),
@@ -283,57 +430,55 @@ impl App {
                 };
                 Ok(Some(false))
             }
-            's' | ' ' => {
+            's' => {
                 toggle_selection(&mut self.selected, self.focus);
                 self.status = format!("selected {} panes", self.selected.len());
                 Ok(Some(false))
             }
             'a' => {
-                self.selected = (0..self.panes.len()).collect();
+                if self.selected.len() == self.panes.len() {
+                    self.selected.clear();
+                } else {
+                    self.selected = (0..self.panes.len()).collect();
+                }
                 self.status = format!("selected {} panes", self.selected.len());
                 Ok(Some(false))
             }
-            'c' => {
-                self.selected.clear();
-                self.status = "selection cleared".into();
-                Ok(Some(false))
-            }
-            'p' => {
-                let profiles = available_profiles(&self.config);
-                let summary = profiles
-                    .iter()
-                    .take(8)
-                    .map(|(name, ok)| format!("{}{}", if *ok { "" } else { "!" }, name))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                self.status = format!("profiles: {summary}");
-                Ok(Some(false))
-            }
-            't' => {
-                self.cycle_target_profile(if shifted { -1 } else { 1 });
-                Ok(Some(false))
-            }
-            'd' => {
-                self.save_target_as_default();
-                Ok(Some(false))
-            }
-            'r' => {
-                self.layout.reset_equal();
-                self.status = "grid reset to equal rows/columns".into();
-                Ok(Some(false))
-            }
-            '1'..='9' | '0' => {
-                let Some(index) = pane_digit_index(lower) else {
-                    return Ok(Some(false));
-                };
-                if index < self.panes.len() {
-                    self.focus = index;
-                    self.status = format!("focused pane {}", index + 1);
-                }
+            'o' => {
+                self.settings.open = true;
+                self.status = "settings open".into();
                 Ok(Some(false))
             }
             _ => Ok(None),
         }
+    }
+
+    fn handle_settings_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return Ok(true);
+        }
+        if key.modifiers.contains(KeyModifiers::ALT)
+            && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
+        {
+            self.settings.open = false;
+            self.status = "settings closed".into();
+            return Ok(false);
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.settings.open = false;
+                self.status = "settings closed".into();
+            }
+            KeyCode::Up => self.settings.move_cursor(-1),
+            KeyCode::Down => self.settings.move_cursor(1),
+            KeyCode::Left | KeyCode::Char('-') => self.settings.adjust(-1),
+            KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => self.settings.adjust(1),
+            KeyCode::Enter | KeyCode::Char(' ') => self.settings.activate(),
+            _ => {}
+        }
+
+        Ok(false)
     }
 
     fn route_input(&mut self, bytes: &[u8]) -> Result<()> {
@@ -353,99 +498,6 @@ impl App {
         } else {
             vec![self.focus.min(self.panes.len().saturating_sub(1))]
         }
-    }
-
-    fn target_profile_name(&self) -> &str {
-        self.profile_names
-            .get(self.target_profile_index)
-            .map(String::as_str)
-            .unwrap_or("git-bash")
-    }
-
-    fn cycle_target_profile(&mut self, delta: isize) {
-        if self.profile_names.is_empty() {
-            self.status = "no available profiles".into();
-            return;
-        }
-
-        let count = self.profile_names.len() as isize;
-        let current = self.target_profile_index as isize;
-        self.target_profile_index = (current + delta).rem_euclid(count) as usize;
-        self.status = format!(
-            "target terminal: {} | Alt+Enter apply | Alt+d default",
-            self.target_profile_name()
-        );
-    }
-
-    fn apply_target_profile(&mut self) {
-        let profile_name = self.target_profile_name().to_string();
-        let targets = self.restart_targets();
-        for index in &targets {
-            if let Err(error) = self.replace_pane(*index, &profile_name) {
-                self.status = format!("failed to launch {profile_name}: {error:#}");
-                return;
-            }
-        }
-
-        self.status = format!("restarted {} pane(s) with {profile_name}", targets.len());
-    }
-
-    fn save_target_as_default(&mut self) {
-        let profile_name = self.target_profile_name().to_string();
-        self.config.set_default_profile(profile_name.clone());
-        match self.config.save(self.cli.config.as_deref()) {
-            Ok(path) => {
-                self.status = format!("default terminal: {profile_name} ({})", path.display());
-            }
-            Err(error) => {
-                self.status = format!("failed to save default: {error:#}");
-            }
-        }
-    }
-
-    fn restart_targets(&self) -> Vec<usize> {
-        if self.selected.is_empty() {
-            vec![self.focus.min(self.panes.len().saturating_sub(1))]
-        } else {
-            self.selected
-                .iter()
-                .copied()
-                .filter(|index| *index < self.panes.len())
-                .collect()
-        }
-    }
-
-    fn replace_pane(&mut self, index: usize, profile_name: &str) -> Result<()> {
-        let profile = find_profile(&self.config, profile_name)?;
-        let launch = profile.resolved_command()?;
-        let title = format!("{} {}", profile.display_name(profile_name), index + 1);
-        let mut pane = PtyPane::spawn(
-            PaneId(index),
-            self.panes
-                .get(index)
-                .map(|pane| pane.generation().saturating_add(1))
-                .unwrap_or(0),
-            profile_name,
-            title,
-            &launch.command,
-            &launch.args,
-            &self.cwd,
-            self.event_tx.clone(),
-        )?;
-
-        if let Some(rect) = self.rects.get(index) {
-            let rows = rect.height.saturating_sub(2).max(1);
-            let cols = rect.width.saturating_sub(2).max(1);
-            pane.resize(rows, cols)?;
-        }
-
-        let _old = std::mem::replace(
-            self.panes
-                .get_mut(index)
-                .ok_or_else(|| anyhow!("invalid pane index {index}"))?,
-            pane,
-        );
-        Ok(())
     }
 
     fn focus_next(&mut self) {
@@ -506,8 +558,26 @@ impl App {
         &self.status
     }
 
-    pub fn target_profile(&self) -> &str {
-        self.target_profile_name()
+    pub fn settings_open(&self) -> bool {
+        self.settings.open
+    }
+
+    pub fn settings_rows(&self) -> Vec<SettingsRow> {
+        self.settings.rows()
+    }
+
+    pub fn pane_folder(&self, index: usize) -> Option<&str> {
+        self.launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .map(|pane| pane.folder_name.as_str())
+    }
+
+    pub fn pane_worktree(&self, index: usize) -> Option<&str> {
+        self.launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .and_then(|pane| pane.worktree_name.as_deref())
     }
 
     pub fn sync_pane_sizes(&mut self) {
@@ -552,6 +622,38 @@ fn resolve_grid(cli: &Cli) -> Result<GridSize> {
     })
 }
 
+fn resolve_direct_launch_plan(cli: &Cli, config: &Config) -> Result<Option<LaunchPlan>> {
+    if !uses_direct_launch(cli) {
+        return Ok(None);
+    }
+
+    let grid = resolve_grid(cli)?;
+    let profile_name = resolve_profile_name(cli, config);
+    let profile = find_profile(config, &profile_name)?;
+    let cwd = cli
+        .cwd
+        .clone()
+        .unwrap_or(env::current_dir().context("failed to resolve current directory")?);
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
+    let pane_count = cli.count.unwrap_or_else(|| grid.count()).clamp(1, 100);
+
+    Ok(Some(LaunchPlan::legacy(
+        profile_name,
+        profile,
+        cwd,
+        pane_count,
+        grid,
+    )))
+}
+
+fn uses_direct_launch(cli: &Cli) -> bool {
+    cli.grid.is_some()
+        || cli.count.is_some()
+        || cli.profile.is_some()
+        || cli.cwd.is_some()
+        || cli.layout == GridMode::Auto
+}
+
 fn resolve_profile_name(cli: &Cli, config: &Config) -> String {
     cli.profile
         .clone()
@@ -560,24 +662,14 @@ fn resolve_profile_name(cli: &Cli, config: &Config) -> String {
         .unwrap_or_else(|| "git-bash".into())
 }
 
-fn available_profile_names(config: &Config) -> Vec<String> {
-    available_profiles(config)
-        .into_iter()
-        .filter_map(|(name, available)| available.then_some(name))
-        .collect()
+fn resolved_current_dir() -> Result<std::path::PathBuf> {
+    let current = env::current_dir().context("failed to resolve current directory")?;
+    Ok(current.canonicalize().unwrap_or(current))
 }
 
 fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) {
     if !selected.insert(index) {
         selected.remove(&index);
-    }
-}
-
-fn pane_digit_index(ch: char) -> Option<usize> {
-    match ch {
-        '1'..='9' => Some(ch as usize - '1' as usize),
-        '0' => Some(9),
-        _ => None,
     }
 }
 
