@@ -6,20 +6,25 @@ This repo has an agent-friendly release path:
 2. Create a devlog.
 3. Run the `Release` GitHub Actions workflow.
 4. GitHub Actions creates the release commit and tag.
-5. The pushed tag publishes npm and creates the GitHub release.
+5. GitHub Actions publishes npm and creates the GitHub release.
 
 The release workflow can be run manually from GitHub Actions and also responds
 to pushed tags named `v*`.
 
 ## One-Time Setup
 
-Add an npm automation token as a GitHub repository secret:
+Prefer npm Trusted Publishing for the `Release` workflow. Configure the package
+on npmjs.com to trust this repository's GitHub Actions workflow.
+
+As a fallback, add an npm automation token as a GitHub repository secret:
 
 ```text
 NPM_TOKEN
 ```
 
-The release workflow uses that token to publish `gridbash` to npm. GitHub release creation uses the built-in `GITHUB_TOKEN`.
+If `NPM_TOKEN` exists, the workflow uses it. If it does not exist, the workflow
+tries npm Trusted Publishing through GitHub Actions OIDC. GitHub release
+creation uses the built-in `GITHUB_TOKEN`.
 
 ## Create A Devlog
 
@@ -47,8 +52,13 @@ After the change is merged to `main`:
 5. Run the workflow.
 
 The workflow runs `node npm/scripts/release.js` on `main`. That script creates
-and pushes the release commit and `vX.Y.Z` tag. The same workflow run then builds
-the Windows package, publishes npm, and creates the GitHub release.
+and pushes the release commit and `vX.Y.Z` tag. A separate publish job in the
+same workflow run then builds the Windows package, publishes npm, and creates
+or updates the GitHub release.
+
+If publishing fails after the tag exists, rerun the failed publish job after
+fixing credentials. The publish job skips npm when that exact package version
+is already live and updates an existing GitHub release with `--clobber` assets.
 
 Separately, if a `v*` tag is pushed from a local release fallback, the tag push
 path in the same workflow publishes npm and creates the GitHub release.
@@ -83,7 +93,7 @@ The script will:
 - create tag `vX.Y.Z`
 - push the commit and tag when `--push --yes` is passed
 
-When the tag reaches GitHub, `.github/workflows/release.yml` builds the Windows package, publishes npm, and creates a GitHub release with the release notes.
+When the tag reaches GitHub, `.github/workflows/release.yml` builds the Windows package, publishes npm, and creates or updates a GitHub release with the release notes.
 
 ## Local Release Without Push
 
