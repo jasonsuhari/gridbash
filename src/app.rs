@@ -31,6 +31,7 @@ use crate::{
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const MAX_PANE_NAME_CHARS: usize = 32;
 
 pub struct App {
     config: Config,
@@ -40,8 +41,10 @@ pub struct App {
     panes: Vec<PtyPane>,
     focus: usize,
     selected: BTreeSet<usize>,
+    pane_names: Vec<Option<String>>,
     rects: Vec<Rect>,
     settings: SettingsState,
+    rename: RenamePaneState,
     status: String,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
@@ -61,6 +64,93 @@ pub struct SettingsRow {
     pub label: &'static str,
     pub value: String,
     pub hint: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenamePaneView {
+    pub pane_index: usize,
+    pub pane_label: String,
+    pub value: String,
+    pub cursor: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RenamePaneState {
+    open: bool,
+    pane_index: usize,
+    value: String,
+    cursor: usize,
+}
+
+impl RenamePaneState {
+    fn begin(&mut self, pane_index: usize, current_name: Option<&str>) {
+        self.open = true;
+        self.pane_index = pane_index;
+        self.value = current_name.unwrap_or_default().to_string();
+        self.cursor = self.value.chars().count();
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.value.clear();
+        self.cursor = 0;
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        let count = self.value.chars().count() as isize;
+        self.cursor = (self.cursor as isize + delta).clamp(0, count) as usize;
+    }
+
+    fn move_to_start(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_to_end(&mut self) {
+        self.cursor = self.value.chars().count();
+    }
+
+    fn clear(&mut self) {
+        self.value.clear();
+        self.cursor = 0;
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        if ch.is_control() || self.value.chars().count() >= MAX_PANE_NAME_CHARS {
+            return;
+        }
+
+        let index = char_to_byte_index(&self.value, self.cursor);
+        self.value.insert(index, ch);
+        self.cursor += 1;
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.insert_char(ch);
+        }
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+
+        let start = char_to_byte_index(&self.value, self.cursor - 1);
+        let end = char_to_byte_index(&self.value, self.cursor);
+        self.value.replace_range(start..end, "");
+        self.cursor -= 1;
+    }
+
+    fn delete(&mut self) {
+        let count = self.value.chars().count();
+        if self.cursor >= count {
+            return;
+        }
+
+        let start = char_to_byte_index(&self.value, self.cursor);
+        let end = char_to_byte_index(&self.value, self.cursor + 1);
+        self.value.replace_range(start..end, "");
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -227,9 +317,13 @@ impl App {
             panes: Vec::new(),
             focus: 0,
             selected: BTreeSet::new(),
+            pane_names: Vec::new(),
             rects: Vec::new(),
             settings: SettingsState::default(),
-            status: "Alt+arrows move | Alt+s select | Alt+a all/none | Alt+o settings".into(),
+            rename: RenamePaneState::default(),
+            status:
+                "Alt+arrows move | Alt+s select | Alt+a all/none | Alt+r rename | Alt+o settings"
+                    .into(),
             event_tx,
             event_rx,
             last_activity_decay: Instant::now(),
@@ -270,6 +364,7 @@ impl App {
             .ok_or_else(|| anyhow!("no launch plan selected"))?;
         self.layout = GridLayout::new(plan.grid);
         self.panes.clear();
+        self.pane_names = vec![None; plan.panes.len()];
 
         for (index, spec) in plan.panes.iter().enumerate() {
             self.spawn_pane_spec(index, spec, 0)?;
@@ -324,6 +419,10 @@ impl App {
                         }
                     }
                     Event::Resize(_, _) => needs_render = true,
+                    Event::Paste(text) if self.rename.open => {
+                        self.rename.insert_text(&text);
+                        needs_render = true;
+                    }
                     Event::Paste(text) if !self.settings.open => {
                         self.route_input(text.as_bytes())?;
                     }
@@ -389,6 +488,10 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if self.rename.open {
+            return self.handle_rename_key(key);
+        }
+
         if self.settings.open {
             return self.handle_settings_key(key);
         }
@@ -459,8 +562,111 @@ impl App {
                 self.status = "settings open".into();
                 Ok(Some(false))
             }
+            'r' => {
+                self.begin_rename();
+                Ok(Some(false))
+            }
             _ => Ok(None),
         }
+    }
+
+    fn begin_rename(&mut self) {
+        if self.panes.is_empty() {
+            self.status = "no panes to rename".into();
+            return;
+        }
+
+        let pane_index = self.focus.min(self.panes.len() - 1);
+        let current_name = self
+            .pane_names
+            .get(pane_index)
+            .and_then(|name| name.clone());
+        self.rename.begin(pane_index, current_name.as_deref());
+        self.status = format!("renaming pane {}", pane_index + 1);
+    }
+
+    fn handle_rename_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return Ok(KeyOutcome::Quit);
+        }
+
+        let changed = match key.code {
+            KeyCode::Esc => {
+                let pane_number = self.rename.pane_index + 1;
+                self.rename.close();
+                self.status = format!("rename canceled for pane {pane_number}");
+                true
+            }
+            KeyCode::Enter => {
+                self.save_rename();
+                true
+            }
+            KeyCode::Backspace => {
+                self.rename.backspace();
+                true
+            }
+            KeyCode::Delete => {
+                self.rename.delete();
+                true
+            }
+            KeyCode::Left => {
+                self.rename.move_cursor(-1);
+                true
+            }
+            KeyCode::Right => {
+                self.rename.move_cursor(1);
+                true
+            }
+            KeyCode::Home => {
+                self.rename.move_to_start();
+                true
+            }
+            KeyCode::End => {
+                self.rename.move_to_end();
+                true
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.rename.clear();
+                true
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.rename.insert_char(ch);
+                true
+            }
+            _ => false,
+        };
+
+        Ok(if changed {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        })
+    }
+
+    fn save_rename(&mut self) {
+        let pane_index = self.rename.pane_index;
+        let name = normalized_pane_name(&self.rename.value);
+        let pane_number = pane_index + 1;
+
+        if let Some(slot) = self.pane_names.get_mut(pane_index) {
+            match name {
+                Some(name) => {
+                    *slot = Some(name.clone());
+                    self.status = format!("renamed pane {pane_number} to {name}");
+                }
+                None => {
+                    *slot = None;
+                    self.status = format!("cleared pane {pane_number} name");
+                }
+            }
+        } else {
+            self.status = format!("pane {pane_number} is no longer available");
+        }
+
+        self.rename.close();
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -588,6 +794,24 @@ impl App {
         self.settings.rows()
     }
 
+    pub fn pane_label(&self, index: usize) -> String {
+        self.pane_names
+            .get(index)
+            .and_then(|name| name.as_deref())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| (index + 1).to_string())
+    }
+
+    pub fn rename_pane_view(&self) -> Option<RenamePaneView> {
+        self.rename.open.then(|| RenamePaneView {
+            pane_index: self.rename.pane_index,
+            pane_label: self.pane_label(self.rename.pane_index),
+            value: self.rename.value.clone(),
+            cursor: self.rename.cursor,
+        })
+    }
+
     pub fn pane_folder(&self, index: usize) -> Option<&str> {
         self.launch_plan
             .as_ref()
@@ -707,6 +931,27 @@ fn input_targets_for(focus: usize, selected: &BTreeSet<usize>, pane_count: usize
     }
 }
 
+fn normalized_pane_name(value: &str) -> Option<String> {
+    let name = value
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(MAX_PANE_NAME_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string();
+
+    (!name.is_empty()).then_some(name)
+}
+
+fn char_to_byte_index(value: &str, cursor: usize) -> usize {
+    value
+        .char_indices()
+        .nth(cursor)
+        .map(|(index, _)| index)
+        .unwrap_or(value.len())
+}
+
 fn control_byte(ch: char) -> Option<u8> {
     let lower = ch.to_ascii_lowercase();
     if lower.is_ascii_lowercase() {
@@ -800,6 +1045,30 @@ mod tests {
     fn input_targets_clamps_focus_to_available_panes() {
         assert_eq!(input_targets_for(8, &selected(&[]), 4), vec![3]);
         assert!(input_targets_for(0, &selected(&[]), 0).is_empty());
+    }
+
+    #[test]
+    fn normalized_pane_name_trims_and_clears_empty_names() {
+        assert_eq!(
+            normalized_pane_name("  api server  "),
+            Some("api server".into())
+        );
+        assert_eq!(normalized_pane_name("   "), None);
+    }
+
+    #[test]
+    fn rename_state_edits_at_the_cursor() {
+        let mut rename = RenamePaneState::default();
+        rename.begin(0, Some("abc"));
+        rename.move_cursor(-1);
+        rename.insert_char('X');
+        assert_eq!(rename.value, "abXc");
+
+        rename.backspace();
+        assert_eq!(rename.value, "abc");
+
+        rename.delete();
+        assert_eq!(rename.value, "ab");
     }
 }
 

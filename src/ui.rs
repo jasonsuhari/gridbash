@@ -8,7 +8,7 @@ use ratatui::{
 use std::path::Path;
 use vt100::Cell;
 
-use crate::app::{App, SettingsRow};
+use crate::app::{App, RenamePaneView, SettingsRow};
 
 pub struct DrawState {
     pub grid_area: Rect,
@@ -25,6 +25,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let grid_area = chunks[0];
     let status_area = chunks[1];
     let rects = app.pane_rects(grid_area);
+    let rename_view = app.rename_pane_view();
+    let modal_open = app.settings_open() || rename_view.is_some();
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -39,17 +41,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             .pane_folder(index)
             .map(label_name)
             .unwrap_or_else(|| folder_label(pane.cwd()));
-        let title = if let Some(worktree) = app.pane_worktree(index) {
-            format!(
-                " {} | {} | {}{} ",
-                index + 1,
-                folder,
-                worktree,
-                chrome.badge
-            )
-        } else {
-            format!(" {} | {}{} ", index + 1, folder, chrome.badge)
-        };
+        let title = pane_title(
+            &app.pane_label(index),
+            &folder,
+            app.pane_worktree(index),
+            chrome.badge,
+        );
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -60,7 +57,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         frame.render_widget(block, rect);
         render_screen(frame, inner, pane.screen());
 
-        if focused {
+        if focused && !modal_open {
             set_terminal_cursor(frame, inner, pane.screen());
         }
     }
@@ -108,10 +105,21 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     if app.settings_open() {
         render_settings(frame, area, &app.settings_rows());
     }
+    if let Some(rename) = rename_view.as_ref() {
+        render_rename_pane(frame, area, rename);
+    }
 
     DrawState {
         grid_area,
         pane_rects: rects,
+    }
+}
+
+fn pane_title(label: &str, folder: &str, worktree: Option<&str>, badge: &str) -> String {
+    if let Some(worktree) = worktree {
+        format!(" {label} | {folder} | {worktree}{badge} ")
+    } else {
+        format!(" {label} | {folder}{badge} ")
     }
 }
 
@@ -196,6 +204,89 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow]) {
         ),
         modal,
     );
+}
+
+fn render_rename_pane(frame: &mut Frame<'_>, area: Rect, rename: &RenamePaneView) {
+    let modal = centered_rect(area, 62, 28);
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Rename Pane ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    let header = Line::from(vec![
+        Span::styled(
+            format!("Pane {}", rename.pane_index + 1),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("currently {}", rename.pane_label),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(header).style(Style::default().fg(Color::Rgb(230, 237, 243))),
+        chunks[0],
+    );
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Name ");
+    let input_inner = input_block.inner(chunks[1]);
+    let input_line = if rename.value.is_empty() {
+        Line::from(Span::styled(
+            "blank restores number",
+            Style::default().fg(Color::DarkGray),
+        ))
+    } else {
+        Line::from(rename.value.clone())
+    };
+    frame.render_widget(
+        Paragraph::new(input_line).block(input_block).style(
+            Style::default()
+                .fg(Color::Rgb(230, 237, 243))
+                .bg(Color::Rgb(11, 15, 20)),
+        ),
+        chunks[1],
+    );
+
+    let help = Line::from(vec![
+        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::raw(" save  "),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" cancel  "),
+        Span::styled("Ctrl+u", Style::default().fg(Color::Yellow)),
+        Span::raw(" clear"),
+    ]);
+    frame.render_widget(
+        Paragraph::new(help).style(Style::default().fg(Color::Gray)),
+        chunks[2],
+    );
+
+    if input_inner.width > 0 && input_inner.height > 0 {
+        let cursor = rename.cursor.min(rename.value.chars().count()) as u16;
+        let x = input_inner
+            .x
+            .saturating_add(cursor.min(input_inner.width.saturating_sub(1)));
+        frame.set_cursor_position((x, input_inner.y));
+    }
 }
 
 fn settings_row(row: &SettingsRow) -> Line<'static> {
@@ -453,5 +544,17 @@ mod tests {
     fn selected_and_exited_badges_remain_visible() {
         assert_eq!(pane_chrome(true, false, true, false).badge, " selected");
         assert_eq!(pane_chrome(true, false, true, true).badge, " exited");
+    }
+
+    #[test]
+    fn pane_title_uses_custom_label_in_number_slot() {
+        assert_eq!(
+            pane_title("api", "gridbash/", Some("feat/rename-panes"), ""),
+            " api | gridbash/ | feat/rename-panes "
+        );
+        assert_eq!(
+            pane_title("1", "gridbash/", None, " selected"),
+            " 1 | gridbash/ selected "
+        );
     }
 }
