@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
@@ -369,7 +370,7 @@ fn codex_usage_snapshot(dir: &Path) -> Option<UsageWindows> {
     let sessions = dir.join("sessions");
     let mut files = Vec::new();
     collect_codex_rollouts(&sessions, &mut files);
-    files.sort_by(|left, right| right.1.cmp(&left.1));
+    files.sort_by_key(|entry| Reverse(entry.1));
 
     files
         .into_iter()
