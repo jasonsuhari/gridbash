@@ -363,11 +363,10 @@ impl App {
                         .panes
                         .iter_mut()
                         .find(|p| p.id() == pane && p.generation() == generation)
+                        && !target.exited
                     {
-                        if !target.exited {
-                            target.exited = true;
-                            changed = true;
-                        }
+                        target.exited = true;
+                        changed = true;
                     }
                 }
             }
