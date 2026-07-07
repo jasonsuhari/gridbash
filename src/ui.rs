@@ -8,7 +8,16 @@ use ratatui::{
 use std::path::Path;
 use vt100::Cell;
 
-use crate::app::{App, SettingsRow};
+use crate::app::{App, PaneSelection, RenamePaneView, SettingsRow};
+
+const APP_BG: Color = Color::Rgb(11, 15, 20);
+const SETTINGS_BG: Color = Color::Rgb(9, 14, 19);
+const SETTINGS_SURFACE: Color = Color::Rgb(14, 22, 29);
+const SETTINGS_ROW_ACTIVE: Color = Color::Rgb(25, 36, 44);
+const SETTINGS_SHADOW: Color = Color::Rgb(4, 6, 10);
+const SETTINGS_BORDER: Color = Color::Rgb(58, 210, 210);
+const SETTINGS_MUTED: Color = Color::Rgb(118, 135, 149);
+const SETTINGS_TEXT: Color = Color::Rgb(230, 237, 243);
 
 pub struct DrawState {
     pub grid_area: Rect,
@@ -25,6 +34,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let grid_area = chunks[0];
     let status_area = chunks[1];
     let rects = app.pane_rects(grid_area);
+    let rename_view = app.rename_pane_view();
+    let modal_open = app.settings_open() || rename_view.is_some();
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -40,37 +51,34 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             .pane_folder(index)
             .map(label_name)
             .unwrap_or_else(|| folder_label(pane.cwd()));
-        let usage = app
-            .pane_usage_label(index)
-            .map(|label| format!(" | {label}"))
-            .unwrap_or_default();
-        let title = if let Some(worktree) = app.pane_worktree(index) {
-            format!(
-                " {} | {} | {}{}{} ",
-                index + 1,
-                folder,
-                worktree,
-                usage,
-                chrome.badge
-            )
-        } else {
-            format!(" {} | {}{}{} ", index + 1, folder, usage, chrome.badge)
-        };
+        let usage = app.pane_usage_label(index);
+        let title = pane_title(
+            &app.pane_label(index),
+            &folder,
+            app.pane_worktree(index),
+            usage.as_deref(),
+            chrome.badge,
+        );
 
-        let block = Block::default()
+        let mut block = Block::default()
             .borders(Borders::ALL)
             .border_style(chrome.border_style)
             .title(title);
+        if let Some(footer) =
+            app.pane_conversation_footer(index, rect.width.saturating_sub(4) as usize)
+        {
+            block = block.title_bottom(conversation_footer(footer, focused || selected));
+        }
 
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
         if sleeping {
             render_sleeping_screen(frame, inner);
         } else {
-            render_screen(frame, inner, pane.screen());
+            render_screen(frame, inner, pane.screen(), app.selection_for_pane(index));
         }
 
-        if focused && !sleeping {
+        if focused && !sleeping && !modal_open {
             set_terminal_cursor(frame, inner, pane.screen());
         }
     }
@@ -111,17 +119,35 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | Alt+x swap | Alt+z sleep | hover wakes | Alt+q quit"),
     ]);
     frame.render_widget(
-        Paragraph::new(status).style(Style::default().bg(Color::Rgb(11, 15, 20))),
+        Paragraph::new(status).style(Style::default().bg(APP_BG)),
         status_area,
     );
 
     if app.settings_open() {
         render_settings(frame, area, &app.settings_rows());
     }
+    if let Some(rename) = rename_view.as_ref() {
+        render_rename_pane(frame, area, rename);
+    }
 
     DrawState {
         grid_area,
         pane_rects: rects,
+    }
+}
+
+fn pane_title(
+    label: &str,
+    folder: &str,
+    worktree: Option<&str>,
+    usage: Option<&str>,
+    badge: &str,
+) -> String {
+    let usage = usage.map(|label| format!(" | {label}")).unwrap_or_default();
+    if let Some(worktree) = worktree {
+        format!(" {label} | {folder} | {worktree}{usage}{badge} ")
+    } else {
+        format!(" {label} | {folder}{usage}{badge} ")
     }
 }
 
@@ -171,82 +197,389 @@ fn pane_chrome(
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow]) {
-    let modal = centered_rect(area, 72, 64);
-    frame.render_widget(Clear, modal);
+    let modal = settings_modal_rect(area, rows.len());
+    let shadow = settings_shadow_rect(area, modal);
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                "Sample settings",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled("not wired yet", Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(""),
-    ];
-
-    for row in rows {
-        lines.push(settings_row(row));
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Up/Down", Style::default().fg(Color::Yellow)),
-        Span::raw(" move  "),
-        Span::styled("Space", Style::default().fg(Color::Yellow)),
-        Span::raw(" toggle  "),
-        Span::styled("-/+", Style::default().fg(Color::Yellow)),
-        Span::raw(" adjust  "),
-        Span::styled("Esc", Style::default().fg(Color::Yellow)),
-        Span::raw(" close"),
-    ]));
+    frame.render_widget(Clear, modal);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Settings ");
+        .border_style(
+            Style::default()
+                .fg(SETTINGS_BORDER)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" GridBash Settings ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
     frame.render_widget(
-        Paragraph::new(lines).block(block).style(
+        Paragraph::new(settings_lines(rows, inner.width)).style(settings_panel_style()),
+        inner,
+    );
+}
+
+fn render_rename_pane(frame: &mut Frame<'_>, area: Rect, rename: &RenamePaneView) {
+    let modal = centered_rect(area, 62, 28);
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Rename Pane ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    let header = Line::from(vec![
+        Span::styled(
+            format!("Pane {}", rename.pane_index + 1),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("currently {}", rename.pane_label),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(header).style(Style::default().fg(Color::Rgb(230, 237, 243))),
+        chunks[0],
+    );
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Name ");
+    let input_inner = input_block.inner(chunks[1]);
+    let input_line = if rename.value.is_empty() {
+        Line::from(Span::styled(
+            "blank restores number",
+            Style::default().fg(Color::DarkGray),
+        ))
+    } else {
+        Line::from(rename.value.clone())
+    };
+    frame.render_widget(
+        Paragraph::new(input_line).block(input_block).style(
             Style::default()
                 .fg(Color::Rgb(230, 237, 243))
                 .bg(Color::Rgb(11, 15, 20)),
         ),
-        modal,
+        chunks[1],
     );
+
+    let help = Line::from(vec![
+        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::raw(" save  "),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" cancel  "),
+        Span::styled("Ctrl+u", Style::default().fg(Color::Yellow)),
+        Span::raw(" clear"),
+    ]);
+    frame.render_widget(
+        Paragraph::new(help).style(Style::default().fg(Color::Gray)),
+        chunks[2],
+    );
+
+    if input_inner.width > 0 && input_inner.height > 0 {
+        let cursor = rename.cursor.min(rename.value.chars().count()) as u16;
+        let x = input_inner
+            .x
+            .saturating_add(cursor.min(input_inner.width.saturating_sub(1)));
+        frame.set_cursor_position((x, input_inner.y));
+    }
 }
 
-fn settings_row(row: &SettingsRow) -> Line<'static> {
-    let cursor = if row.selected { "> " } else { "  " };
-    let cursor_style = if row.selected {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    let label_style = if row.selected {
+fn settings_lines(rows: &[SettingsRow], width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "Grid controls",
+                Style::default()
+                    .fg(SETTINGS_BORDER)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(
+                "session preview",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(settings_summary(width), Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(""),
+        settings_section("DISPLAY", "title bar and state signals", width),
+    ];
+
+    for row in rows.iter().take(2) {
+        lines.push(settings_row(row, width));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(settings_section(
+        "WORKFLOW",
+        "guard rails for high-speed sessions",
+        width,
+    ));
+    if let Some(row) = rows.get(2) {
+        lines.push(settings_row(row, width));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(settings_section(
+        "PERFORMANCE",
+        "spacing and terminal budget",
+        width,
+    ));
+    for row in rows.iter().skip(3).take(3) {
+        lines.push(settings_row(row, width));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(settings_section(
+        "THEME",
+        "one accent across the grid",
+        width,
+    ));
+    if let Some(row) = rows.get(6) {
+        lines.push(settings_row(row, width));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(settings_command_bar(width));
+    lines
+}
+
+fn conversation_footer(summary: String, emphasized: bool) -> Line<'static> {
+    let summary_style = if emphasized {
         Style::default()
-            .fg(Color::White)
+            .fg(Color::LightCyan)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Gray)
     };
 
     Line::from(vec![
-        Span::styled(cursor, cursor_style),
-        Span::styled(format!("{:<24}", row.label), label_style),
-        Span::styled(
-            format!("{:>10}", row.value),
-            Style::default().fg(Color::LightCyan),
-        ),
-        Span::raw("   "),
-        Span::styled(row.hint, Style::default().fg(Color::DarkGray)),
+        Span::raw(" "),
+        Span::styled("conv ", Style::default().fg(Color::Cyan)),
+        Span::styled(summary, summary_style),
+        Span::raw(" "),
     ])
 }
 
+fn settings_summary(width: u16) -> String {
+    let text = if width < 70 {
+        "Refine pane chrome, safety prompts, and highlight color."
+    } else {
+        "Refine pane chrome, safety prompts, performance, and highlight color."
+    };
+    truncate_text(text, width.saturating_sub(2) as usize)
+}
+
+fn settings_section(title: &'static str, helper: &'static str, width: u16) -> Line<'static> {
+    let used = 2 + title.len() + 2;
+    let helper = width
+        .checked_sub(used as u16)
+        .filter(|available| *available >= 10)
+        .map(|available| truncate_text(helper, available as usize));
+    let mut spans = vec![
+        Span::raw("  "),
+        Span::styled(
+            title,
+            Style::default()
+                .fg(SETTINGS_BORDER)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    if let Some(helper) = helper {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(helper, Style::default().fg(SETTINGS_MUTED)));
+    }
+
+    Line::from(spans)
+}
+
+fn settings_row(row: &SettingsRow, width: u16) -> Line<'static> {
+    let width = width as usize;
+    let narrow = width < 66;
+    let label_width = if narrow { 20 } else { 24 };
+    let value_width = if narrow { 10 } else { 13 };
+    let reserved = 2 + label_width + 2 + value_width + 2;
+    let hint_width = width.saturating_sub(reserved);
+    let marker = if row.selected { "> " } else { "  " };
+    let label = fixed_width(row.label, label_width);
+    let value = fixed_width(&settings_value_label(row), value_width);
+    let hint = if hint_width >= 10 {
+        truncate_text(row.hint, hint_width)
+    } else {
+        String::new()
+    };
+    let row_bg = row.selected.then_some(SETTINGS_ROW_ACTIVE);
+    let mut used = marker.len() + label.len() + 2 + value.len();
+    let mut spans = vec![
+        Span::styled(marker.to_string(), row_style(Color::Yellow, row_bg, false)),
+        Span::styled(label, row_style(SETTINGS_TEXT, row_bg, row.selected)),
+        Span::styled("  ", row_style(SETTINGS_TEXT, row_bg, false)),
+        Span::styled(value, settings_value_style(row)),
+    ];
+
+    if !hint.is_empty() {
+        used += 2 + hint.len();
+        spans.push(Span::styled("  ", row_style(SETTINGS_TEXT, row_bg, false)));
+        spans.push(Span::styled(hint, row_style(SETTINGS_MUTED, row_bg, false)));
+    }
+
+    if used < width {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            row_style(SETTINGS_TEXT, row_bg, false),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+fn settings_command_bar(width: u16) -> Line<'static> {
+    if width < 50 {
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Arrows"),
+            Span::styled(" adjust  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" close", Style::default().fg(Color::Gray)),
+        ]);
+    }
+
+    if width < 58 {
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Up/Down"),
+            Span::styled(" move  ", Style::default().fg(Color::Gray)),
+            command_key("Left/Right"),
+            Span::styled(" adjust  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" close", Style::default().fg(Color::Gray)),
+        ]);
+    }
+
+    Line::from(vec![
+        Span::raw("  "),
+        command_key("Up/Down"),
+        Span::styled(" move  ", Style::default().fg(Color::Gray)),
+        command_key("Enter/Space"),
+        Span::styled(" toggle  ", Style::default().fg(Color::Gray)),
+        command_key("Left/Right"),
+        Span::styled(" adjust  ", Style::default().fg(Color::Gray)),
+        command_key("Esc"),
+        Span::styled(" close", Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn command_key(label: &'static str) -> Span<'static> {
+    Span::styled(
+        format!(" {label} "),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+fn settings_value_label(row: &SettingsRow) -> String {
+    match row.value.as_str() {
+        "on" | "off" => format!("[ {} ]", row.value),
+        "cyan" | "yellow" | "green" | "magenta" => format!("< {} >", row.value),
+        _ => format!("- {} +", row.value),
+    }
+}
+
+fn settings_value_style(row: &SettingsRow) -> Style {
+    let mut style = match row.value.as_str() {
+        "on" => Style::default()
+            .fg(Color::Black)
+            .bg(SETTINGS_BORDER)
+            .add_modifier(Modifier::BOLD),
+        "off" => Style::default().fg(SETTINGS_MUTED).bg(SETTINGS_SURFACE),
+        "cyan" => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        "yellow" => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        "green" => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+        "magenta" => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+        _ if row.selected => Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+        _ => Style::default()
+            .fg(Color::LightCyan)
+            .bg(SETTINGS_SURFACE)
+            .add_modifier(Modifier::BOLD),
+    };
+
+    if row.selected && matches!(row.value.as_str(), "off") {
+        style = style.fg(Color::White);
+    }
+
+    style
+}
+
+fn row_style(fg: Color, bg: Option<Color>, bold: bool) -> Style {
+    let style = if let Some(bg) = bg {
+        Style::default().fg(fg).bg(bg)
+    } else {
+        Style::default().fg(fg)
+    };
+
+    if bold {
+        style.add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+fn settings_panel_style() -> Style {
+    Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)
+}
+
 fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
-    let vertical = ratatui::layout::Layout::default()
+    let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage((100 - percent_y) / 2),
@@ -254,7 +587,7 @@ fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
             Constraint::Percentage((100 - percent_y) / 2),
         ])
         .split(area);
-    let horizontal = ratatui::layout::Layout::default()
+    let horizontal = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Percentage((100 - percent_x) / 2),
@@ -263,6 +596,66 @@ fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
         ])
         .split(vertical[1]);
     horizontal[1]
+}
+
+fn settings_modal_rect(area: Rect, row_count: usize) -> Rect {
+    let width = area.width.saturating_sub(4).min(88).max(area.width.min(1));
+    let desired_height = (row_count as u16).saturating_add(14).max(21);
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(desired_height)
+        .max(area.height.min(1));
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn settings_shadow_rect(area: Rect, modal: Rect) -> Rect {
+    let offset_x = if modal.x.saturating_add(modal.width).saturating_add(2)
+        <= area.x.saturating_add(area.width)
+    {
+        2
+    } else {
+        0
+    };
+    let offset_y = if modal.y.saturating_add(modal.height).saturating_add(1)
+        <= area.y.saturating_add(area.height)
+    {
+        1
+    } else {
+        0
+    };
+
+    Rect {
+        x: modal.x.saturating_add(offset_x),
+        y: modal.y.saturating_add(offset_y),
+        width: modal.width,
+        height: modal.height,
+    }
+}
+
+fn fixed_width(text: &str, width: usize) -> String {
+    let text = truncate_text(text, width);
+    format!("{text:<width$}")
+}
+
+fn truncate_text(text: &str, width: usize) -> String {
+    if text.len() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    format!("{}...", &text[..width - 3])
 }
 
 fn folder_label(cwd: &Path) -> String {
@@ -298,26 +691,32 @@ fn render_sleeping_screen(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Paragraph::new(lines).style(style), area);
 }
 
-fn render_screen(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen) {
+fn render_screen(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    screen: &vt100::Screen,
+    selection: Option<PaneSelection>,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
     let lines = (0..area.height)
-        .map(|row| render_screen_row(screen, row, area.width))
+        .map(|row| render_screen_row(screen, row, area.width, selection))
         .collect::<Vec<_>>();
 
     frame.render_widget(
-        Paragraph::new(lines).style(
-            Style::default()
-                .fg(Color::Rgb(230, 237, 243))
-                .bg(Color::Rgb(11, 15, 20)),
-        ),
+        Paragraph::new(lines).style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
         area,
     );
 }
 
-fn render_screen_row<'a>(screen: &vt100::Screen, row: u16, width: u16) -> Line<'a> {
+fn render_screen_row<'a>(
+    screen: &vt100::Screen,
+    row: u16,
+    width: u16,
+    selection: Option<PaneSelection>,
+) -> Line<'a> {
     let mut spans = Vec::new();
     let mut current_style: Option<Style> = None;
     let mut current_text = String::new();
@@ -328,7 +727,7 @@ fn render_screen_row<'a>(screen: &vt100::Screen, row: u16, width: u16) -> Line<'
                 &mut spans,
                 &mut current_style,
                 &mut current_text,
-                Style::default(),
+                selection_style(Style::default(), selection, row, column),
                 " ",
             );
             continue;
@@ -347,7 +746,7 @@ fn render_screen_row<'a>(screen: &vt100::Screen, row: u16, width: u16) -> Line<'
             &mut spans,
             &mut current_style,
             &mut current_text,
-            cell_style(cell),
+            selection_style(cell_style(cell), selection, row, column),
             text,
         );
     }
@@ -410,6 +809,17 @@ fn cell_style(cell: &Cell) -> Style {
     }
 
     style
+}
+
+fn selection_style(style: Style, selection: Option<PaneSelection>, row: u16, column: u16) -> Style {
+    if selection.is_some_and(|selection| selection.contains(row, column)) {
+        style
+            .fg(Color::Black)
+            .bg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
 }
 
 fn vt_color(color: vt100::Color, default: Color) -> Color {
@@ -497,6 +907,22 @@ mod tests {
         assert_eq!(
             pane_chrome(false, false, true, false, true).badge,
             " asleep"
+        );
+    }
+
+    #[test]
+    fn pane_title_uses_custom_label_in_number_slot() {
+        assert_eq!(
+            pane_title("api", "gridbash/", Some("feat/rename-panes"), None, ""),
+            " api | gridbash/ | feat/rename-panes "
+        );
+        assert_eq!(
+            pane_title("1", "gridbash/", None, None, " selected"),
+            " 1 | gridbash/ selected "
+        );
+        assert_eq!(
+            pane_title("2", "gridbash/", None, Some("5h 80% left"), " selected"),
+            " 2 | gridbash/ | 5h 80% left selected "
         );
     }
 }

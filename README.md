@@ -22,12 +22,21 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Real PTY-backed panes through Windows ConPTY via `portable-pty`.
 - Up to 100 panes in one terminal process.
 - Configurable default terminal profile: Git Bash, PowerShell, cmd, agents, or custom.
-- Native host-terminal text selection, with temporary mouse capture only while sleeping panes need hover wake.
+- Pane-contained drag selection that copies selected terminal text without crossing into sibling panes.
+- Sleeping panes stay visually hidden until hovered, then wake without crossing input into other panes.
 - Normal terminal keys pass through to the focused pane, or to selected panes when multiple panes are selected.
-- Modeless Alt shortcuts for pane focus, selection, settings, and quit.
+- Modeless Alt shortcuts for pane focus, selection, rename, settings, and quit.
 - Compact dark theme with focus, selection, activity, exit, and output-volume badges.
+- Claude, Codex, and other agent panes show a compact conversation summary in the footer line.
 - Built-in launch profiles for common CLI coding agents.
 - Startup dimension picker with a live grid preview.
+- Optional managed git worktrees so every pane can work in an isolated checkout.
+
+## Demo
+
+Watch the OpenVid-style demo: [`docs/assets/gridbash-openvid-demo.mp4`](docs/assets/gridbash-openvid-demo.mp4).
+
+The source scene and OpenVid recreation recipe are in [`docs/demo/openvid-gridbash-demo.md`](docs/demo/openvid-gridbash-demo.md).
 
 ## Install With npm
 
@@ -129,6 +138,16 @@ gridbash 3x4 --profile codex --cwd C:\Users\Jason\Documents\GitHub\fluent
 
 Passing grid, count, profile, or cwd arguments bypasses the startup picker and uses the direct launch path.
 
+Launch every pane in a separate repo-local git worktree:
+
+```powershell
+gridbash 2x3 --profile codex --worktrees
+```
+
+With `--worktrees`, GridBash creates or reuses `.worktrees/gridbash-<base>-NN` folders and `gridbash/<base>-pane-NN` branches. Panes keep the same relative folder as the directory where you launched GridBash, so starting from `repo\app` opens each terminal in the matching `app` folder inside its managed worktree. GridBash refuses this mode outside a git repo or when tracked changes are present in the base checkout.
+
+You can also run `gridbash --worktrees` and choose the grid dimensions in the startup picker.
+
 ## Startup Picker Controls
 
 | Input | Action |
@@ -142,21 +161,26 @@ Passing grid, count, profile, or cwd arguments bypasses the startup picker and u
 
 ## Controls
 
-GridBash normally leaves mouse selection and copy behavior owned by your host terminal. When one or more panes are asleep, it temporarily captures mouse motion so hovering a sleeping pane can wake it, then releases mouse capture after the last sleeping pane wakes.
+GridBash captures drag selection so selected text stays inside the pane where the drag started. Releasing the drag sends the selected terminal text to the host clipboard through the standard OSC 52 terminal clipboard sequence. App controls use Alt shortcuts and do not require switching modes.
 
 | Input | Action |
 | --- | --- |
-| Drag mouse | Select/copy terminal text in the host terminal |
+| Drag mouse | Select/copy terminal text within the source pane |
 | Alt+Left / Alt+Right | Focus previous / next pane |
 | Alt+Up / Alt+Down | Focus pane above / below |
+| Alt+Shift+Up / Alt+Shift+Down | Remove / add a row when safe |
+| Alt+Shift+Left / Alt+Shift+Right | Remove / add a column when safe |
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
+| Alt+r | Rename the focused pane |
 | Alt+z | Put the focused pane to sleep; when multiple panes are selected, sleep the selected panes |
 | Hover sleeping pane | Wake the pane and make its terminal contents visible again |
 | Alt+o | Open sample settings |
 | Alt+q | Quit |
 
 Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane.
+
+Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
 
 The settings screen is currently a sample UI. Its switches, steppers, and choices can be changed, but they do not affect runtime behavior yet.
 

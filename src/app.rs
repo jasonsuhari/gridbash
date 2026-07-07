@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
-    io::{self, Stdout},
+    io::{self, Stdout, Write},
     sync::mpsc as std_mpsc,
     time::{Duration, Instant},
 };
@@ -10,13 +10,15 @@ use anyhow::{Context, Result, anyhow};
 use crossterm::{
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use tokio::sync::mpsc;
+use vt100::Screen;
 
 use crate::{
     cli::{Cli, GridMode},
@@ -28,24 +30,33 @@ use crate::{
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
     usage::{self, UsageEvent, UsageTarget},
+    worktrees::ManagedWorktreeOptions,
 };
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const MAX_PANE_NAME_CHARS: usize = 32;
+const CONVERSATION_SUMMARY_MAX_CHARS: usize = 120;
 
 pub struct App {
     config: Config,
+    worktrees: Option<ManagedWorktreeOptions>,
     launch_plan: Option<LaunchPlan>,
     layout: GridLayout,
     grid_area: Rect,
     panes: Vec<PtyPane>,
     focus: usize,
     selected: BTreeSet<usize>,
+    pane_names: Vec<Option<String>>,
+    text_selection: Option<MouseSelection>,
     sleeping: BTreeSet<usize>,
     rects: Vec<Rect>,
+    mouse_enabled: bool,
     settings: SettingsState,
+    rename: RenamePaneState,
     status: String,
+    next_pane_id: usize,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
     usage_tx: std_mpsc::Sender<UsageEvent>,
@@ -63,6 +74,79 @@ enum KeyOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CellPoint {
+    row: u16,
+    column: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PaneCell {
+    pane: usize,
+    point: CellPoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MouseSelection {
+    pane: usize,
+    anchor: CellPoint,
+    cursor: CellPoint,
+    active: bool,
+    moved: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneSelection {
+    pub start_row: u16,
+    pub start_column: u16,
+    pub end_row: u16,
+    pub end_column: u16,
+}
+
+impl MouseSelection {
+    fn range(self) -> PaneSelection {
+        let (start, end) =
+            if (self.anchor.row, self.anchor.column) <= (self.cursor.row, self.cursor.column) {
+                (self.anchor, self.cursor)
+            } else {
+                (self.cursor, self.anchor)
+            };
+
+        PaneSelection {
+            start_row: start.row,
+            start_column: start.column,
+            end_row: end.row,
+            end_column: end.column,
+        }
+    }
+}
+
+impl PaneSelection {
+    pub fn contains(self, row: u16, column: u16) -> bool {
+        if row < self.start_row || row > self.end_row {
+            return false;
+        }
+
+        if self.start_row == self.end_row {
+            return column >= self.start_column && column <= self.end_column;
+        }
+
+        if row == self.start_row {
+            return column >= self.start_column;
+        }
+        if row == self.end_row {
+            return column <= self.end_column;
+        }
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridAxis {
+    Rows,
+    Columns,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SwapSelection {
     NeedsMore,
     TooMany,
@@ -75,6 +159,93 @@ pub struct SettingsRow {
     pub label: &'static str,
     pub value: String,
     pub hint: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenamePaneView {
+    pub pane_index: usize,
+    pub pane_label: String,
+    pub value: String,
+    pub cursor: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RenamePaneState {
+    open: bool,
+    pane_index: usize,
+    value: String,
+    cursor: usize,
+}
+
+impl RenamePaneState {
+    fn begin(&mut self, pane_index: usize, current_name: Option<&str>) {
+        self.open = true;
+        self.pane_index = pane_index;
+        self.value = current_name.unwrap_or_default().to_string();
+        self.cursor = self.value.chars().count();
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.value.clear();
+        self.cursor = 0;
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        let count = self.value.chars().count() as isize;
+        self.cursor = (self.cursor as isize + delta).clamp(0, count) as usize;
+    }
+
+    fn move_to_start(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_to_end(&mut self) {
+        self.cursor = self.value.chars().count();
+    }
+
+    fn clear(&mut self) {
+        self.value.clear();
+        self.cursor = 0;
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        if ch.is_control() || self.value.chars().count() >= MAX_PANE_NAME_CHARS {
+            return;
+        }
+
+        let index = char_to_byte_index(&self.value, self.cursor);
+        self.value.insert(index, ch);
+        self.cursor += 1;
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.insert_char(ch);
+        }
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+
+        let start = char_to_byte_index(&self.value, self.cursor - 1);
+        let end = char_to_byte_index(&self.value, self.cursor);
+        self.value.replace_range(start..end, "");
+        self.cursor -= 1;
+    }
+
+    fn delete(&mut self) {
+        let count = self.value.chars().count();
+        if self.cursor >= count {
+            return;
+        }
+
+        let start = char_to_byte_index(&self.value, self.cursor);
+        let end = char_to_byte_index(&self.value, self.cursor + 1);
+        self.value.replace_range(start..end, "");
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -160,43 +331,43 @@ impl SettingsState {
                 0,
                 "Compact pane titles",
                 switch_value(self.compact_titles),
-                "sample switch",
+                "shorter labels in pane chrome",
             ),
             self.row(
                 1,
                 "Activity badges",
                 switch_value(self.activity_badges),
-                "sample switch",
+                "show live and selected state",
             ),
             self.row(
                 2,
                 "Confirm before quit",
                 switch_value(self.confirm_quit),
-                "sample switch",
+                "extra guard for Alt+q",
             ),
             self.row(
                 3,
                 "Pane density",
                 self.pane_density.to_string(),
-                "-/+ sample stepper",
+                "spacing scale from 1 to 5",
             ),
             self.row(
                 4,
                 "Scrollback rows",
                 self.scrollback.to_string(),
-                "-/+ sample stepper",
+                "history budget per pane",
             ),
             self.row(
                 5,
                 "Refresh delay",
                 format!("{} ms", self.refresh_ms),
-                "-/+ sample stepper",
+                "render loop throttle",
             ),
             self.row(
                 6,
                 "Accent color",
                 Self::ACCENTS[self.accent_index].to_string(),
-                "sample choice",
+                "cycle the UI highlight",
             ),
         ]
     }
@@ -223,7 +394,12 @@ fn switch_value(enabled: bool) -> String {
 
 impl App {
     pub fn new(cli: Cli, config: Config) -> Result<Self> {
-        let launch_plan = resolve_direct_launch_plan(&cli, &config)?;
+        let worktrees = cli
+            .worktrees
+            .then(|| ManagedWorktreeOptions::new(cli.worktree_prefix.clone()))
+            .transpose()?;
+        let launch_plan = resolve_direct_launch_plan(&cli, &config, worktrees.as_ref())?;
+        let mouse_enabled = !cli.no_mouse;
         let grid = launch_plan
             .as_ref()
             .map(|plan| plan.grid)
@@ -236,17 +412,28 @@ impl App {
 
         Ok(Self {
             config,
+            worktrees,
             launch_plan,
             layout: GridLayout::new(grid),
             grid_area: Rect::default(),
             panes: Vec::new(),
             focus: 0,
             selected: BTreeSet::new(),
+            pane_names: Vec::new(),
+            text_selection: None,
             sleeping: BTreeSet::new(),
             rects: Vec::new(),
+            mouse_enabled,
             settings: SettingsState::default(),
-            status: "Alt+arrows move | Alt+s select | Alt+x swap | Alt+z sleep | Alt+o settings"
-                .into(),
+            rename: RenamePaneState::default(),
+            status: if mouse_enabled {
+                "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
+                    .into()
+            } else {
+                "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
+                    .into()
+            },
+            next_pane_id: 0,
             event_tx,
             event_rx,
             usage_tx,
@@ -258,16 +445,16 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        let mut terminal = setup_terminal()?;
+        let mut terminal = setup_terminal(self.mouse_enabled)?;
         let result = self.run_in_terminal(&mut terminal);
-        teardown_terminal(&mut terminal)?;
+        teardown_terminal(&mut terminal, self.mouse_enabled)?;
         result
     }
 
     fn run_in_terminal(&mut self, terminal: &mut Tui) -> Result<()> {
         if self.launch_plan.is_none() {
             let current_dir = resolved_current_dir()?;
-            let mut composer = Composer::new(current_dir);
+            let mut composer = Composer::new(current_dir, self.worktrees.clone());
             let Some(plan) = composer.run(terminal, &self.config)? else {
                 return Ok(());
             };
@@ -291,10 +478,13 @@ impl App {
             .ok_or_else(|| anyhow!("no launch plan selected"))?;
         self.layout = GridLayout::new(plan.grid);
         self.panes.clear();
+        self.pane_names = vec![None; plan.panes.len()];
+        self.text_selection = None;
         self.sleeping.clear();
+        self.next_pane_id = 0;
 
-        for (index, spec) in plan.panes.iter().enumerate() {
-            self.spawn_pane_spec(index, spec, 0)?;
+        for spec in &plan.panes {
+            self.spawn_pane_spec(spec)?;
         }
         self.start_usage_monitor(&plan);
 
@@ -316,16 +506,13 @@ impl App {
         usage::spawn_usage_monitor(targets, self.usage_tx.clone());
     }
 
-    fn spawn_pane_spec(
-        &mut self,
-        index: usize,
-        spec: &PaneLaunchSpec,
-        generation: u64,
-    ) -> Result<()> {
+    fn spawn_pane_spec(&mut self, spec: &PaneLaunchSpec) -> Result<()> {
         let launch = spec.resolved_command()?;
+        let id = PaneId(self.next_pane_id);
+        self.next_pane_id += 1;
         let pane = PtyPane::spawn(
-            PaneId(index),
-            generation,
+            id,
+            0,
             &launch.command,
             &launch.args,
             &spec.cwd,
@@ -337,7 +524,7 @@ impl App {
 
     fn run_loop(&mut self, terminal: &mut Tui) -> Result<()> {
         let mut needs_render = true;
-        let mut mouse_capture_enabled = false;
+        let mut mouse_capture_enabled = self.mouse_enabled;
 
         loop {
             needs_render |= self.drain_pty_events();
@@ -365,11 +552,18 @@ impl App {
                         }
                     }
                     Event::Resize(_, _) => needs_render = true,
-                    Event::Mouse(mouse) if !self.settings.open => {
-                        needs_render |= self.handle_mouse(mouse);
+                    Event::Paste(text) if self.rename.open => {
+                        self.rename.insert_text(&text);
+                        needs_render = true;
                     }
                     Event::Paste(text) if !self.settings.open => {
                         self.route_input(text.as_bytes())?;
+                    }
+                    Event::Mouse(mouse)
+                        if (self.mouse_enabled || !self.sleeping.is_empty())
+                            && !self.settings.open =>
+                    {
+                        needs_render |= self.handle_mouse(mouse, terminal)?;
                     }
                     _ => {}
                 }
@@ -384,7 +578,7 @@ impl App {
     }
 
     fn sync_mouse_capture(&self, terminal: &mut Tui, enabled: &mut bool) -> Result<()> {
-        let should_enable = !self.sleeping.is_empty();
+        let should_enable = self.mouse_enabled || !self.sleeping.is_empty();
         if should_enable == *enabled {
             return Ok(());
         }
@@ -479,8 +673,15 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if self.rename.open {
+            return self.handle_rename_key(key);
+        }
+
+        let selection_cleared = self.clear_text_selection();
+
         if self.settings.open {
-            return self.handle_settings_key(key);
+            let outcome = self.handle_settings_key(key)?;
+            return Ok(render_if_selection_cleared(outcome, selection_cleared));
         }
 
         if key.modifiers.contains(KeyModifiers::ALT)
@@ -496,12 +697,32 @@ impl App {
         if let Some(bytes) = terminal_key_bytes(key) {
             self.route_input(&bytes)?;
         }
-        Ok(KeyOutcome::Continue)
+        Ok(if selection_cleared {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        })
     }
 
     fn handle_app_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
         match key.code {
-            KeyCode::Char(ch) => self.handle_alt_char(ch),
+            KeyCode::Char(ch) => self.handle_alt_char(ch, key.modifiers),
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.adjust_grid(GridAxis::Columns, -1)?;
+                Ok(Some(false))
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.adjust_grid(GridAxis::Columns, 1)?;
+                Ok(Some(false))
+            }
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.adjust_grid(GridAxis::Rows, -1)?;
+                Ok(Some(false))
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.adjust_grid(GridAxis::Rows, 1)?;
+                Ok(Some(false))
+            }
             KeyCode::Left => {
                 self.focus_previous();
                 self.status = format!("focused pane {}", self.focus + 1);
@@ -526,7 +747,7 @@ impl App {
         }
     }
 
-    fn handle_alt_char(&mut self, ch: char) -> Result<Option<bool>> {
+    fn handle_alt_char(&mut self, ch: char, _modifiers: KeyModifiers) -> Result<Option<bool>> {
         let lower = ch.to_ascii_lowercase();
         match lower {
             'q' => Ok(Some(true)),
@@ -557,8 +778,111 @@ impl App {
                 self.status = "settings open".into();
                 Ok(Some(false))
             }
+            'r' => {
+                self.begin_rename();
+                Ok(Some(false))
+            }
             _ => Ok(None),
         }
+    }
+
+    fn begin_rename(&mut self) {
+        if self.panes.is_empty() {
+            self.status = "no panes to rename".into();
+            return;
+        }
+
+        let pane_index = self.focus.min(self.panes.len() - 1);
+        let current_name = self
+            .pane_names
+            .get(pane_index)
+            .and_then(|name| name.clone());
+        self.rename.begin(pane_index, current_name.as_deref());
+        self.status = format!("renaming pane {}", pane_index + 1);
+    }
+
+    fn handle_rename_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return Ok(KeyOutcome::Quit);
+        }
+
+        let changed = match key.code {
+            KeyCode::Esc => {
+                let pane_number = self.rename.pane_index + 1;
+                self.rename.close();
+                self.status = format!("rename canceled for pane {pane_number}");
+                true
+            }
+            KeyCode::Enter => {
+                self.save_rename();
+                true
+            }
+            KeyCode::Backspace => {
+                self.rename.backspace();
+                true
+            }
+            KeyCode::Delete => {
+                self.rename.delete();
+                true
+            }
+            KeyCode::Left => {
+                self.rename.move_cursor(-1);
+                true
+            }
+            KeyCode::Right => {
+                self.rename.move_cursor(1);
+                true
+            }
+            KeyCode::Home => {
+                self.rename.move_to_start();
+                true
+            }
+            KeyCode::End => {
+                self.rename.move_to_end();
+                true
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.rename.clear();
+                true
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.rename.insert_char(ch);
+                true
+            }
+            _ => false,
+        };
+
+        Ok(if changed {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        })
+    }
+
+    fn save_rename(&mut self) {
+        let pane_index = self.rename.pane_index;
+        let name = normalized_pane_name(&self.rename.value);
+        let pane_number = pane_index + 1;
+
+        if let Some(slot) = self.pane_names.get_mut(pane_index) {
+            match name {
+                Some(name) => {
+                    *slot = Some(name.clone());
+                    self.status = format!("renamed pane {pane_number} to {name}");
+                }
+                None => {
+                    *slot = None;
+                    self.status = format!("cleared pane {pane_number} name");
+                }
+            }
+        } else {
+            self.status = format!("pane {pane_number} is no longer available");
+        }
+
+        self.rename.close();
     }
 
     fn swap_selected_tiles(&mut self) {
@@ -580,6 +904,15 @@ impl App {
         }
 
         self.panes.swap(first, second);
+        if first < self.pane_names.len() && second < self.pane_names.len() {
+            self.pane_names.swap(first, second);
+        }
+        if let Some(selection) = self.text_selection {
+            self.text_selection = Some(MouseSelection {
+                pane: swapped_index(selection.pane, first, second),
+                ..selection
+            });
+        }
         if let Some(plan) = self.launch_plan.as_mut()
             && first < plan.panes.len()
             && second < plan.panes.len()
@@ -639,7 +972,7 @@ impl App {
         })
     }
 
-    fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+    fn handle_mouse(&mut self, mouse: MouseEvent, terminal: &mut Tui) -> Result<bool> {
         if !matches!(
             mouse.kind,
             MouseEventKind::Moved
@@ -647,20 +980,298 @@ impl App {
                 | MouseEventKind::Up(_)
                 | MouseEventKind::Drag(_)
         ) {
+            return Ok(false);
+        }
+
+        if let Some(index) = pane_at(&self.rects, mouse.column, mouse.row)
+            && self.sleeping.remove(&index)
+        {
+            self.focus = index;
+            self.status = format!("woke pane {}", index + 1);
+            return Ok(true);
+        }
+
+        if !self.mouse_enabled {
+            return Ok(false);
+        }
+
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(cell) = self.pane_cell_at(mouse.column, mouse.row) {
+                    self.focus = cell.pane;
+                    self.text_selection = Some(MouseSelection {
+                        pane: cell.pane,
+                        anchor: cell.point,
+                        cursor: cell.point,
+                        active: true,
+                        moved: false,
+                    });
+                    self.status = format!("selecting text in pane {}", cell.pane + 1);
+                    return Ok(true);
+                }
+
+                if let Some(index) = pane_at(&self.rects, mouse.column, mouse.row) {
+                    let changed = self.focus != index || self.clear_text_selection();
+                    self.focus = index;
+                    self.status = format!("focused pane {}", index + 1);
+                    return Ok(changed);
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.update_text_selection(mouse.column, mouse.row) {
+                    return Ok(true);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                return self.finish_text_selection(mouse.column, mouse.row, terminal);
+            }
+            _ => {}
+        }
+
+        Ok(false)
+    }
+
+    fn pane_cell_at(&self, x: u16, y: u16) -> Option<PaneCell> {
+        let pane = pane_at(&self.rects, x, y)?;
+        let rect = self.rects.get(pane).copied()?;
+        let inner = pane_inner_rect(rect)?;
+
+        if x < inner.x
+            || x >= inner.x.saturating_add(inner.width)
+            || y < inner.y
+            || y >= inner.y.saturating_add(inner.height)
+        {
+            return None;
+        }
+
+        Some(PaneCell {
+            pane,
+            point: CellPoint {
+                row: y.saturating_sub(inner.y),
+                column: x.saturating_sub(inner.x),
+            },
+        })
+    }
+
+    fn clamped_pane_cell(&self, pane: usize, x: u16, y: u16) -> Option<CellPoint> {
+        let rect = self.rects.get(pane).copied()?;
+        let inner = pane_inner_rect(rect)?;
+        let max_x = inner.x.saturating_add(inner.width.saturating_sub(1));
+        let max_y = inner.y.saturating_add(inner.height.saturating_sub(1));
+
+        Some(CellPoint {
+            row: y.clamp(inner.y, max_y).saturating_sub(inner.y),
+            column: x.clamp(inner.x, max_x).saturating_sub(inner.x),
+        })
+    }
+
+    fn update_text_selection(&mut self, x: u16, y: u16) -> bool {
+        let Some(selection) = self.text_selection else {
+            return false;
+        };
+        if !selection.active {
             return false;
         }
 
-        let Some(index) = pane_at(&self.rects, mouse.column, mouse.row) else {
+        let Some(cursor) = self.clamped_pane_cell(selection.pane, x, y) else {
             return false;
         };
 
-        if self.sleeping.remove(&index) {
-            self.focus = index;
-            self.status = format!("woke pane {}", index + 1);
-            return true;
+        self.text_selection = Some(MouseSelection {
+            cursor,
+            moved: true,
+            ..selection
+        });
+        true
+    }
+
+    fn finish_text_selection(&mut self, x: u16, y: u16, terminal: &mut Tui) -> Result<bool> {
+        let Some(selection) = self.text_selection else {
+            return Ok(false);
+        };
+        if !selection.active {
+            return Ok(false);
         }
 
-        false
+        let cursor = self
+            .clamped_pane_cell(selection.pane, x, y)
+            .unwrap_or(selection.cursor);
+        let selection = MouseSelection {
+            cursor,
+            active: false,
+            ..selection
+        };
+        if !selection.moved {
+            self.text_selection = None;
+            self.status = format!("focused pane {}", selection.pane + 1);
+            return Ok(true);
+        }
+
+        self.text_selection = Some(selection);
+
+        let text = self.selected_text(selection);
+        if text.is_empty() {
+            self.status = format!("selection empty in pane {}", selection.pane + 1);
+        } else {
+            copy_to_clipboard(terminal, &text)?;
+            self.status = format!(
+                "copied {} chars from pane {}",
+                text.chars().count(),
+                selection.pane + 1
+            );
+        }
+
+        Ok(true)
+    }
+
+    fn selected_text(&self, selection: MouseSelection) -> String {
+        let Some(pane) = self.panes.get(selection.pane) else {
+            return String::new();
+        };
+        let width = self
+            .rects
+            .get(selection.pane)
+            .and_then(|rect| pane_inner_rect(*rect))
+            .map(|inner| inner.width)
+            .unwrap_or(0);
+
+        extract_selection_text(pane.screen(), selection.range(), width)
+    }
+
+    fn clear_text_selection(&mut self) -> bool {
+        self.text_selection.take().is_some()
+    }
+
+    fn adjust_grid(&mut self, axis: GridAxis, delta: isize) -> Result<()> {
+        let current = self.layout.size();
+        let Some(rows) =
+            adjust_dimension(current.rows, if axis == GridAxis::Rows { delta } else { 0 })
+        else {
+            self.status = "grid is capped at 100 cells".into();
+            return Ok(());
+        };
+        let Some(columns) = adjust_dimension(
+            current.columns,
+            if axis == GridAxis::Columns { delta } else { 0 },
+        ) else {
+            self.status = "grid is capped at 100 cells".into();
+            return Ok(());
+        };
+        let Some(next) = GridSize::new(rows, columns) else {
+            self.status = invalid_grid_status(rows, columns);
+            return Ok(());
+        };
+
+        if next == current {
+            return Ok(());
+        }
+
+        let before = self.panes.len();
+        if next.count() > self.panes.len() {
+            self.spawn_panes_to_fill(next.count())?;
+        } else if next.count() < self.panes.len() && !self.remove_overflow_panes(next.count(), next)
+        {
+            return Ok(());
+        }
+
+        self.layout.set_size(next);
+        if let Some(plan) = &mut self.launch_plan {
+            plan.grid = next;
+        }
+
+        let added = self.panes.len().saturating_sub(before);
+        let removed = before.saturating_sub(self.panes.len());
+        self.status = if added > 0 {
+            format!(
+                "grid resized to {}x{}; spawned {added} pane(s)",
+                next.rows, next.columns
+            )
+        } else if removed > 0 {
+            format!(
+                "grid resized to {}x{}; removed {removed} exited pane(s)",
+                next.rows, next.columns
+            )
+        } else {
+            format!(
+                "grid resized to {}x{}; {} pane(s)",
+                next.rows,
+                next.columns,
+                self.panes.len()
+            )
+        };
+
+        Ok(())
+    }
+
+    fn spawn_panes_to_fill(&mut self, target_count: usize) -> Result<()> {
+        let specs = self.pane_specs_to_fill(target_count)?;
+        for spec in specs {
+            self.spawn_pane_spec(&spec)?;
+        }
+        self.pane_names.resize(self.panes.len(), None);
+        Ok(())
+    }
+
+    fn pane_specs_to_fill(&mut self, target_count: usize) -> Result<Vec<PaneLaunchSpec>> {
+        let plan = self
+            .launch_plan
+            .as_mut()
+            .ok_or_else(|| anyhow!("no launch plan selected"))?;
+        if plan.panes.is_empty() {
+            return Err(anyhow!("no pane template available"));
+        }
+
+        let templates = plan.panes.clone();
+        while plan.panes.len() < target_count {
+            let spec = templates[plan.panes.len() % templates.len()].clone();
+            plan.panes.push(spec);
+        }
+
+        Ok(plan.panes[self.panes.len()..target_count].to_vec())
+    }
+
+    fn remove_overflow_panes(&mut self, target_count: usize, next: GridSize) -> bool {
+        let running = self
+            .panes
+            .iter()
+            .skip(target_count)
+            .filter(|pane| !pane.exited)
+            .count();
+        if running > 0 {
+            self.status = format!(
+                "cannot shrink to {}x{}; {running} running pane(s) would be removed",
+                next.rows, next.columns
+            );
+            return false;
+        }
+
+        self.panes.truncate(target_count);
+        if let Some(plan) = &mut self.launch_plan {
+            plan.panes.truncate(target_count);
+        }
+        self.selected = self
+            .selected
+            .iter()
+            .copied()
+            .filter(|index| *index < target_count)
+            .collect();
+        if self.focus >= target_count {
+            self.focus = target_count.saturating_sub(1);
+        }
+        self.pane_names.truncate(target_count);
+        self.sleeping = self
+            .sleeping
+            .iter()
+            .copied()
+            .filter(|index| *index < target_count)
+            .collect();
+        if self
+            .text_selection
+            .is_some_and(|selection| selection.pane >= target_count)
+        {
+            self.text_selection = None;
+        }
+        true
     }
 
     fn toggle_sleep_for_targets(&mut self) {
@@ -781,6 +1392,12 @@ impl App {
         &self.selected
     }
 
+    pub fn selection_for_pane(&self, index: usize) -> Option<PaneSelection> {
+        self.text_selection
+            .filter(|selection| selection.pane == index)
+            .map(MouseSelection::range)
+    }
+
     pub fn pane_sleeping(&self, index: usize) -> bool {
         self.sleeping.contains(&index)
     }
@@ -797,6 +1414,24 @@ impl App {
         self.settings.rows()
     }
 
+    pub fn pane_label(&self, index: usize) -> String {
+        self.pane_names
+            .get(index)
+            .and_then(|name| name.as_deref())
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| (index + 1).to_string())
+    }
+
+    pub fn rename_pane_view(&self) -> Option<RenamePaneView> {
+        self.rename.open.then(|| RenamePaneView {
+            pane_index: self.rename.pane_index,
+            pane_label: self.pane_label(self.rename.pane_index),
+            value: self.rename.value.clone(),
+            cursor: self.rename.cursor,
+        })
+    }
+
     pub fn pane_folder(&self, index: usize) -> Option<&str> {
         self.launch_plan
             .as_ref()
@@ -809,6 +1444,18 @@ impl App {
             .as_ref()
             .and_then(|plan| plan.panes.get(index))
             .and_then(|pane| pane.worktree_name.as_deref())
+    }
+
+    pub fn pane_conversation_footer(&self, index: usize, max_chars: usize) -> Option<String> {
+        let label = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .and_then(|pane| pane.agent_label())?;
+        let pane = self.panes.get(index)?;
+        let summary = conversation_summary(pane.screen())
+            .unwrap_or_else(|| "waiting for conversation".into());
+        Some(truncate_chars(&format!("{label} | {summary}"), max_chars))
     }
 
     pub fn pane_usage_label(&self, index: usize) -> Option<String> {
@@ -873,7 +1520,11 @@ fn resolve_grid(cli: &Cli) -> Result<GridSize> {
     })
 }
 
-fn resolve_direct_launch_plan(cli: &Cli, config: &Config) -> Result<Option<LaunchPlan>> {
+fn resolve_direct_launch_plan(
+    cli: &Cli,
+    config: &Config,
+    worktrees: Option<&ManagedWorktreeOptions>,
+) -> Result<Option<LaunchPlan>> {
     if !uses_direct_launch(cli) {
         return Ok(None);
     }
@@ -888,13 +1539,14 @@ fn resolve_direct_launch_plan(cli: &Cli, config: &Config) -> Result<Option<Launc
     let cwd = cwd.canonicalize().unwrap_or(cwd);
     let pane_count = cli.count.unwrap_or_else(|| grid.count()).clamp(1, 100);
 
-    Ok(Some(LaunchPlan::legacy(
+    Ok(Some(LaunchPlan::from_launch_options(
         profile_name,
         profile,
         cwd,
         pane_count,
         grid,
-    )))
+        worktrees,
+    )?))
 }
 
 fn uses_direct_launch(cli: &Cli) -> bool {
@@ -968,6 +1620,148 @@ fn input_targets_for(focus: usize, selected: &BTreeSet<usize>, pane_count: usize
         selected.iter().copied().collect()
     } else {
         vec![focus.min(pane_count - 1)]
+    }
+}
+
+fn normalized_pane_name(value: &str) -> Option<String> {
+    let name = value
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(MAX_PANE_NAME_CHARS)
+        .collect::<String>()
+        .trim()
+        .to_string();
+
+    (!name.is_empty()).then_some(name)
+}
+
+fn char_to_byte_index(value: &str, cursor: usize) -> usize {
+    value
+        .char_indices()
+        .nth(cursor)
+        .map(|(index, _)| index)
+        .unwrap_or(value.len())
+}
+
+fn render_if_selection_cleared(outcome: KeyOutcome, selection_cleared: bool) -> KeyOutcome {
+    match outcome {
+        KeyOutcome::Continue if selection_cleared => KeyOutcome::Render,
+        _ => outcome,
+    }
+}
+
+fn pane_inner_rect(rect: Rect) -> Option<Rect> {
+    let width = rect.width.checked_sub(2)?;
+    let height = rect.height.checked_sub(2)?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    Some(Rect {
+        x: rect.x.saturating_add(1),
+        y: rect.y.saturating_add(1),
+        width,
+        height,
+    })
+}
+
+fn extract_selection_text(screen: &vt100::Screen, selection: PaneSelection, width: u16) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let last_column = width.saturating_sub(1);
+    let mut lines = Vec::new();
+    for row in selection.start_row..=selection.end_row {
+        let start_column = if row == selection.start_row {
+            selection.start_column.min(last_column)
+        } else {
+            0
+        };
+        let end_column = if row == selection.end_row {
+            selection.end_column.min(last_column)
+        } else {
+            last_column
+        };
+
+        let mut line = String::new();
+        for column in start_column..=end_column {
+            let Some(cell) = screen.cell(row, column) else {
+                line.push(' ');
+                continue;
+            };
+
+            if cell.is_wide_continuation() {
+                continue;
+            }
+
+            if cell.has_contents() {
+                line.push_str(cell.contents());
+            } else {
+                line.push(' ');
+            }
+        }
+        lines.push(line.trim_end().to_string());
+    }
+
+    lines.join("\n").trim_end().to_string()
+}
+
+fn copy_to_clipboard(terminal: &mut Tui, text: &str) -> Result<()> {
+    write!(
+        terminal.backend_mut(),
+        "\x1b]52;c;{}\x07",
+        base64_encode(text.as_bytes())
+    )
+    .context("failed to send terminal clipboard sequence")?;
+    terminal
+        .backend_mut()
+        .flush()
+        .context("failed to flush terminal clipboard sequence")?;
+    Ok(())
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or(0);
+        let third = chunk.get(2).copied().unwrap_or(0);
+        let value = ((first as u32) << 16) | ((second as u32) << 8) | third as u32;
+
+        output.push(TABLE[((value >> 18) & 0x3f) as usize] as char);
+        output.push(TABLE[((value >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[((value >> 6) & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(value & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+
+    output
+}
+
+fn adjust_dimension(value: usize, delta: isize) -> Option<usize> {
+    if delta < 0 {
+        value.checked_sub((-delta) as usize)
+    } else {
+        value.checked_add(delta as usize)
+    }
+}
+
+fn invalid_grid_status(rows: usize, columns: usize) -> String {
+    if rows == 0 || columns == 0 {
+        "grid needs at least 1 row and 1 column".into()
+    } else {
+        "grid is capped at 100 cells".into()
     }
 }
 
@@ -1121,6 +1915,30 @@ mod tests {
     }
 
     #[test]
+    fn normalized_pane_name_trims_and_clears_empty_names() {
+        assert_eq!(
+            normalized_pane_name("  api server  "),
+            Some("api server".into())
+        );
+        assert_eq!(normalized_pane_name("   "), None);
+    }
+
+    #[test]
+    fn rename_state_edits_at_the_cursor() {
+        let mut rename = RenamePaneState::default();
+        rename.begin(0, Some("abc"));
+        rename.move_cursor(-1);
+        rename.insert_char('X');
+        assert_eq!(rename.value, "abXc");
+
+        rename.backspace();
+        assert_eq!(rename.value, "abc");
+
+        rename.delete();
+        assert_eq!(rename.value, "ab");
+    }
+
+    #[test]
     fn sleeping_panes_do_not_receive_input() {
         assert_eq!(
             awake_input_targets_for(2, &selected(&[]), 4, &selected(&[2])),
@@ -1133,16 +1951,72 @@ mod tests {
     }
 }
 
-fn setup_terminal() -> Result<Tui> {
+fn conversation_summary(screen: &Screen) -> Option<String> {
+    let (_, cols) = screen.size();
+    let mut lines = screen.rows(0, cols).collect::<Vec<_>>();
+    lines.reverse();
+
+    lines
+        .into_iter()
+        .filter_map(|line| normalize_conversation_line(&line))
+        .next()
+}
+
+fn normalize_conversation_line(line: &str) -> Option<String> {
+    let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty()
+        || !trimmed.chars().any(char::is_alphanumeric)
+        || is_low_signal_terminal_line(trimmed)
+    {
+        return None;
+    }
+
+    Some(truncate_chars(trimmed, CONVERSATION_SUMMARY_MAX_CHARS))
+}
+
+fn is_low_signal_terminal_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower == "esc"
+        || lower == "escape"
+        || lower.contains("alt+q quit")
+        || lower.contains("ctrl+c")
+        || lower.contains("press enter")
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() && max_chars > 3 {
+        format!(
+            "{}...",
+            truncated.chars().take(max_chars - 3).collect::<String>()
+        )
+    } else {
+        truncated
+    }
+}
+
+fn setup_terminal(enable_mouse: bool) -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    if enable_mouse {
+        execute!(stdout, EnableMouseCapture)?;
+    }
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend).context("failed to create terminal")
 }
 
-fn teardown_terminal(terminal: &mut Tui) -> Result<()> {
+fn teardown_terminal(terminal: &mut Tui, enable_mouse: bool) -> Result<()> {
     disable_raw_mode()?;
+    if enable_mouse {
+        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    }
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
@@ -1151,4 +2025,113 @@ fn teardown_terminal(terminal: &mut Tui) -> Result<()> {
     )?;
     terminal.show_cursor()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use vt100::Parser;
+
+    #[test]
+    fn pane_selection_contains_single_and_multi_line_ranges() {
+        let single = PaneSelection {
+            start_row: 1,
+            start_column: 2,
+            end_row: 1,
+            end_column: 4,
+        };
+        assert!(!single.contains(1, 1));
+        assert!(single.contains(1, 2));
+        assert!(single.contains(1, 4));
+        assert!(!single.contains(1, 5));
+
+        let multi = PaneSelection {
+            start_row: 1,
+            start_column: 3,
+            end_row: 3,
+            end_column: 2,
+        };
+        assert!(!multi.contains(1, 2));
+        assert!(multi.contains(1, 3));
+        assert!(multi.contains(2, 0));
+        assert!(multi.contains(3, 2));
+        assert!(!multi.contains(3, 3));
+    }
+
+    #[test]
+    fn mouse_selection_normalizes_anchor_and_cursor() {
+        let selection = MouseSelection {
+            pane: 0,
+            anchor: CellPoint { row: 3, column: 4 },
+            cursor: CellPoint { row: 1, column: 2 },
+            active: false,
+            moved: true,
+        };
+
+        assert_eq!(
+            selection.range(),
+            PaneSelection {
+                start_row: 1,
+                start_column: 2,
+                end_row: 3,
+                end_column: 4
+            }
+        );
+    }
+
+    #[test]
+    fn summarizes_last_meaningful_visible_line() {
+        let mut parser = Parser::new(4, 80, 100);
+        parser.process(b"User: add tests\r\n\r\nAssistant: tests are passing\r\n");
+
+        assert_eq!(
+            conversation_summary(parser.screen()).as_deref(),
+            Some("Assistant: tests are passing")
+        );
+    }
+
+    #[test]
+    fn selected_text_uses_only_the_selection_width() {
+        let mut parser = Parser::new(3, 10, 100);
+        parser.process(b"hello\r\nworld");
+
+        let text = extract_selection_text(
+            parser.screen(),
+            PaneSelection {
+                start_row: 0,
+                start_column: 1,
+                end_row: 1,
+                end_column: 3,
+            },
+            10,
+        );
+
+        assert_eq!(text, "ello\nworl");
+    }
+
+    #[test]
+    fn skips_empty_and_control_hint_lines() {
+        let mut parser = Parser::new(4, 80, 100);
+        parser.process(b"Assistant: ready\r\n\r\nAlt+q quit\r\n");
+
+        assert_eq!(
+            conversation_summary(parser.screen()).as_deref(),
+            Some("Assistant: ready")
+        );
+    }
+
+    #[test]
+    fn base64_encoder_handles_padding() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"pane text"), "cGFuZSB0ZXh0");
+    }
+
+    #[test]
+    fn truncates_long_footer_text() {
+        assert_eq!(truncate_chars("abcdef", 4), "a...");
+        assert_eq!(truncate_chars("abc", 4), "abc");
+    }
 }
