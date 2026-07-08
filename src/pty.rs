@@ -18,6 +18,7 @@ const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
 const PRIMARY_DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[c";
 const PRIMARY_DEVICE_ATTRIBUTES_ZERO_QUERY: &[u8] = b"\x1b[0c";
 const MAX_TERMINAL_QUERY_LEN: usize = 4;
+const PTY_READ_BUFFER_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone)]
 pub enum PtyEvent {
@@ -189,9 +190,9 @@ impl PtyPane {
         writer.flush().context("failed to flush PTY")
     }
 
-    pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+    pub fn resize(&mut self, rows: u16, cols: u16) -> Result<bool> {
         if self.rows == rows && self.cols == cols {
-            return Ok(());
+            return Ok(false);
         }
 
         self.parser.screen_mut().set_size(rows, cols);
@@ -205,7 +206,7 @@ impl PtyPane {
             .context("failed to resize PTY")?;
         self.rows = rows;
         self.cols = cols;
-        Ok(())
+        Ok(true)
     }
 
     pub fn poll_exit(&mut self) -> bool {
@@ -275,7 +276,7 @@ fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
 ) {
     thread::spawn(move || {
-        let mut buffer = [0_u8; 8192];
+        let mut buffer = [0_u8; PTY_READ_BUFFER_BYTES];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
