@@ -90,8 +90,8 @@ Milestones intentionally have no due dates.
 - `#3 docs: add release checklist for Windows binary and npm tarball`
 - `#4 test: verify first-run onboarding on clean Windows profile`
 - `#5 feat: improve profile detection diagnostics`
-- `#6 feat: polish saved setup management`
-- `#7 test: add composer preview and folder assignment coverage`
+- `#6 feat: polish startup picker controls`
+- `#7 test: add startup picker preview coverage`
 - `#8 feat: persist settings screen controls`
 - `#9 feat: add in-app help and legend overlay`
 - `#10 docs: define v1.0 acceptance checklist`
