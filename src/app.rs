@@ -17,7 +17,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, style::Color};
 use tokio::sync::mpsc;
 use vt100::Screen;
 
@@ -43,6 +43,8 @@ const TODO_INPUT_LIMIT: usize = 240;
 const MIN_TODO_IDLE_SECONDS: u64 = 15;
 const MAX_TODO_IDLE_SECONDS: u64 = 600;
 const TODO_IDLE_STEP_SECONDS: u64 = 15;
+const ACTIVITY_DECAY_INTERVAL: Duration = Duration::from_millis(250);
+const OUTPUT_QUIET_AFTER: Duration = Duration::from_secs(3);
 
 pub struct App {
     config: Config,
@@ -161,6 +163,175 @@ enum SwapSelection {
     Pair(usize, usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteRole {
+    Accent,
+    Focus,
+    Selected,
+    Quiet,
+    Exited,
+}
+
+impl PaletteRole {
+    const ALL: [Self; 5] = [
+        Self::Accent,
+        Self::Focus,
+        Self::Selected,
+        Self::Quiet,
+        Self::Exited,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Accent => "Accent color",
+            Self::Focus => "Focus border",
+            Self::Selected => "Selected border",
+            Self::Quiet => "Quiet border",
+            Self::Exited => "Exited border",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteColor {
+    Cyan,
+    Sky,
+    Blue,
+    Teal,
+    Green,
+    Yellow,
+    Amber,
+    Orange,
+    Red,
+    Magenta,
+    Gray,
+    White,
+}
+
+impl PaletteColor {
+    const ALL: [Self; 12] = [
+        Self::Cyan,
+        Self::Sky,
+        Self::Blue,
+        Self::Teal,
+        Self::Green,
+        Self::Yellow,
+        Self::Amber,
+        Self::Orange,
+        Self::Red,
+        Self::Magenta,
+        Self::Gray,
+        Self::White,
+    ];
+
+    fn color(self) -> Color {
+        match self {
+            Self::Cyan => Color::Cyan,
+            Self::Sky => Color::Rgb(88, 166, 255),
+            Self::Blue => Color::Blue,
+            Self::Teal => Color::Rgb(54, 211, 153),
+            Self::Green => Color::Green,
+            Self::Yellow => Color::Yellow,
+            Self::Amber => Color::Rgb(245, 158, 11),
+            Self::Orange => Color::Rgb(249, 115, 22),
+            Self::Red => Color::Red,
+            Self::Magenta => Color::Magenta,
+            Self::Gray => Color::Gray,
+            Self::White => Color::White,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cyan => "cyan",
+            Self::Sky => "sky",
+            Self::Blue => "blue",
+            Self::Teal => "teal",
+            Self::Green => "green",
+            Self::Yellow => "yellow",
+            Self::Amber => "amber",
+            Self::Orange => "orange",
+            Self::Red => "red",
+            Self::Magenta => "magenta",
+            Self::Gray => "gray",
+            Self::White => "white",
+        }
+    }
+
+    fn adjust(self, delta: isize) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|color| *color == self)
+            .unwrap_or_default();
+        let next = (index as isize + delta).rem_euclid(Self::ALL.len() as isize) as usize;
+        Self::ALL[next]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridPalette {
+    accent: PaletteColor,
+    focus: PaletteColor,
+    selected: PaletteColor,
+    quiet: PaletteColor,
+    exited: PaletteColor,
+}
+
+impl Default for GridPalette {
+    fn default() -> Self {
+        Self {
+            accent: PaletteColor::Cyan,
+            focus: PaletteColor::Yellow,
+            selected: PaletteColor::Cyan,
+            quiet: PaletteColor::Magenta,
+            exited: PaletteColor::Red,
+        }
+    }
+}
+
+impl GridPalette {
+    pub fn accent(&self) -> Color {
+        self.accent.color()
+    }
+
+    pub fn focus(&self) -> Color {
+        self.focus.color()
+    }
+
+    pub fn selected(&self) -> Color {
+        self.selected.color()
+    }
+
+    pub fn quiet(&self) -> Color {
+        self.quiet.color()
+    }
+
+    pub fn exited(&self) -> Color {
+        self.exited.color()
+    }
+
+    fn color_for(self, role: PaletteRole) -> PaletteColor {
+        match role {
+            PaletteRole::Accent => self.accent,
+            PaletteRole::Focus => self.focus,
+            PaletteRole::Selected => self.selected,
+            PaletteRole::Quiet => self.quiet,
+            PaletteRole::Exited => self.exited,
+        }
+    }
+
+    fn adjust(&mut self, role: PaletteRole, delta: isize) {
+        let target = match role {
+            PaletteRole::Accent => &mut self.accent,
+            PaletteRole::Focus => &mut self.focus,
+            PaletteRole::Selected => &mut self.selected,
+            PaletteRole::Quiet => &mut self.quiet,
+            PaletteRole::Exited => &mut self.exited,
+        };
+        *target = (*target).adjust(delta);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SettingsRow {
     pub selected: bool,
@@ -169,6 +340,7 @@ pub struct SettingsRow {
     pub editing: bool,
     pub label: String,
     pub value: String,
+    pub value_color: Option<Color>,
     pub hint: String,
 }
 
@@ -223,7 +395,7 @@ enum SettingsTarget {
     PaneDensity,
     Scrollback,
     RefreshMs,
-    AccentColor,
+    Palette(PaletteRole),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,7 +518,7 @@ struct SettingsState {
     pane_density: i32,
     scrollback: i32,
     refresh_ms: i32,
-    accent_index: usize,
+    palette: GridPalette,
 }
 
 impl Default for SettingsState {
@@ -364,14 +536,12 @@ impl Default for SettingsState {
             pane_density: 2,
             scrollback: 10_000,
             refresh_ms: 16,
-            accent_index: 0,
+            palette: GridPalette::default(),
         }
     }
 }
 
 impl SettingsState {
-    const ACCENTS: [&'static str; 4] = ["cyan", "yellow", "green", "magenta"];
-
     fn from_config(config: &Config) -> Self {
         Self {
             idle_followups: config.todos.enabled,
@@ -474,10 +644,8 @@ impl SettingsState {
                 self.refresh_ms = (self.refresh_ms + delta * 4).clamp(8, 100);
                 SettingsChange::Render
             }
-            Some(SettingsTarget::AccentColor) => {
-                let count = Self::ACCENTS.len() as isize;
-                self.accent_index =
-                    (self.accent_index as isize + delta as isize).rem_euclid(count) as usize;
+            Some(SettingsTarget::Palette(role)) => {
+                self.palette.adjust(role, delta as isize);
                 SettingsChange::Render
             }
             Some(SettingsTarget::Todo(index)) => {
@@ -603,8 +771,13 @@ impl SettingsState {
             SettingsTarget::PaneDensity,
             SettingsTarget::Scrollback,
             SettingsTarget::RefreshMs,
-            SettingsTarget::AccentColor,
         ]);
+        targets.extend(
+            PaletteRole::ALL
+                .iter()
+                .copied()
+                .map(SettingsTarget::Palette),
+        );
         targets
     }
 
@@ -748,16 +921,28 @@ impl SettingsState {
             format!("{} ms", self.refresh_ms),
             "render loop throttle",
         ));
-        rows.push(self.row(
-            SettingsTarget::AccentColor,
-            SettingsGroup::Theme,
-            SettingsValueKind::Choice,
-            "Accent color",
-            Self::ACCENTS[self.accent_index].to_string(),
-            "cycle the UI highlight",
-        ));
-
+        rows.extend(
+            PaletteRole::ALL
+                .iter()
+                .copied()
+                .map(|role| self.palette_row(role)),
+        );
         rows
+    }
+
+    fn palette_row(&self, role: PaletteRole) -> SettingsRow {
+        let color = self.palette.color_for(role);
+        let target = SettingsTarget::Palette(role);
+        SettingsRow {
+            selected: self.selected_target() == Some(target),
+            group: SettingsGroup::Theme,
+            value_kind: SettingsValueKind::Choice,
+            editing: false,
+            label: role.label().into(),
+            value: color.name().to_string(),
+            value_color: Some(color.color()),
+            hint: "-/+ color".into(),
+        }
     }
 
     fn row(
@@ -776,6 +961,7 @@ impl SettingsState {
             editing: self.is_editing_target(target),
             label: label.into(),
             value,
+            value_color: None,
             hint: hint.into(),
         }
     }
@@ -1105,15 +1291,20 @@ impl App {
     }
 
     fn decay_activity(&mut self) -> bool {
-        if self.last_activity_decay.elapsed() < Duration::from_millis(250) {
+        if self.last_activity_decay.elapsed() < ACTIVITY_DECAY_INTERVAL {
             return false;
         }
 
-        let changed = self.panes.iter().any(|pane| pane.active);
+        let now = Instant::now();
+        let mut changed = false;
         for pane in &mut self.panes {
-            pane.active = false;
+            if pane.active {
+                pane.active = false;
+                changed = true;
+            }
+            changed |= pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER);
         }
-        self.last_activity_decay = Instant::now();
+        self.last_activity_decay = now;
         changed
     }
 
@@ -2105,6 +2296,14 @@ impl App {
         self.settings.rows()
     }
 
+    pub fn activity_badges_enabled(&self) -> bool {
+        self.settings.activity_badges
+    }
+
+    pub fn palette(&self) -> &GridPalette {
+        &self.settings.palette
+    }
+
     pub fn pane_label(&self, index: usize) -> String {
         self.pane_names
             .get(index)
@@ -2657,6 +2856,29 @@ mod tests {
             awake_input_targets_for(2, &selected(&[0, 3]), 4, &selected(&[0])),
             vec![3]
         );
+    }
+
+    #[test]
+    fn palette_color_cycles_in_both_directions() {
+        assert_eq!(PaletteColor::Cyan.adjust(1), PaletteColor::Sky);
+        assert_eq!(PaletteColor::Cyan.adjust(-1), PaletteColor::White);
+    }
+
+    #[test]
+    fn settings_rows_include_live_grid_palette_roles() {
+        let settings = SettingsState::default();
+        let rows = settings.rows();
+        let palette_start = rows
+            .iter()
+            .position(|row| row.label == "Accent color")
+            .expect("accent palette row");
+
+        assert_eq!(rows.len(), settings.row_targets().len());
+        assert_eq!(rows[1].label, "Activity badges");
+        assert_eq!(rows[1].value, "on");
+        assert_eq!(rows[palette_start].label, "Accent color");
+        assert_eq!(rows[palette_start + 3].label, "Quiet border");
+        assert_eq!(rows[palette_start + 3].value, "magenta");
     }
 }
 
