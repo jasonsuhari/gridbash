@@ -3,6 +3,8 @@ mod auth;
 mod cli;
 mod composer;
 mod config;
+mod control;
+mod image_preview;
 mod layout;
 mod onboarding;
 mod profiles;
@@ -26,6 +28,11 @@ use crate::{
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if cli.mcp {
+        return control::run_mcp_server();
+    }
+
     let mut config = Config::load(cli.config.as_deref())?;
 
     if let Some(profile) = cli.set_default_profile.as_deref() {

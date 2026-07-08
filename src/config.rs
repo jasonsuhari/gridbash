@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::{auth::AuthConfig, profiles::Profile, setup::SavedSetup};
+use crate::{auth::AuthConfig, profiles::Profile};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -18,8 +18,6 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, Profile>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub setups: BTreeMap<String, SavedSetup>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -60,11 +58,6 @@ impl Config {
 
     pub fn set_default_profile(&mut self, profile: impl Into<String>) {
         self.defaults.profile = Some(profile.into());
-    }
-
-    #[allow(dead_code)]
-    pub fn save_setup(&mut self, name: impl Into<String>, setup: SavedSetup) {
-        self.setups.insert(name.into(), setup);
     }
 
     pub fn default_path() -> Option<PathBuf> {
@@ -122,9 +115,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_named_setups() {
+    fn ignores_legacy_setups_table() {
         let config: Config = toml::from_str(
             r#"
+            [defaults]
+            profile = "powershell"
+
             [setups.sample]
             agents = ["claude-1", "codex-2"]
 
@@ -135,8 +131,7 @@ mod tests {
         )
         .expect("parse config");
 
-        let setup = config.setups.get("sample").expect("sample setup");
-        assert_eq!(setup.agents, vec!["claude-1", "codex-2"]);
-        assert_eq!(setup.folders[0].name, "gridbash");
+        assert_eq!(config.defaults.profile.as_deref(), Some("powershell"));
+        assert!(config.profiles.is_empty());
     }
 }

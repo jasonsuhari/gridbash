@@ -9,8 +9,9 @@ use std::path::Path;
 use vt100::Cell;
 
 use crate::{
-    app::{App, PaneSelection, RenamePaneView, SettingsRow, SettingsTab},
+    app::{App, GridPalette, PaneSelection, RenamePaneView, SettingsRow, SettingsTab},
     auth::{AgentKind, AuthProfile},
+    image_preview::ImagePreview,
 };
 
 const APP_BG: Color = Color::Rgb(11, 15, 20);
@@ -27,6 +28,8 @@ pub struct DrawState {
     pub pane_rects: Vec<Rect>,
 }
 
+const QUIET_MARKER: &str = " *";
+
 pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
     let chunks = Layout::default()
@@ -37,8 +40,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let grid_area = chunks[0];
     let status_area = chunks[1];
     let rects = app.pane_rects(grid_area);
+    let palette = app.palette();
     let rename_view = app.rename_pane_view();
-    let modal_open = app.settings_open() || rename_view.is_some();
+    let image_overlay = app.image_overlay_view();
+    let modal_open = app.settings_open() || rename_view.is_some() || image_overlay.is_some();
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -48,7 +53,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         let focused = app.focus() == index;
         let selected = app.selected().contains(&index);
         let sleeping = app.pane_sleeping(index);
-        let chrome = pane_chrome(selected, focused, pane.active, pane.exited, sleeping);
+        let quiet = app.activity_badges_enabled() && pane.output_quiet();
+        let chrome = pane_chrome(
+            selected,
+            focused,
+            pane.active,
+            pane.exited,
+            sleeping,
+            quiet,
+            palette,
+        );
 
         let folder = app
             .pane_folder(index)
@@ -57,6 +71,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         let usage = app.pane_usage_label(index);
         let title = pane_title(
             &app.pane_label(index),
+            chrome.quiet_marker,
             &folder,
             app.pane_worktree(index),
             app.pane_profile(index),
@@ -98,21 +113,21 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             " GridBash ",
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::Cyan)
+                .bg(palette.accent())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
         Span::styled(
             "LIVE",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(palette.focus())
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" | "),
         Span::styled(
             input_scope,
             Style::default().fg(if app.selected().len() > 1 {
-                Color::Cyan
+                palette.selected()
             } else {
                 Color::Gray
             }),
@@ -129,10 +144,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     );
 
     if app.settings_open() {
-        render_settings(frame, area, app);
+        render_settings(frame, area, app, palette);
     }
     if let Some(rename) = rename_view.as_ref() {
         render_rename_pane(frame, area, rename);
+    }
+    if let Some(image) = image_overlay {
+        render_image_overlay(frame, area, image);
     }
 
     DrawState {
@@ -141,8 +159,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pane_title(
     label: &str,
+    quiet_marker: &str,
     folder: &str,
     worktree: Option<&str>,
     profile: Option<&str>,
@@ -150,7 +170,7 @@ fn pane_title(
     usage: Option<&str>,
     badge: &str,
 ) -> String {
-    let mut parts = vec![label.to_string(), folder.to_string()];
+    let mut parts = vec![format!("{label}{quiet_marker}"), folder.to_string()];
     if let Some(worktree) = worktree.filter(|value| !value.is_empty()) {
         parts.push(worktree.to_string());
     }
@@ -171,6 +191,7 @@ fn pane_title(
 struct PaneChrome {
     border_style: Style,
     badge: &'static str,
+    quiet_marker: &'static str,
 }
 
 fn pane_chrome(
@@ -179,19 +200,25 @@ fn pane_chrome(
     _active: bool,
     exited: bool,
     sleeping: bool,
+    quiet: bool,
+    palette: &GridPalette,
 ) -> PaneChrome {
     let border_style = if sleeping {
         Style::default().fg(Color::Rgb(32, 36, 42))
     } else if selected {
         Style::default()
-            .fg(Color::Cyan)
+            .fg(palette.selected())
             .add_modifier(Modifier::BOLD)
     } else if focused {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(palette.focus())
             .add_modifier(Modifier::BOLD)
     } else if exited {
-        Style::default().fg(Color::Red)
+        Style::default().fg(palette.exited())
+    } else if quiet {
+        Style::default()
+            .fg(palette.quiet())
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -205,14 +232,20 @@ fn pane_chrome(
     } else {
         ""
     };
+    let quiet_marker = if quiet && !exited && !sleeping {
+        QUIET_MARKER
+    } else {
+        ""
+    };
 
     PaneChrome {
         border_style,
         badge,
+        quiet_marker,
     }
 }
 
-fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &GridPalette) {
     let modal = settings_modal_rect(area, settings_content_row_count(app));
     let shadow = settings_shadow_rect(area, modal);
 
@@ -230,7 +263,7 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .borders(Borders::ALL)
         .border_style(
             Style::default()
-                .fg(SETTINGS_BORDER)
+                .fg(palette.accent())
                 .add_modifier(Modifier::BOLD),
         )
         .style(settings_panel_style())
@@ -365,6 +398,106 @@ fn settings_tab(label: &'static str, active: bool) -> Span<'static> {
     Span::styled(format!(" {label} "), style)
 }
 
+fn render_image_overlay(frame: &mut Frame<'_>, area: Rect, image: &ImagePreview) {
+    let modal = image_modal_rect(area, image);
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().fg(SETTINGS_TEXT).bg(APP_BG))
+        .title(format!(" Image | {} ", truncate_text(&image.title, 48)));
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut lines = Vec::new();
+    lines.push(image_meta_line(image, inner.width));
+    lines.push(Line::from(""));
+
+    let available_image_rows = inner.height.saturating_sub(4) as usize;
+    let max_columns = inner.width as usize;
+    for row in image.rows.iter().take(available_image_rows) {
+        lines.push(image_row(row, max_columns));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        command_key("Esc"),
+        Span::styled(" close  ", Style::default().fg(Color::Gray)),
+        command_key("q"),
+        Span::styled(" close", Style::default().fg(Color::Gray)),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(SETTINGS_TEXT).bg(APP_BG)),
+        inner,
+    );
+}
+
+fn image_meta_line(image: &ImagePreview, width: u16) -> Line<'static> {
+    let text = format!(
+        "{}x{} -> {}x{} cells | {}",
+        image.source_width,
+        image.source_height,
+        image.cell_width,
+        image.cell_height,
+        image.path.display()
+    );
+
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            truncate_text(&text, width.saturating_sub(2) as usize),
+            Style::default().fg(Color::Gray),
+        ),
+    ])
+}
+
+fn image_row(row: &[crate::image_preview::ImageCell], max_columns: usize) -> Line<'static> {
+    let spans = row
+        .iter()
+        .take(max_columns)
+        .map(|cell| {
+            Span::styled(
+                "▀",
+                Style::default()
+                    .fg(rgb(cell.upper))
+                    .bg(rgb(cell.lower))
+                    .add_modifier(Modifier::BOLD),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    Line::from(spans)
+}
+
+fn rgb(value: [u8; 3]) -> Color {
+    Color::Rgb(value[0], value[1], value[2])
+}
+
+fn image_modal_rect(area: Rect, image: &ImagePreview) -> Rect {
+    let desired_width = image.cell_width.saturating_add(4).clamp(36, 92);
+    let desired_height = image.cell_height.saturating_add(6).clamp(10, 34);
+    let width = area.width.saturating_sub(4).min(desired_width).max(1);
+    let height = area.height.saturating_sub(2).min(desired_height).max(1);
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
 fn general_settings_lines(rows: &[SettingsRow], width: u16) -> Vec<Line<'static>> {
     let mut lines = vec![
         settings_tabs(SettingsTab::General),
@@ -421,10 +554,10 @@ fn general_settings_lines(rows: &[SettingsRow], width: u16) -> Vec<Line<'static>
     lines.push(Line::from(""));
     lines.push(settings_section(
         "THEME",
-        "one accent across the grid",
+        "runtime palette for grid chrome",
         width,
     ));
-    if let Some(row) = rows.get(6) {
+    for row in rows.iter().skip(6) {
         lines.push(settings_row(row, width));
     }
 
@@ -724,34 +857,25 @@ fn command_key(label: &'static str) -> Span<'static> {
 fn settings_value_label(row: &SettingsRow) -> String {
     match row.value.as_str() {
         "on" | "off" => format!("[ {} ]", row.value),
-        "cyan" | "yellow" | "green" | "magenta" => format!("< {} >", row.value),
+        _ if row.value_color.is_some() => format!("< {} >", row.value),
         _ => format!("- {} +", row.value),
     }
 }
 
 fn settings_value_style(row: &SettingsRow) -> Style {
+    if let Some(color) = row.value_color {
+        return Style::default()
+            .fg(Color::Black)
+            .bg(color)
+            .add_modifier(Modifier::BOLD);
+    }
+
     let mut style = match row.value.as_str() {
         "on" => Style::default()
             .fg(Color::Black)
             .bg(SETTINGS_BORDER)
             .add_modifier(Modifier::BOLD),
         "off" => Style::default().fg(SETTINGS_MUTED).bg(SETTINGS_SURFACE),
-        "cyan" => Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-        "yellow" => Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-        "green" => Style::default()
-            .fg(Color::Black)
-            .bg(Color::Green)
-            .add_modifier(Modifier::BOLD),
-        "magenta" => Style::default()
-            .fg(Color::Black)
-            .bg(Color::Magenta)
-            .add_modifier(Modifier::BOLD),
         _ if row.selected => Style::default()
             .fg(Color::Black)
             .bg(Color::Yellow)
@@ -1096,25 +1220,34 @@ mod tests {
 
     #[test]
     fn output_activity_does_not_change_idle_pane_chrome() {
+        let palette = GridPalette::default();
+
         assert_eq!(
-            pane_chrome(false, false, false, false, false),
-            pane_chrome(false, false, true, false, false)
+            pane_chrome(false, false, false, false, false, false, &palette),
+            pane_chrome(false, false, true, false, false, false, &palette)
         );
     }
 
     #[test]
     fn selected_and_exited_badges_remain_visible() {
+        let palette = GridPalette::default();
+
         assert_eq!(
-            pane_chrome(true, false, true, false, false).badge,
+            pane_chrome(true, false, true, false, false, true, &palette).badge,
             " selected"
         );
-        assert_eq!(pane_chrome(true, false, true, true, false).badge, " exited");
+        assert_eq!(
+            pane_chrome(true, false, true, true, false, true, &palette).badge,
+            " exited"
+        );
     }
 
     #[test]
     fn sleeping_panes_show_sleep_badge() {
+        let palette = GridPalette::default();
+
         assert_eq!(
-            pane_chrome(false, false, true, false, true).badge,
+            pane_chrome(false, false, true, false, true, true, &palette).badge,
             " asleep"
         );
     }
@@ -1124,6 +1257,7 @@ mod tests {
         assert_eq!(
             pane_title(
                 "api",
+                "",
                 "gridbash/",
                 Some("feat/rename-panes"),
                 None,
@@ -1134,12 +1268,13 @@ mod tests {
             " api | gridbash/ | feat/rename-panes "
         );
         assert_eq!(
-            pane_title("1", "gridbash/", None, None, None, None, " selected"),
+            pane_title("1", "", "gridbash/", None, None, None, None, " selected"),
             " 1 | gridbash/ selected "
         );
         assert_eq!(
             pane_title(
                 "2",
+                "",
                 "gridbash/",
                 None,
                 None,
@@ -1152,6 +1287,7 @@ mod tests {
         assert_eq!(
             pane_title(
                 "api",
+                "",
                 "gridbash/",
                 Some("main"),
                 Some("codex"),
@@ -1161,5 +1297,23 @@ mod tests {
             ),
             " api | gridbash/ | main | codex | codex-2 | 5h 80% left selected "
         );
+    }
+
+    #[test]
+    fn pane_title_keeps_quiet_marker_with_custom_label() {
+        assert_eq!(
+            pane_title("api", QUIET_MARKER, "gridbash/", None, None, None, None, ""),
+            " api * | gridbash/ "
+        );
+    }
+
+    #[test]
+    fn quiet_output_marks_idle_pane_without_active_chrome() {
+        let palette = GridPalette::default();
+        let quiet = pane_chrome(false, false, false, false, false, true, &palette);
+        let active_quiet = pane_chrome(false, false, true, false, false, true, &palette);
+
+        assert_eq!(quiet.quiet_marker, QUIET_MARKER);
+        assert_eq!(quiet.border_style, active_quiet.border_style);
     }
 }
