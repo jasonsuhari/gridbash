@@ -29,7 +29,14 @@ pub struct DrawState {
 
 const QUIET_MARKER: &str = " *";
 
-pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
+#[derive(Debug, Clone, Default)]
+pub struct PaneRenderCache {
+    width: u16,
+    height: u16,
+    lines: Vec<Line<'static>>,
+}
+
+pub fn draw(frame: &mut Frame<'_>, app: &mut App) -> DrawState {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -39,12 +46,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let grid_area = chunks[0];
     let status_area = chunks[1];
     let rects = app.pane_rects(grid_area);
-    let palette = app.palette();
+    let palette = *app.palette();
     let rename_view = app.rename_pane_view();
-    let image_overlay = app.image_overlay_view();
-    let modal_open = app.settings_open() || rename_view.is_some() || image_overlay.is_some();
+    let image_overlay_open = app.image_overlay_view().is_some();
+    let modal_open = app.settings_open() || rename_view.is_some() || image_overlay_open;
 
-    for (index, pane) in app.panes().iter().enumerate() {
+    for index in 0..app.pane_count() {
         let Some(rect) = rects.get(index).copied() else {
             continue;
         };
@@ -52,21 +59,22 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         let focused = app.focus() == index;
         let selected = app.selected().contains(&index);
         let sleeping = app.pane_sleeping(index);
-        let quiet = app.activity_badges_enabled() && pane.output_quiet();
+        let quiet = app.activity_badges_enabled() && app.pane_output_quiet(index);
         let chrome = pane_chrome(
             selected,
             focused,
-            pane.active,
-            pane.exited,
+            app.pane_active(index),
+            app.pane_exited(index),
             sleeping,
             quiet,
-            palette,
+            &palette,
         );
 
         let folder = app
             .pane_folder(index)
             .map(label_name)
-            .unwrap_or_else(|| folder_label(pane.cwd()));
+            .or_else(|| app.pane_cwd(index).map(folder_label))
+            .unwrap_or_default();
         let usage = app.pane_usage_label(index);
         let title = pane_title(
             &app.pane_label(index),
@@ -92,11 +100,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         if sleeping {
             render_sleeping_screen(frame, inner);
         } else {
-            render_screen(frame, inner, pane.screen(), app.selection_for_pane(index));
+            let selection = app.selection_for_pane(index);
+            let lines = app.pane_screen_lines(index, inner.width, inner.height, selection);
+            render_screen_lines(frame, inner, lines);
         }
 
-        if focused && !sleeping && !modal_open {
-            set_terminal_cursor(frame, inner, pane.screen());
+        if focused
+            && !sleeping
+            && !modal_open
+            && let Some(screen) = app.pane_screen(index)
+        {
+            set_terminal_cursor(frame, inner, screen);
         }
     }
 
@@ -141,12 +155,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     );
 
     if app.settings_open() {
-        render_settings(frame, area, &app.settings_rows(), palette);
+        render_settings(frame, area, &app.settings_rows(), &palette);
     }
     if let Some(rename) = rename_view.as_ref() {
         render_rename_pane(frame, area, rename);
     }
-    if let Some(image) = image_overlay {
+    if let Some(image) = app.image_overlay_view() {
         render_image_overlay(frame, area, image);
     }
 
@@ -817,24 +831,62 @@ fn render_sleeping_screen(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Paragraph::new(lines).style(style), area);
 }
 
-fn render_screen(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    screen: &vt100::Screen,
-    selection: Option<PaneSelection>,
-) {
+fn render_screen_lines(frame: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-
-    let lines = (0..area.height)
-        .map(|row| render_screen_row(screen, row, area.width, selection))
-        .collect::<Vec<_>>();
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
         area,
     );
+}
+
+pub fn cached_screen_lines(
+    cache: &mut PaneRenderCache,
+    dirty: &mut bool,
+    screen: &vt100::Screen,
+    width: u16,
+    height: u16,
+    selection: Option<PaneSelection>,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    if selection.is_none()
+        && !*dirty
+        && cache.width == width
+        && cache.height == height
+        && cache.lines.len() == height as usize
+    {
+        return cache.lines.clone();
+    }
+
+    let lines = screen_lines(screen, width, height, selection);
+    if selection.is_none() {
+        cache.width = width;
+        cache.height = height;
+        cache.lines = lines.clone();
+        *dirty = false;
+    }
+
+    lines
+}
+
+pub fn screen_lines(
+    screen: &vt100::Screen,
+    width: u16,
+    height: u16,
+    selection: Option<PaneSelection>,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    (0..height)
+        .map(|row| render_screen_row(screen, row, width, selection))
+        .collect::<Vec<_>>()
 }
 
 fn render_screen_row<'a>(
@@ -1077,5 +1129,41 @@ mod tests {
 
         assert_eq!(quiet.quiet_marker, QUIET_MARKER);
         assert_eq!(quiet.border_style, active_quiet.border_style);
+    }
+
+    #[test]
+    fn selected_screen_lines_do_not_clean_dirty_cache() {
+        let mut parser = vt100::Parser::new(2, 10, 100);
+        parser.process(b"hello\r\nworld");
+        let mut cache = PaneRenderCache::default();
+        let mut dirty = true;
+        let selection = Some(PaneSelection {
+            start_row: 0,
+            start_column: 0,
+            end_row: 0,
+            end_column: 4,
+        });
+
+        let lines = cached_screen_lines(&mut cache, &mut dirty, parser.screen(), 10, 2, selection);
+
+        assert_eq!(lines.len(), 2);
+        assert!(dirty);
+        assert!(cache.lines.is_empty());
+    }
+
+    #[test]
+    fn unselected_screen_lines_populate_clean_cache() {
+        let mut parser = vt100::Parser::new(2, 10, 100);
+        parser.process(b"hello\r\nworld");
+        let mut cache = PaneRenderCache::default();
+        let mut dirty = true;
+
+        let lines = cached_screen_lines(&mut cache, &mut dirty, parser.screen(), 10, 2, None);
+
+        assert_eq!(lines.len(), 2);
+        assert!(!dirty);
+        assert_eq!(cache.width, 10);
+        assert_eq!(cache.height, 2);
+        assert_eq!(cache.lines.len(), 2);
     }
 }
