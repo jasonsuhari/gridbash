@@ -22,6 +22,8 @@ pub struct Config {
 pub struct Defaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_profile: Option<String>,
 }
 
 impl Config {
@@ -71,7 +73,7 @@ impl Config {
 
 impl Defaults {
     fn is_empty(&self) -> bool {
-        self.profile.is_none()
+        self.profile.is_none() && self.manager_profile.is_none()
     }
 }
 
@@ -90,6 +92,19 @@ mod tests {
         .expect("parse config");
 
         assert_eq!(config.defaults.profile.as_deref(), Some("powershell"));
+    }
+
+    #[test]
+    fn parses_manager_profile_default() {
+        let config: Config = toml::from_str(
+            r#"
+            [defaults]
+            manager_profile = "claude-1"
+            "#,
+        )
+        .expect("parse config");
+
+        assert_eq!(config.defaults.manager_profile.as_deref(), Some("claude-1"));
     }
 
     #[test]

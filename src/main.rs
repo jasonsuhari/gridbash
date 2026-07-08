@@ -6,6 +6,7 @@ mod control;
 mod image_preview;
 mod layout;
 mod onboarding;
+mod orchestrator;
 mod profiles;
 mod pty;
 mod session;
@@ -58,14 +59,7 @@ fn main() -> Result<()> {
             return Ok(());
         };
 
-        let agent_api_enabled = cli.agent_api || cli.agent_api_port != 0;
-        let mut app = App::resume(
-            config,
-            record,
-            !cli.no_mouse,
-            agent_api_enabled,
-            cli.agent_api_port,
-        )?;
+        let mut app = App::resume(&cli, config, record)?;
         return app.run();
     }
 
