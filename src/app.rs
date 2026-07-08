@@ -1691,14 +1691,13 @@ impl App {
         }
 
         if self.command_line.focused {
-            if row_delta.is_negative() {
-                if let Some(candidate) = (0..self.panes.len())
+            if row_delta.is_negative()
+                && let Some(candidate) = (0..self.panes.len())
                     .rev()
                     .find(|index| !self.sleeping.contains(index))
-                {
-                    self.command_line.focused = false;
-                    self.focus = candidate;
-                }
+            {
+                self.command_line.focused = false;
+                self.focus = candidate;
             }
             return;
         }
