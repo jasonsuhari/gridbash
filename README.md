@@ -30,6 +30,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Claude, Codex, and other agent panes show a compact conversation summary in the footer line.
 - Built-in launch profiles for common CLI coding agents.
 - Startup dimension picker with a live grid preview.
+- `gridbash resume` for reopening prior grids with per-pane command and output context.
 - Optional managed git worktrees so every pane can work in an isolated checkout.
 
 ## Demo
@@ -130,6 +131,25 @@ List detected profiles:
 gridbash --list-profiles
 ```
 
+Resume a prior grid:
+
+```powershell
+gridbash resume
+```
+
+Resume the latest saved grid without prompting:
+
+```powershell
+gridbash resume --latest
+```
+
+List saved sessions or resume a specific id:
+
+```powershell
+gridbash resume --list
+gridbash resume <session-id>
+```
+
 Start in a repo:
 
 ```powershell
@@ -137,6 +157,8 @@ gridbash 3x4 --profile codex --cwd C:\Users\Jason\Documents\GitHub\fluent
 ```
 
 Passing grid, count, profile, or cwd arguments bypasses the startup picker and uses the direct launch path.
+
+GridBash saves bounded session snapshots to local app data as you launch and exit grids. A resumed session restores the grid dimensions, pane profiles, working directories, labels, worktree names, and a pane-local history view with recent submitted commands and output. It relaunches child terminals; it does not reattach still-running processes or replay old commands into shells.
 
 Launch every pane in a separate repo-local git worktree:
 
