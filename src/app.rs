@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     io::{self, Stdout, Write},
-    sync::mpsc as std_mpsc,
+    sync::{OnceLock, mpsc as std_mpsc},
     time::{Duration, Instant},
 };
 
@@ -37,6 +37,7 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const MAX_PANE_NAME_CHARS: usize = 32;
+const MAX_TAB_TITLE_CHARS: usize = 40;
 const CONVERSATION_SUMMARY_MAX_CHARS: usize = 120;
 const ACTIVITY_DECAY_INTERVAL: Duration = Duration::from_millis(250);
 const OUTPUT_QUIET_AFTER: Duration = Duration::from_secs(3);
@@ -44,20 +45,16 @@ const OUTPUT_QUIET_AFTER: Duration = Duration::from_secs(3);
 pub struct App {
     config: Config,
     worktrees: Option<ManagedWorktreeOptions>,
-    launch_plan: Option<LaunchPlan>,
-    layout: GridLayout,
+    initial_launch_plan: Option<LaunchPlan>,
+    tabs: Vec<GridTab>,
+    active_tab: usize,
     grid_area: Rect,
-    panes: Vec<PtyPane>,
-    focus: usize,
-    selected: BTreeSet<usize>,
-    pane_names: Vec<Option<String>>,
-    text_selection: Option<MouseSelection>,
-    sleeping: BTreeSet<usize>,
-    rects: Vec<Rect>,
     mouse_enabled: bool,
     settings: SettingsState,
     rename: RenamePaneState,
+    tab_rename: RenameTabState,
     status: String,
+    next_tab_number: usize,
     next_pane_id: usize,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
@@ -66,6 +63,44 @@ pub struct App {
     profile_usage: BTreeMap<String, String>,
     api_spend_label: Option<String>,
     last_activity_decay: Instant,
+}
+
+struct GridTab {
+    title: String,
+    launch_plan: LaunchPlan,
+    layout: GridLayout,
+    panes: Vec<PtyPane>,
+    focus: usize,
+    selected: BTreeSet<usize>,
+    pane_names: Vec<Option<String>>,
+    text_selection: Option<MouseSelection>,
+    sleeping: BTreeSet<usize>,
+    rects: Vec<Rect>,
+}
+
+impl GridTab {
+    fn new(title: String, launch_plan: LaunchPlan) -> Self {
+        Self {
+            title,
+            layout: GridLayout::new(launch_plan.grid),
+            launch_plan,
+            panes: Vec::new(),
+            focus: 0,
+            selected: BTreeSet::new(),
+            pane_names: Vec::new(),
+            text_selection: None,
+            sleeping: BTreeSet::new(),
+            rects: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TabLabel {
+    pub title: String,
+    pub active: bool,
+    pub activity: bool,
+    pub exited: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +376,13 @@ pub struct RenamePaneView {
     pub cursor: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct RenameTabView {
+    pub title: String,
+    pub value: String,
+    pub cursor: usize,
+}
+
 #[derive(Debug, Clone, Default)]
 struct RenamePaneState {
     open: bool,
@@ -383,6 +425,83 @@ impl RenamePaneState {
 
     fn insert_char(&mut self, ch: char) {
         if ch.is_control() || self.value.chars().count() >= MAX_PANE_NAME_CHARS {
+            return;
+        }
+
+        let index = char_to_byte_index(&self.value, self.cursor);
+        self.value.insert(index, ch);
+        self.cursor += 1;
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.insert_char(ch);
+        }
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+
+        let start = char_to_byte_index(&self.value, self.cursor - 1);
+        let end = char_to_byte_index(&self.value, self.cursor);
+        self.value.replace_range(start..end, "");
+        self.cursor -= 1;
+    }
+
+    fn delete(&mut self) {
+        let count = self.value.chars().count();
+        if self.cursor >= count {
+            return;
+        }
+
+        let start = char_to_byte_index(&self.value, self.cursor);
+        let end = char_to_byte_index(&self.value, self.cursor + 1);
+        self.value.replace_range(start..end, "");
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RenameTabState {
+    open: bool,
+    value: String,
+    cursor: usize,
+}
+
+impl RenameTabState {
+    fn begin(&mut self, title: &str) {
+        self.open = true;
+        self.value = title.to_string();
+        self.cursor = self.value.chars().count();
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.value.clear();
+        self.cursor = 0;
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        let count = self.value.chars().count() as isize;
+        self.cursor = (self.cursor as isize + delta).clamp(0, count) as usize;
+    }
+
+    fn move_to_start(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_to_end(&mut self) {
+        self.cursor = self.value.chars().count();
+    }
+
+    fn clear(&mut self) {
+        self.value.clear();
+        self.cursor = 0;
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        if ch.is_control() || self.value.chars().count() >= MAX_TAB_TITLE_CHARS {
             return;
         }
 
@@ -603,39 +722,28 @@ impl App {
             .transpose()?;
         let launch_plan = resolve_direct_launch_plan(&cli, &config, worktrees.as_ref())?;
         let mouse_enabled = !cli.no_mouse;
-        let grid = launch_plan
-            .as_ref()
-            .map(|plan| plan.grid)
-            .unwrap_or(GridSize {
-                rows: 2,
-                columns: 3,
-            });
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (usage_tx, usage_rx) = std_mpsc::channel();
 
         Ok(Self {
             config,
             worktrees,
-            launch_plan,
-            layout: GridLayout::new(grid),
+            initial_launch_plan: launch_plan,
+            tabs: Vec::new(),
+            active_tab: 0,
             grid_area: Rect::default(),
-            panes: Vec::new(),
-            focus: 0,
-            selected: BTreeSet::new(),
-            pane_names: Vec::new(),
-            text_selection: None,
-            sleeping: BTreeSet::new(),
-            rects: Vec::new(),
             mouse_enabled,
             settings: SettingsState::default(),
             rename: RenamePaneState::default(),
+            tab_rename: RenameTabState::default(),
             status: if mouse_enabled {
-                "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
+                "Drag copies within pane | Alt+t tab | Alt+n new tab | Alt+r pane rename | Alt+Shift+r tab rename | Alt+arrows move | Alt+Shift+arrows resize | Alt+x swap | Alt+z sleep | Alt+o settings"
                     .into()
             } else {
-                "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings"
+                "Alt+t tab | Alt+n new tab | Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r pane rename | Alt+Shift+r tab rename | Alt+x swap | Alt+z sleep | Alt+o settings"
                     .into()
             },
+            next_tab_number: 1,
             next_pane_id: 0,
             event_tx,
             event_rx,
@@ -655,49 +763,49 @@ impl App {
     }
 
     fn run_in_terminal(&mut self, terminal: &mut Tui) -> Result<()> {
-        if self.launch_plan.is_none() {
+        let initial_plan = if let Some(plan) = self.initial_launch_plan.take() {
+            plan
+        } else {
             let current_dir = resolved_current_dir()?;
             let mut composer = Composer::new(current_dir, self.worktrees.clone());
             let Some(plan) = composer.run(terminal, &self.config)? else {
                 return Ok(());
             };
-            self.set_launch_plan(plan);
-        }
+            plan
+        };
 
-        self.spawn_initial_panes()?;
+        self.add_tab_from_plan(initial_plan)?;
         self.sync_initial_pane_sizes(terminal)?;
         self.run_loop(terminal)
     }
 
-    fn set_launch_plan(&mut self, plan: LaunchPlan) {
-        self.layout = GridLayout::new(plan.grid);
-        self.launch_plan = Some(plan);
-    }
+    fn add_tab_from_plan(&mut self, plan: LaunchPlan) -> Result<()> {
+        let title = self.next_tab_title();
+        let mut tab = GridTab::new(title.clone(), plan);
+        let pane_specs = tab.launch_plan.panes.clone();
 
-    fn spawn_initial_panes(&mut self) -> Result<()> {
-        let plan = self
-            .launch_plan
-            .clone()
-            .ok_or_else(|| anyhow!("no launch plan selected"))?;
-        self.layout = GridLayout::new(plan.grid);
-        self.panes.clear();
-        self.pane_names = vec![None; plan.panes.len()];
-        self.text_selection = None;
-        self.sleeping.clear();
-        self.next_pane_id = 0;
-
-        for spec in &plan.panes {
-            self.spawn_pane_spec(spec)?;
+        for spec in &pane_specs {
+            tab.panes.push(self.spawn_pane_spec(spec)?);
         }
-        self.start_usage_monitor(&plan);
+        tab.pane_names = vec![None; tab.panes.len()];
+        self.start_usage_monitor(&tab.launch_plan);
+
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len().saturating_sub(1);
+        self.rename.close();
+        self.tab_rename.close();
+        self.status = format!("opened tab {title}");
 
         Ok(())
     }
 
-    fn start_usage_monitor(&mut self, plan: &LaunchPlan) {
-        self.profile_usage.clear();
-        self.api_spend_label = None;
+    fn next_tab_title(&mut self) -> String {
+        let title = format!("Grid {}", self.next_tab_number);
+        self.next_tab_number += 1;
+        title
+    }
 
+    fn start_usage_monitor(&self, plan: &LaunchPlan) {
         let targets = plan
             .panes
             .iter()
@@ -709,11 +817,12 @@ impl App {
         usage::spawn_usage_monitor(targets, self.usage_tx.clone());
     }
 
-    fn spawn_pane_spec(&mut self, spec: &PaneLaunchSpec) -> Result<()> {
+    fn spawn_pane_spec(&mut self, spec: &PaneLaunchSpec) -> Result<PtyPane> {
         let launch = spec.resolved_command()?;
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
         let pane = PtyPane::spawn(
+            &spec.profile_name,
             id,
             0,
             &launch.command,
@@ -721,8 +830,7 @@ impl App {
             &spec.cwd,
             self.event_tx.clone(),
         )?;
-        self.panes.push(pane);
-        Ok(())
+        Ok(pane)
     }
 
     fn run_loop(&mut self, terminal: &mut Tui) -> Result<()> {
@@ -738,7 +846,9 @@ impl App {
                 terminal.draw(|frame| {
                     let draw_state = ui::draw(frame, self);
                     self.grid_area = draw_state.grid_area;
-                    self.rects = draw_state.pane_rects;
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.rects = draw_state.pane_rects;
+                    }
                 })?;
                 self.sync_pane_sizes();
                 needs_render = false;
@@ -748,13 +858,17 @@ impl App {
             if event::poll(INPUT_POLL_INTERVAL)? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        match self.handle_key(key)? {
+                        match self.handle_key(terminal, key)? {
                             KeyOutcome::Continue => {}
                             KeyOutcome::Render => needs_render = true,
                             KeyOutcome::Quit => break,
                         }
                     }
                     Event::Resize(_, _) => needs_render = true,
+                    Event::Paste(text) if self.tab_rename.open => {
+                        self.tab_rename.insert_text(&text);
+                        needs_render = true;
+                    }
                     Event::Paste(text) if self.rename.open => {
                         self.rename.insert_text(&text);
                         needs_render = true;
@@ -763,7 +877,7 @@ impl App {
                         self.route_input(text.as_bytes())?;
                     }
                     Event::Mouse(mouse)
-                        if (self.mouse_enabled || !self.sleeping.is_empty())
+                        if (self.mouse_enabled || self.active_tab_has_sleeping_panes())
                             && !self.settings.open =>
                     {
                         needs_render |= self.handle_mouse(mouse, terminal)?;
@@ -781,7 +895,7 @@ impl App {
     }
 
     fn sync_mouse_capture(&self, terminal: &mut Tui, enabled: &mut bool) -> Result<()> {
-        let should_enable = self.mouse_enabled || !self.sleeping.is_empty();
+        let should_enable = self.mouse_enabled || self.active_tab_has_sleeping_panes();
         if should_enable == *enabled {
             return Ok(());
         }
@@ -805,31 +919,26 @@ impl App {
                     generation,
                     bytes,
                 } => {
-                    if let Some(target) = self
-                        .panes
-                        .iter_mut()
-                        .find(|p| p.id() == pane && p.generation() == generation)
-                    {
+                    if let Some(target) = self.find_pane_mut(pane, generation) {
                         target.process_output(&bytes);
                         changed = true;
                     }
                 }
                 PtyEvent::Exited { pane, generation } => {
-                    if let Some(target) = self
-                        .panes
-                        .iter_mut()
-                        .find(|p| p.id() == pane && p.generation() == generation)
-                        && !target.exited
-                    {
-                        target.exited = true;
-                        changed = true;
+                    if let Some(target) = self.find_pane_mut(pane, generation) {
+                        if !target.exited {
+                            target.exited = true;
+                            changed = true;
+                        }
                     }
                 }
             }
         }
 
-        for pane in &mut self.panes {
-            changed |= pane.poll_exit();
+        for tab in &mut self.tabs {
+            for pane in &mut tab.panes {
+                changed |= pane.poll_exit();
+            }
         }
 
         changed
@@ -869,18 +978,24 @@ impl App {
 
         let now = Instant::now();
         let mut changed = false;
-        for pane in &mut self.panes {
-            if pane.active {
-                pane.active = false;
-                changed = true;
+        for tab in &mut self.tabs {
+            for pane in &mut tab.panes {
+                if pane.active {
+                    pane.active = false;
+                    changed = true;
+                }
+                changed |= pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER);
             }
-            changed |= pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER);
         }
         self.last_activity_decay = now;
         changed
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+    fn handle_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<KeyOutcome> {
+        if self.tab_rename.open {
+            return self.handle_tab_rename_key(key);
+        }
+
         if self.rename.open {
             return self.handle_rename_key(key);
         }
@@ -893,7 +1008,7 @@ impl App {
         }
 
         if key.modifiers.contains(KeyModifiers::ALT)
-            && let Some(quit) = self.handle_app_key(key)?
+            && let Some(quit) = self.handle_app_key(terminal, key)?
         {
             return Ok(if quit {
                 KeyOutcome::Quit
@@ -912,9 +1027,9 @@ impl App {
         })
     }
 
-    fn handle_app_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+    fn handle_app_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<Option<bool>> {
         match key.code {
-            KeyCode::Char(ch) => self.handle_alt_char(ch, key.modifiers),
+            KeyCode::Char(ch) => self.handle_alt_char(terminal, ch, key.modifiers),
             KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.adjust_grid(GridAxis::Columns, -1)?;
                 Ok(Some(false))
@@ -933,44 +1048,69 @@ impl App {
             }
             KeyCode::Left => {
                 self.focus_previous();
-                self.status = format!("focused pane {}", self.focus + 1);
+                self.status = format!("focused pane {}", self.focus() + 1);
                 Ok(Some(false))
             }
             KeyCode::Right => {
                 self.focus_next();
-                self.status = format!("focused pane {}", self.focus + 1);
+                self.status = format!("focused pane {}", self.focus() + 1);
                 Ok(Some(false))
             }
             KeyCode::Up => {
                 self.focus_in_grid(-1);
-                self.status = format!("focused pane {}", self.focus + 1);
+                self.status = format!("focused pane {}", self.focus() + 1);
                 Ok(Some(false))
             }
             KeyCode::Down => {
                 self.focus_in_grid(1);
-                self.status = format!("focused pane {}", self.focus + 1);
+                self.status = format!("focused pane {}", self.focus() + 1);
                 Ok(Some(false))
             }
             _ => Ok(None),
         }
     }
 
-    fn handle_alt_char(&mut self, ch: char, _modifiers: KeyModifiers) -> Result<Option<bool>> {
+    fn handle_alt_char(
+        &mut self,
+        terminal: &mut Tui,
+        ch: char,
+        modifiers: KeyModifiers,
+    ) -> Result<Option<bool>> {
         let lower = ch.to_ascii_lowercase();
         match lower {
             'q' => Ok(Some(true)),
+            't' => {
+                self.next_tab();
+                Ok(Some(false))
+            }
+            'n' => {
+                self.open_new_tab(terminal)?;
+                Ok(Some(false))
+            }
             's' => {
-                toggle_selection(&mut self.selected, self.focus);
-                self.status = format!("selected {} panes", self.selected.len());
+                let selected_count = {
+                    let Some(tab) = self.active_tab_mut() else {
+                        return Ok(Some(false));
+                    };
+                    toggle_selection(&mut tab.selected, tab.focus);
+                    tab.selected.len()
+                };
+                self.status = format!("selected {} panes", selected_count);
                 Ok(Some(false))
             }
             'a' => {
-                if self.selected.len() == self.panes.len() {
-                    self.selected.clear();
-                } else {
-                    self.selected = (0..self.panes.len()).collect();
-                }
-                self.status = format!("selected {} panes", self.selected.len());
+                let selected_count = {
+                    let Some(tab) = self.active_tab_mut() else {
+                        return Ok(Some(false));
+                    };
+                    if tab.selected.len() == tab.panes.len() {
+                        tab.selected.clear();
+                    } else {
+                        tab.selected = (0..tab.panes.len()).collect();
+                    }
+                    tab.selected.len()
+                };
+                self.status = format!("selected {} panes", selected_count);
                 Ok(Some(false))
             }
             'z' => {
@@ -987,24 +1127,152 @@ impl App {
                 Ok(Some(false))
             }
             'r' => {
-                self.begin_rename();
+                if modifiers.contains(KeyModifiers::SHIFT) {
+                    self.begin_tab_rename();
+                } else {
+                    self.begin_rename();
+                }
                 Ok(Some(false))
             }
             _ => Ok(None),
         }
     }
 
+    fn open_new_tab(&mut self, terminal: &mut Tui) -> Result<()> {
+        self.drain_pty_events();
+        let current_dir = match self.active_pane_cwd() {
+            Some(path) => path,
+            None => resolved_current_dir()?,
+        };
+        let mut composer = Composer::new(current_dir, self.worktrees.clone());
+
+        match composer.run(terminal, &self.config)? {
+            Some(plan) => {
+                self.add_tab_from_plan(plan)?;
+                self.sync_initial_pane_sizes(terminal)?;
+            }
+            None => {
+                self.status = "new tab canceled".into();
+            }
+        }
+
+        Ok(())
+    }
+
+    fn next_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            self.status = "only one tab open".into();
+            return;
+        }
+
+        self.clear_text_selection();
+        self.rename.close();
+        self.tab_rename.close();
+        self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        let title = self.active_tab_title().to_string();
+        self.status = format!("active tab {title}");
+    }
+
+    fn begin_tab_rename(&mut self) {
+        let Some(title) = self.active_tab().map(|tab| tab.title.clone()) else {
+            self.status = "no tab to rename".into();
+            return;
+        };
+
+        self.rename.close();
+        self.tab_rename.begin(&title);
+        self.status = format!("renaming tab {title}");
+    }
+
+    fn handle_tab_rename_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return Ok(KeyOutcome::Quit);
+        }
+
+        let changed = match key.code {
+            KeyCode::Esc => {
+                self.tab_rename.close();
+                self.status = "tab rename canceled".into();
+                true
+            }
+            KeyCode::Enter => {
+                self.save_tab_rename();
+                true
+            }
+            KeyCode::Backspace => {
+                self.tab_rename.backspace();
+                true
+            }
+            KeyCode::Delete => {
+                self.tab_rename.delete();
+                true
+            }
+            KeyCode::Left => {
+                self.tab_rename.move_cursor(-1);
+                true
+            }
+            KeyCode::Right => {
+                self.tab_rename.move_cursor(1);
+                true
+            }
+            KeyCode::Home => {
+                self.tab_rename.move_to_start();
+                true
+            }
+            KeyCode::End => {
+                self.tab_rename.move_to_end();
+                true
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.tab_rename.clear();
+                true
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.tab_rename.insert_char(ch);
+                true
+            }
+            _ => false,
+        };
+
+        Ok(if changed {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        })
+    }
+
+    fn save_tab_rename(&mut self) {
+        let name = normalized_tab_title(&self.tab_rename.value);
+        match name {
+            Some(name) => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.title = name.clone();
+                }
+                self.status = format!("renamed tab to {name}");
+                self.tab_rename.close();
+            }
+            None => {
+                self.status = "tab name cannot be empty".into();
+            }
+        }
+    }
+
     fn begin_rename(&mut self) {
-        if self.panes.is_empty() {
+        if self.panes().is_empty() {
             self.status = "no panes to rename".into();
             return;
         }
 
-        let pane_index = self.focus.min(self.panes.len() - 1);
-        let current_name = self
-            .pane_names
-            .get(pane_index)
-            .and_then(|name| name.clone());
+        let Some(tab) = self.active_tab() else {
+            self.status = "no panes to rename".into();
+            return;
+        };
+        let pane_index = tab.focus.min(tab.panes.len() - 1);
+        let current_name = tab.pane_names.get(pane_index).and_then(|name| name.clone());
+        self.tab_rename.close();
         self.rename.begin(pane_index, current_name.as_deref());
         self.status = format!("renaming pane {}", pane_index + 1);
     }
@@ -1075,7 +1343,10 @@ impl App {
         let name = normalized_pane_name(&self.rename.value);
         let pane_number = pane_index + 1;
 
-        if let Some(slot) = self.pane_names.get_mut(pane_index) {
+        if let Some(slot) = self
+            .active_tab_mut()
+            .and_then(|tab| tab.pane_names.get_mut(pane_index))
+        {
             match name {
                 Some(name) => {
                     *slot = Some(name.clone());
@@ -1094,7 +1365,12 @@ impl App {
     }
 
     fn swap_selected_tiles(&mut self) {
-        let (first, second) = match selected_swap_pair(&self.selected) {
+        let Some(tab) = self.active_tab_mut() else {
+            self.status = "no panes to swap".into();
+            return;
+        };
+
+        let (first, second) = match selected_swap_pair(&tab.selected) {
             SwapSelection::NeedsMore => {
                 self.status = "select two panes to swap".into();
                 return;
@@ -1106,29 +1382,26 @@ impl App {
             SwapSelection::Pair(first, second) => (first, second),
         };
 
-        if first >= self.panes.len() || second >= self.panes.len() {
+        if first >= tab.panes.len() || second >= tab.panes.len() {
             self.status = "select two visible panes to swap".into();
             return;
         }
 
-        self.panes.swap(first, second);
-        if first < self.pane_names.len() && second < self.pane_names.len() {
-            self.pane_names.swap(first, second);
+        tab.panes.swap(first, second);
+        if first < tab.pane_names.len() && second < tab.pane_names.len() {
+            tab.pane_names.swap(first, second);
         }
-        if let Some(selection) = self.text_selection {
-            self.text_selection = Some(MouseSelection {
+        if let Some(selection) = tab.text_selection {
+            tab.text_selection = Some(MouseSelection {
                 pane: swapped_index(selection.pane, first, second),
                 ..selection
             });
         }
-        if let Some(plan) = self.launch_plan.as_mut()
-            && first < plan.panes.len()
-            && second < plan.panes.len()
-        {
-            plan.panes.swap(first, second);
+        if first < tab.launch_plan.panes.len() && second < tab.launch_plan.panes.len() {
+            tab.launch_plan.panes.swap(first, second);
         }
-        swap_set_indices(&mut self.sleeping, first, second);
-        self.focus = swapped_index(self.focus, first, second);
+        swap_set_indices(&mut tab.sleeping, first, second);
+        tab.focus = swapped_index(tab.focus, first, second);
         self.status = format!("swapped panes {} and {}", first + 1, second + 1);
     }
 
@@ -1191,10 +1464,19 @@ impl App {
             return Ok(false);
         }
 
-        if let Some(index) = pane_at(&self.rects, mouse.column, mouse.row)
-            && self.sleeping.remove(&index)
-        {
-            self.focus = index;
+        let sleeping_pane = self
+            .active_tab()
+            .and_then(|tab| pane_at(&tab.rects, mouse.column, mouse.row));
+        let sleeping_pane = sleeping_pane.and_then(|index| {
+            let tab = self.active_tab_mut()?;
+            if tab.sleeping.remove(&index) {
+                tab.focus = index;
+                Some(index)
+            } else {
+                None
+            }
+        });
+        if let Some(index) = sleeping_pane {
             self.status = format!("woke pane {}", index + 1);
             return Ok(true);
         }
@@ -1206,21 +1488,29 @@ impl App {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(cell) = self.pane_cell_at(mouse.column, mouse.row) {
-                    self.focus = cell.pane;
-                    self.text_selection = Some(MouseSelection {
-                        pane: cell.pane,
-                        anchor: cell.point,
-                        cursor: cell.point,
-                        active: true,
-                        moved: false,
-                    });
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.focus = cell.pane;
+                        tab.text_selection = Some(MouseSelection {
+                            pane: cell.pane,
+                            anchor: cell.point,
+                            cursor: cell.point,
+                            active: true,
+                            moved: false,
+                        });
+                    }
                     self.status = format!("selecting text in pane {}", cell.pane + 1);
                     return Ok(true);
                 }
 
-                if let Some(index) = pane_at(&self.rects, mouse.column, mouse.row) {
-                    let changed = self.focus != index || self.clear_text_selection();
-                    self.focus = index;
+                if let Some(index) = self
+                    .active_tab()
+                    .and_then(|tab| pane_at(&tab.rects, mouse.column, mouse.row))
+                {
+                    let selection_cleared = self.clear_text_selection();
+                    let changed = self.focus() != index || selection_cleared;
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.focus = index;
+                    }
                     self.status = format!("focused pane {}", index + 1);
                     return Ok(changed);
                 }
@@ -1240,8 +1530,9 @@ impl App {
     }
 
     fn pane_cell_at(&self, x: u16, y: u16) -> Option<PaneCell> {
-        let pane = pane_at(&self.rects, x, y)?;
-        let rect = self.rects.get(pane).copied()?;
+        let tab = self.active_tab()?;
+        let pane = pane_at(&tab.rects, x, y)?;
+        let rect = tab.rects.get(pane).copied()?;
         let inner = pane_inner_rect(rect)?;
 
         if x < inner.x
@@ -1262,7 +1553,8 @@ impl App {
     }
 
     fn clamped_pane_cell(&self, pane: usize, x: u16, y: u16) -> Option<CellPoint> {
-        let rect = self.rects.get(pane).copied()?;
+        let tab = self.active_tab()?;
+        let rect = tab.rects.get(pane).copied()?;
         let inner = pane_inner_rect(rect)?;
         let max_x = inner.x.saturating_add(inner.width.saturating_sub(1));
         let max_y = inner.y.saturating_add(inner.height.saturating_sub(1));
@@ -1274,7 +1566,7 @@ impl App {
     }
 
     fn update_text_selection(&mut self, x: u16, y: u16) -> bool {
-        let Some(selection) = self.text_selection else {
+        let Some(selection) = self.active_tab().and_then(|tab| tab.text_selection) else {
             return false;
         };
         if !selection.active {
@@ -1285,16 +1577,18 @@ impl App {
             return false;
         };
 
-        self.text_selection = Some(MouseSelection {
-            cursor,
-            moved: true,
-            ..selection
-        });
+        if let Some(tab) = self.active_tab_mut() {
+            tab.text_selection = Some(MouseSelection {
+                cursor,
+                moved: true,
+                ..selection
+            });
+        }
         true
     }
 
     fn finish_text_selection(&mut self, x: u16, y: u16, terminal: &mut Tui) -> Result<bool> {
-        let Some(selection) = self.text_selection else {
+        let Some(selection) = self.active_tab().and_then(|tab| tab.text_selection) else {
             return Ok(false);
         };
         if !selection.active {
@@ -1310,12 +1604,16 @@ impl App {
             ..selection
         };
         if !selection.moved {
-            self.text_selection = None;
+            if let Some(tab) = self.active_tab_mut() {
+                tab.text_selection = None;
+            }
             self.status = format!("focused pane {}", selection.pane + 1);
             return Ok(true);
         }
 
-        self.text_selection = Some(selection);
+        if let Some(tab) = self.active_tab_mut() {
+            tab.text_selection = Some(selection);
+        }
 
         let text = self.selected_text(selection);
         if text.is_empty() {
@@ -1333,10 +1631,13 @@ impl App {
     }
 
     fn selected_text(&self, selection: MouseSelection) -> String {
-        let Some(pane) = self.panes.get(selection.pane) else {
+        let Some(tab) = self.active_tab() else {
             return String::new();
         };
-        let width = self
+        let Some(pane) = tab.panes.get(selection.pane) else {
+            return String::new();
+        };
+        let width = tab
             .rects
             .get(selection.pane)
             .and_then(|rect| pane_inner_rect(*rect))
@@ -1347,11 +1648,16 @@ impl App {
     }
 
     fn clear_text_selection(&mut self) -> bool {
-        self.text_selection.take().is_some()
+        self.active_tab_mut()
+            .and_then(|tab| tab.text_selection.take())
+            .is_some()
     }
 
     fn adjust_grid(&mut self, axis: GridAxis, delta: isize) -> Result<()> {
-        let current = self.layout.size();
+        let Some(current) = self.active_tab().map(|tab| tab.layout.size()) else {
+            self.status = "no active tab".into();
+            return Ok(());
+        };
         let Some(rows) =
             adjust_dimension(current.rows, if axis == GridAxis::Rows { delta } else { 0 })
         else {
@@ -1374,21 +1680,23 @@ impl App {
             return Ok(());
         }
 
-        let before = self.panes.len();
-        if next.count() > self.panes.len() {
+        let before = self.panes().len();
+        if next.count() > self.panes().len() {
             self.spawn_panes_to_fill(next.count())?;
-        } else if next.count() < self.panes.len() && !self.remove_overflow_panes(next.count(), next)
+        } else if next.count() < self.panes().len()
+            && !self.remove_overflow_panes(next.count(), next)
         {
             return Ok(());
         }
 
-        self.layout.set_size(next);
-        if let Some(plan) = &mut self.launch_plan {
-            plan.grid = next;
+        if let Some(tab) = self.active_tab_mut() {
+            tab.layout.set_size(next);
+            tab.launch_plan.grid = next;
         }
 
-        let added = self.panes.len().saturating_sub(before);
-        let removed = before.saturating_sub(self.panes.len());
+        let after = self.panes().len();
+        let added = after.saturating_sub(before);
+        let removed = before.saturating_sub(after);
         self.status = if added > 0 {
             format!(
                 "grid resized to {}x{}; spawned {added} pane(s)",
@@ -1402,9 +1710,7 @@ impl App {
         } else {
             format!(
                 "grid resized to {}x{}; {} pane(s)",
-                next.rows,
-                next.columns,
-                self.panes.len()
+                next.rows, next.columns, after
             )
         };
 
@@ -1414,17 +1720,24 @@ impl App {
     fn spawn_panes_to_fill(&mut self, target_count: usize) -> Result<()> {
         let specs = self.pane_specs_to_fill(target_count)?;
         for spec in specs {
-            self.spawn_pane_spec(&spec)?;
+            let pane = self.spawn_pane_spec(&spec)?;
+            let Some(tab) = self.active_tab_mut() else {
+                return Err(anyhow!("no active tab"));
+            };
+            tab.panes.push(pane);
         }
-        self.pane_names.resize(self.panes.len(), None);
+        if let Some(tab) = self.active_tab_mut() {
+            tab.pane_names.resize(tab.panes.len(), None);
+        }
         Ok(())
     }
 
     fn pane_specs_to_fill(&mut self, target_count: usize) -> Result<Vec<PaneLaunchSpec>> {
-        let plan = self
-            .launch_plan
-            .as_mut()
-            .ok_or_else(|| anyhow!("no launch plan selected"))?;
+        let tab = self
+            .active_tab_mut()
+            .ok_or_else(|| anyhow!("no active tab selected"))?;
+        let current_count = tab.panes.len();
+        let plan = &mut tab.launch_plan;
         if plan.panes.is_empty() {
             return Err(anyhow!("no pane template available"));
         }
@@ -1435,11 +1748,16 @@ impl App {
             plan.panes.push(spec);
         }
 
-        Ok(plan.panes[self.panes.len()..target_count].to_vec())
+        Ok(plan.panes[current_count..target_count].to_vec())
     }
 
     fn remove_overflow_panes(&mut self, target_count: usize, next: GridSize) -> bool {
-        let running = self
+        let Some(tab) = self.active_tab_mut() else {
+            self.status = "no active tab".into();
+            return false;
+        };
+
+        let running = tab
             .panes
             .iter()
             .skip(target_count)
@@ -1453,31 +1771,29 @@ impl App {
             return false;
         }
 
-        self.panes.truncate(target_count);
-        if let Some(plan) = &mut self.launch_plan {
-            plan.panes.truncate(target_count);
-        }
-        self.selected = self
+        tab.panes.truncate(target_count);
+        tab.launch_plan.panes.truncate(target_count);
+        tab.selected = tab
             .selected
             .iter()
             .copied()
             .filter(|index| *index < target_count)
             .collect();
-        if self.focus >= target_count {
-            self.focus = target_count.saturating_sub(1);
+        if tab.focus >= target_count {
+            tab.focus = target_count.saturating_sub(1);
         }
-        self.pane_names.truncate(target_count);
-        self.sleeping = self
+        tab.pane_names.truncate(target_count);
+        tab.sleeping = tab
             .sleeping
             .iter()
             .copied()
             .filter(|index| *index < target_count)
             .collect();
-        if self
+        if tab
             .text_selection
             .is_some_and(|selection| selection.pane >= target_count)
         {
-            self.text_selection = None;
+            tab.text_selection = None;
         }
         true
     }
@@ -1488,23 +1804,26 @@ impl App {
             return;
         }
 
-        let should_sleep = targets.iter().any(|index| !self.sleeping.contains(index));
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        let should_sleep = targets.iter().any(|index| !tab.sleeping.contains(index));
         if should_sleep {
             for index in &targets {
-                self.sleeping.insert(*index);
-                self.selected.remove(index);
+                tab.sleeping.insert(*index);
+                tab.selected.remove(index);
             }
 
-            if self.sleeping.contains(&self.focus)
-                && let Some(index) = self.next_awake_pane(self.focus)
+            if tab.sleeping.contains(&tab.focus)
+                && let Some(index) = next_awake_pane_for(tab.focus, tab.panes.len(), &tab.sleeping)
             {
-                self.focus = index;
+                tab.focus = index;
             }
         } else {
             for index in &targets {
-                self.sleeping.remove(index);
+                tab.sleeping.remove(index);
             }
-            self.focus = targets[0];
+            tab.focus = targets[0];
         }
 
         let action = if should_sleep { "slept" } else { "woke" };
@@ -1513,8 +1832,11 @@ impl App {
 
     fn route_input(&mut self, bytes: &[u8]) -> Result<()> {
         let targets = self.input_targets();
+        let Some(tab) = self.active_tab_mut() else {
+            return Ok(());
+        };
         for index in targets {
-            self.panes
+            tab.panes
                 .get(index)
                 .ok_or_else(|| anyhow!("invalid pane index {index}"))?
                 .write(bytes)?;
@@ -1523,91 +1845,105 @@ impl App {
     }
 
     fn input_targets(&self) -> Vec<usize> {
-        awake_input_targets_for(self.focus, &self.selected, self.panes.len(), &self.sleeping)
+        self.active_tab()
+            .map(|tab| {
+                awake_input_targets_for(tab.focus, &tab.selected, tab.panes.len(), &tab.sleeping)
+            })
+            .unwrap_or_default()
     }
 
     fn target_panes(&self) -> Vec<usize> {
-        input_targets_for(self.focus, &self.selected, self.panes.len())
+        self.active_tab()
+            .map(|tab| input_targets_for(tab.focus, &tab.selected, tab.panes.len()))
+            .unwrap_or_default()
     }
 
     fn focus_next(&mut self) {
-        if self.panes.is_empty() {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        if tab.panes.is_empty() {
             return;
         }
 
-        for offset in 1..=self.panes.len() {
-            let candidate = (self.focus + offset) % self.panes.len();
-            if !self.sleeping.contains(&candidate) {
-                self.focus = candidate;
+        for offset in 1..=tab.panes.len() {
+            let candidate = (tab.focus + offset) % tab.panes.len();
+            if !tab.sleeping.contains(&candidate) {
+                tab.focus = candidate;
                 return;
             }
         }
     }
 
     fn focus_previous(&mut self) {
-        if self.panes.is_empty() {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        if tab.panes.is_empty() {
             return;
         }
 
-        for offset in 1..=self.panes.len() {
-            let candidate = (self.focus + self.panes.len() - offset) % self.panes.len();
-            if !self.sleeping.contains(&candidate) {
-                self.focus = candidate;
+        for offset in 1..=tab.panes.len() {
+            let candidate = (tab.focus + tab.panes.len() - offset) % tab.panes.len();
+            if !tab.sleeping.contains(&candidate) {
+                tab.focus = candidate;
                 return;
             }
         }
     }
 
     fn focus_in_grid(&mut self, row_delta: isize) {
-        if self.panes.is_empty() {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        if tab.panes.is_empty() {
             return;
         }
 
-        let columns = self.layout.size().columns;
+        let columns = tab.layout.size().columns;
         let candidate = if row_delta.is_negative() {
-            self.focus.saturating_sub(columns)
+            tab.focus.saturating_sub(columns)
         } else {
-            self.focus.saturating_add(columns)
+            tab.focus.saturating_add(columns)
         };
-        if candidate < self.panes.len() && !self.sleeping.contains(&candidate) {
-            self.focus = candidate;
+        if candidate < tab.panes.len() && !tab.sleeping.contains(&candidate) {
+            tab.focus = candidate;
         }
-    }
-
-    fn next_awake_pane(&self, start: usize) -> Option<usize> {
-        if self.panes.is_empty() {
-            return None;
-        }
-
-        (1..=self.panes.len())
-            .map(|offset| (start + offset) % self.panes.len())
-            .find(|index| !self.sleeping.contains(index))
     }
 
     pub fn pane_rects(&self, area: Rect) -> Vec<Rect> {
-        self.layout.rects(area, self.panes.len())
+        self.active_tab()
+            .map(|tab| tab.layout.rects(area, tab.panes.len()))
+            .unwrap_or_default()
     }
 
     pub fn panes(&self) -> &[PtyPane] {
-        &self.panes
+        self.active_tab()
+            .map(|tab| tab.panes.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn focus(&self) -> usize {
-        self.focus
+        self.active_tab().map(|tab| tab.focus).unwrap_or(0)
     }
 
     pub fn selected(&self) -> &BTreeSet<usize> {
-        &self.selected
+        match self.active_tab() {
+            Some(tab) => &tab.selected,
+            None => empty_selection(),
+        }
     }
 
     pub fn selection_for_pane(&self, index: usize) -> Option<PaneSelection> {
-        self.text_selection
+        self.active_tab()
+            .and_then(|tab| tab.text_selection)
             .filter(|selection| selection.pane == index)
             .map(MouseSelection::range)
     }
 
     pub fn pane_sleeping(&self, index: usize) -> bool {
-        self.sleeping.contains(&index)
+        self.active_tab()
+            .is_some_and(|tab| tab.sleeping.contains(&index))
     }
 
     pub fn status(&self) -> &str {
@@ -1631,8 +1967,8 @@ impl App {
     }
 
     pub fn pane_label(&self, index: usize) -> String {
-        self.pane_names
-            .get(index)
+        self.active_tab()
+            .and_then(|tab| tab.pane_names.get(index))
             .and_then(|name| name.as_deref())
             .filter(|name| !name.is_empty())
             .map(str::to_string)
@@ -1648,27 +1984,45 @@ impl App {
         })
     }
 
+    pub fn rename_tab_view(&self) -> Option<RenameTabView> {
+        self.tab_rename.open.then(|| RenameTabView {
+            title: self.active_tab_title().to_string(),
+            value: self.tab_rename.value.clone(),
+            cursor: self.tab_rename.cursor,
+        })
+    }
+
+    pub fn tab_labels(&self) -> Vec<TabLabel> {
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| TabLabel {
+                title: tab.title.clone(),
+                active: index == self.active_tab,
+                activity: tab.panes.iter().any(|pane| pane.active),
+                exited: !tab.panes.is_empty() && tab.panes.iter().all(|pane| pane.exited),
+            })
+            .collect()
+    }
+
     pub fn pane_folder(&self, index: usize) -> Option<&str> {
-        self.launch_plan
-            .as_ref()
-            .and_then(|plan| plan.panes.get(index))
+        self.active_tab()
+            .and_then(|tab| tab.launch_plan.panes.get(index))
             .map(|pane| pane.folder_name.as_str())
     }
 
     pub fn pane_worktree(&self, index: usize) -> Option<&str> {
-        self.launch_plan
-            .as_ref()
-            .and_then(|plan| plan.panes.get(index))
+        self.active_tab()
+            .and_then(|tab| tab.launch_plan.panes.get(index))
             .and_then(|pane| pane.worktree_name.as_deref())
     }
 
     pub fn pane_conversation_footer(&self, index: usize, max_chars: usize) -> Option<String> {
         let label = self
-            .launch_plan
-            .as_ref()
-            .and_then(|plan| plan.panes.get(index))
+            .active_tab()
+            .and_then(|tab| tab.launch_plan.panes.get(index))
             .and_then(|pane| pane.agent_label())?;
-        let pane = self.panes.get(index)?;
+        let pane = self.panes().get(index)?;
         let summary = conversation_summary(pane.screen())
             .unwrap_or_else(|| "waiting for conversation".into());
         Some(truncate_chars(&format!("{label} | {summary}"), max_chars))
@@ -1678,9 +2032,8 @@ impl App {
         let mut parts = Vec::new();
 
         if let Some(profile_name) = self
-            .launch_plan
-            .as_ref()
-            .and_then(|plan| plan.panes.get(index))
+            .active_tab()
+            .and_then(|tab| tab.launch_plan.panes.get(index))
             .map(|pane| pane.profile_name.as_str())
             && let Some(label) = self.profile_usage.get(profile_name)
         {
@@ -1695,25 +2048,71 @@ impl App {
     }
 
     pub fn sync_pane_sizes(&mut self) {
-        for (index, rect) in self.rects.iter().enumerate() {
-            let Some(pane) = self.panes.get_mut(index) else {
+        let mut resize_error = None;
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+
+        for (index, rect) in tab.rects.iter().enumerate() {
+            let Some(pane) = tab.panes.get_mut(index) else {
                 continue;
             };
 
             let rows = rect.height.saturating_sub(2).max(1);
             let cols = rect.width.saturating_sub(2).max(1);
             if let Err(error) = pane.resize(rows, cols) {
-                self.status = format!("resize failed: {error:#}");
+                resize_error = Some(format!("resize failed: {error:#}"));
             }
+        }
+
+        if let Some(status) = resize_error {
+            self.status = status;
         }
     }
 
     fn sync_initial_pane_sizes(&mut self, terminal: &Tui) -> Result<()> {
         let size = terminal.size().context("failed to read terminal size")?;
-        self.grid_area = Rect::new(0, 0, size.width, size.height.saturating_sub(1));
-        self.rects = self.pane_rects(self.grid_area);
+        self.grid_area = Rect::new(0, 1, size.width, size.height.saturating_sub(2));
+        let rects = self.pane_rects(self.grid_area);
+        if let Some(tab) = self.active_tab_mut() {
+            tab.rects = rects;
+        }
         self.sync_pane_sizes();
         Ok(())
+    }
+
+    fn active_tab(&self) -> Option<&GridTab> {
+        self.tabs.get(self.active_tab)
+    }
+
+    fn active_tab_mut(&mut self) -> Option<&mut GridTab> {
+        self.tabs.get_mut(self.active_tab)
+    }
+
+    fn active_tab_title(&self) -> &str {
+        self.active_tab()
+            .map(|tab| tab.title.as_str())
+            .unwrap_or("Grid")
+    }
+
+    fn active_tab_has_sleeping_panes(&self) -> bool {
+        self.active_tab()
+            .is_some_and(|tab| !tab.sleeping.is_empty())
+    }
+
+    fn active_pane_cwd(&self) -> Option<std::path::PathBuf> {
+        let tab = self.active_tab()?;
+        tab.panes
+            .get(tab.focus)
+            .map(|pane| pane.cwd().to_path_buf())
+            .or_else(|| tab.panes.first().map(|pane| pane.cwd().to_path_buf()))
+    }
+
+    fn find_pane_mut(&mut self, id: PaneId, generation: u64) -> Option<&mut PtyPane> {
+        self.tabs
+            .iter_mut()
+            .flat_map(|tab| tab.panes.iter_mut())
+            .find(|pane| pane.id() == id && pane.generation() == generation)
     }
 }
 
@@ -1792,6 +2191,11 @@ fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) {
     }
 }
 
+fn empty_selection() -> &'static BTreeSet<usize> {
+    static EMPTY: OnceLock<BTreeSet<usize>> = OnceLock::new();
+    EMPTY.get_or_init(BTreeSet::new)
+}
+
 fn selected_swap_pair(selected: &BTreeSet<usize>) -> SwapSelection {
     match selected.len() {
         0 | 1 => SwapSelection::NeedsMore,
@@ -1850,6 +2254,18 @@ fn normalized_pane_name(value: &str) -> Option<String> {
         .to_string();
 
     (!name.is_empty()).then_some(name)
+}
+
+fn normalized_tab_title(value: &str) -> Option<String> {
+    let title = value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(MAX_TAB_TITLE_CHARS)
+        .collect::<String>();
+
+    (!title.is_empty()).then_some(title)
 }
 
 fn char_to_byte_index(value: &str, cursor: usize) -> usize {
@@ -1991,6 +2407,20 @@ fn awake_input_targets_for(
         .into_iter()
         .filter(|index| !sleeping.contains(index))
         .collect()
+}
+
+fn next_awake_pane_for(
+    start: usize,
+    pane_count: usize,
+    sleeping: &BTreeSet<usize>,
+) -> Option<usize> {
+    if pane_count == 0 {
+        return None;
+    }
+
+    (1..=pane_count)
+        .map(|offset| (start + offset) % pane_count)
+        .find(|index| !sleeping.contains(index))
 }
 
 fn pane_word(count: usize) -> &'static str {
@@ -2137,6 +2567,19 @@ mod tests {
             Some("api server".into())
         );
         assert_eq!(normalized_pane_name("   "), None);
+    }
+
+    #[test]
+    fn normalized_tab_title_trims_and_limits_titles() {
+        assert_eq!(
+            normalized_tab_title("  review   grid  "),
+            Some("review grid".into())
+        );
+        assert_eq!(normalized_tab_title("   "), None);
+        assert_eq!(
+            normalized_tab_title("abcdefghijklmnopqrstuvwxyz1234567890extra"),
+            Some("abcdefghijklmnopqrstuvwxyz1234567890extr".into())
+        );
     }
 
     #[test]
