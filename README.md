@@ -26,7 +26,7 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Sleeping panes stay visually hidden until hovered, then wake without crossing input into other panes.
 - Normal terminal keys pass through to the focused pane, or to selected panes when multiple panes are selected.
 - Modeless Alt shortcuts for pane focus, selection, rename, settings, and quit.
-- Compact dark theme with focus, selection, activity, exit, and output-volume badges.
+- Compact dark theme with focus, selection, sleep, exit, usage, and quiet-output cues.
 - Claude, Codex, and other agent panes show a compact conversation summary in the footer line.
 - Built-in launch profiles for common CLI coding agents.
 - Startup dimension picker with a live grid preview.
@@ -197,14 +197,16 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+r | Rename the focused pane |
 | Alt+z | Put the focused pane to sleep; when multiple panes are selected, sleep the selected panes |
 | Hover sleeping pane | Wake the pane and make its terminal contents visible again |
-| Alt+o | Open sample settings |
+| Alt+o | Open settings |
 | Alt+q | Quit |
 
 Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane.
 
 Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
 
-The settings screen is currently a sample UI. Its switches, steppers, and choices can be changed, but they do not affect runtime behavior yet.
+Pane titles add a small quiet-output marker after roughly three seconds without output. The marker means a pane produced output and then went idle; it does not mean the process exited or completed its task.
+
+The settings screen includes sample controls plus live color controls for the accent, focus, selected, quiet, and exited grid roles. Palette changes apply immediately for the current run.
 
 ## Profiles
 
