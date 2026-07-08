@@ -46,6 +46,18 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub no_mouse: bool,
 
+    /// Enable the local agent control API for child agent tools.
+    #[arg(long)]
+    pub agent_api: bool,
+
+    /// Localhost port for the agent control API. Use 0 to pick an available port.
+    #[arg(long, default_value_t = 0)]
+    pub agent_api_port: u16,
+
+    /// Run the GridBash MCP server over stdio.
+    #[arg(long)]
+    pub mcp: bool,
+
     /// Print detected launch profiles and exit.
     #[arg(long)]
     pub list_profiles: bool,
