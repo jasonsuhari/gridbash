@@ -925,11 +925,11 @@ impl App {
                     }
                 }
                 PtyEvent::Exited { pane, generation } => {
-                    if let Some(target) = self.find_pane_mut(pane, generation) {
-                        if !target.exited {
-                            target.exited = true;
-                            changed = true;
-                        }
+                    if let Some(target) = self.find_pane_mut(pane, generation)
+                        && !target.exited
+                    {
+                        target.exited = true;
+                        changed = true;
                     }
                 }
             }
