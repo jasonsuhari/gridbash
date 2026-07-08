@@ -16,7 +16,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, style::Color};
 use tokio::sync::mpsc;
 use vt100::Screen;
 
@@ -38,6 +38,8 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const MAX_PANE_NAME_CHARS: usize = 32;
 const CONVERSATION_SUMMARY_MAX_CHARS: usize = 120;
+const ACTIVITY_DECAY_INTERVAL: Duration = Duration::from_millis(250);
+const OUTPUT_QUIET_AFTER: Duration = Duration::from_secs(3);
 
 pub struct App {
     config: Config,
@@ -153,11 +155,181 @@ enum SwapSelection {
     Pair(usize, usize),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteRole {
+    Accent,
+    Focus,
+    Selected,
+    Quiet,
+    Exited,
+}
+
+impl PaletteRole {
+    const ALL: [Self; 5] = [
+        Self::Accent,
+        Self::Focus,
+        Self::Selected,
+        Self::Quiet,
+        Self::Exited,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Accent => "Accent color",
+            Self::Focus => "Focus border",
+            Self::Selected => "Selected border",
+            Self::Quiet => "Quiet border",
+            Self::Exited => "Exited border",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteColor {
+    Cyan,
+    Sky,
+    Blue,
+    Teal,
+    Green,
+    Yellow,
+    Amber,
+    Orange,
+    Red,
+    Magenta,
+    Gray,
+    White,
+}
+
+impl PaletteColor {
+    const ALL: [Self; 12] = [
+        Self::Cyan,
+        Self::Sky,
+        Self::Blue,
+        Self::Teal,
+        Self::Green,
+        Self::Yellow,
+        Self::Amber,
+        Self::Orange,
+        Self::Red,
+        Self::Magenta,
+        Self::Gray,
+        Self::White,
+    ];
+
+    fn color(self) -> Color {
+        match self {
+            Self::Cyan => Color::Cyan,
+            Self::Sky => Color::Rgb(88, 166, 255),
+            Self::Blue => Color::Blue,
+            Self::Teal => Color::Rgb(54, 211, 153),
+            Self::Green => Color::Green,
+            Self::Yellow => Color::Yellow,
+            Self::Amber => Color::Rgb(245, 158, 11),
+            Self::Orange => Color::Rgb(249, 115, 22),
+            Self::Red => Color::Red,
+            Self::Magenta => Color::Magenta,
+            Self::Gray => Color::Gray,
+            Self::White => Color::White,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cyan => "cyan",
+            Self::Sky => "sky",
+            Self::Blue => "blue",
+            Self::Teal => "teal",
+            Self::Green => "green",
+            Self::Yellow => "yellow",
+            Self::Amber => "amber",
+            Self::Orange => "orange",
+            Self::Red => "red",
+            Self::Magenta => "magenta",
+            Self::Gray => "gray",
+            Self::White => "white",
+        }
+    }
+
+    fn adjust(self, delta: isize) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|color| *color == self)
+            .unwrap_or_default();
+        let next = (index as isize + delta).rem_euclid(Self::ALL.len() as isize) as usize;
+        Self::ALL[next]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridPalette {
+    accent: PaletteColor,
+    focus: PaletteColor,
+    selected: PaletteColor,
+    quiet: PaletteColor,
+    exited: PaletteColor,
+}
+
+impl Default for GridPalette {
+    fn default() -> Self {
+        Self {
+            accent: PaletteColor::Cyan,
+            focus: PaletteColor::Yellow,
+            selected: PaletteColor::Cyan,
+            quiet: PaletteColor::Magenta,
+            exited: PaletteColor::Red,
+        }
+    }
+}
+
+impl GridPalette {
+    pub fn accent(&self) -> Color {
+        self.accent.color()
+    }
+
+    pub fn focus(&self) -> Color {
+        self.focus.color()
+    }
+
+    pub fn selected(&self) -> Color {
+        self.selected.color()
+    }
+
+    pub fn quiet(&self) -> Color {
+        self.quiet.color()
+    }
+
+    pub fn exited(&self) -> Color {
+        self.exited.color()
+    }
+
+    fn color_for(self, role: PaletteRole) -> PaletteColor {
+        match role {
+            PaletteRole::Accent => self.accent,
+            PaletteRole::Focus => self.focus,
+            PaletteRole::Selected => self.selected,
+            PaletteRole::Quiet => self.quiet,
+            PaletteRole::Exited => self.exited,
+        }
+    }
+
+    fn adjust(&mut self, role: PaletteRole, delta: isize) {
+        let target = match role {
+            PaletteRole::Accent => &mut self.accent,
+            PaletteRole::Focus => &mut self.focus,
+            PaletteRole::Selected => &mut self.selected,
+            PaletteRole::Quiet => &mut self.quiet,
+            PaletteRole::Exited => &mut self.exited,
+        };
+        *target = (*target).adjust(delta);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SettingsRow {
     pub selected: bool,
     pub label: &'static str,
     pub value: String,
+    pub value_color: Option<Color>,
     pub hint: &'static str,
 }
 
@@ -258,7 +430,7 @@ struct SettingsState {
     pane_density: i32,
     scrollback: i32,
     refresh_ms: i32,
-    accent_index: usize,
+    palette: GridPalette,
 }
 
 impl Default for SettingsState {
@@ -272,14 +444,14 @@ impl Default for SettingsState {
             pane_density: 2,
             scrollback: 10_000,
             refresh_ms: 16,
-            accent_index: 0,
+            palette: GridPalette::default(),
         }
     }
 }
 
 impl SettingsState {
-    const ROW_COUNT: usize = 7;
-    const ACCENTS: [&'static str; 4] = ["cyan", "yellow", "green", "magenta"];
+    const BASE_ROW_COUNT: usize = 6;
+    const ROW_COUNT: usize = Self::BASE_ROW_COUNT + PaletteRole::ALL.len();
 
     fn move_cursor(&mut self, delta: isize) {
         let current = self.cursor as isize;
@@ -287,16 +459,25 @@ impl SettingsState {
     }
 
     fn activate(&mut self) {
+        if self.palette_role().is_some() {
+            self.adjust(1);
+            return;
+        }
+
         match self.cursor {
             0 => self.compact_titles = !self.compact_titles,
             1 => self.activity_badges = !self.activity_badges,
             2 => self.confirm_quit = !self.confirm_quit,
-            6 => self.adjust(1),
             _ => self.adjust(1),
         }
     }
 
     fn adjust(&mut self, delta: i32) {
+        if let Some(role) = self.palette_role() {
+            self.palette.adjust(role, delta as isize);
+            return;
+        }
+
         match self.cursor {
             0 => {
                 if delta != 0 {
@@ -316,60 +497,80 @@ impl SettingsState {
             3 => self.pane_density = (self.pane_density + delta).clamp(1, 5),
             4 => self.scrollback = (self.scrollback + delta * 1000).clamp(1_000, 50_000),
             5 => self.refresh_ms = (self.refresh_ms + delta * 4).clamp(8, 100),
-            6 => {
-                let count = Self::ACCENTS.len() as isize;
-                self.accent_index =
-                    (self.accent_index as isize + delta as isize).rem_euclid(count) as usize;
-            }
             _ => {}
         }
     }
 
     fn rows(&self) -> Vec<SettingsRow> {
-        vec![
+        let mut rows = vec![
             self.row(
                 0,
                 "Compact pane titles",
                 switch_value(self.compact_titles),
+                None,
                 "shorter labels in pane chrome",
             ),
             self.row(
                 1,
                 "Activity badges",
                 switch_value(self.activity_badges),
-                "show live and selected state",
+                None,
+                "quiet markers",
             ),
             self.row(
                 2,
                 "Confirm before quit",
                 switch_value(self.confirm_quit),
+                None,
                 "extra guard for Alt+q",
             ),
             self.row(
                 3,
                 "Pane density",
                 self.pane_density.to_string(),
+                None,
                 "spacing scale from 1 to 5",
             ),
             self.row(
                 4,
                 "Scrollback rows",
                 self.scrollback.to_string(),
+                None,
                 "history budget per pane",
             ),
             self.row(
                 5,
                 "Refresh delay",
                 format!("{} ms", self.refresh_ms),
+                None,
                 "render loop throttle",
             ),
-            self.row(
-                6,
-                "Accent color",
-                Self::ACCENTS[self.accent_index].to_string(),
-                "cycle the UI highlight",
-            ),
-        ]
+        ];
+
+        rows.extend(
+            PaletteRole::ALL
+                .iter()
+                .enumerate()
+                .map(|(offset, role)| self.palette_row(Self::BASE_ROW_COUNT + offset, *role)),
+        );
+        rows
+    }
+
+    fn palette_role(&self) -> Option<PaletteRole> {
+        self.cursor
+            .checked_sub(Self::BASE_ROW_COUNT)
+            .and_then(|index| PaletteRole::ALL.get(index).copied())
+    }
+
+    fn palette_row(&self, index: usize, role: PaletteRole) -> SettingsRow {
+        let color = self.palette.color_for(role);
+        self.row(
+            index,
+            role.label(),
+            color.name().to_string(),
+            Some(color.color()),
+            "-/+ color",
+        )
     }
 
     fn row(
@@ -377,12 +578,14 @@ impl SettingsState {
         index: usize,
         label: &'static str,
         value: String,
+        value_color: Option<Color>,
         hint: &'static str,
     ) -> SettingsRow {
         SettingsRow {
             selected: self.cursor == index,
             label,
             value,
+            value_color,
             hint,
         }
     }
@@ -660,15 +863,20 @@ impl App {
     }
 
     fn decay_activity(&mut self) -> bool {
-        if self.last_activity_decay.elapsed() < Duration::from_millis(250) {
+        if self.last_activity_decay.elapsed() < ACTIVITY_DECAY_INTERVAL {
             return false;
         }
 
-        let changed = self.panes.iter().any(|pane| pane.active);
+        let now = Instant::now();
+        let mut changed = false;
         for pane in &mut self.panes {
-            pane.active = false;
+            if pane.active {
+                pane.active = false;
+                changed = true;
+            }
+            changed |= pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER);
         }
-        self.last_activity_decay = Instant::now();
+        self.last_activity_decay = now;
         changed
     }
 
@@ -1414,6 +1622,14 @@ impl App {
         self.settings.rows()
     }
 
+    pub fn activity_badges_enabled(&self) -> bool {
+        self.settings.activity_badges
+    }
+
+    pub fn palette(&self) -> &GridPalette {
+        &self.settings.palette
+    }
+
     pub fn pane_label(&self, index: usize) -> String {
         self.pane_names
             .get(index)
@@ -1948,6 +2164,28 @@ mod tests {
             awake_input_targets_for(2, &selected(&[0, 3]), 4, &selected(&[0])),
             vec![3]
         );
+    }
+
+    #[test]
+    fn palette_color_cycles_in_both_directions() {
+        assert_eq!(PaletteColor::Cyan.adjust(1), PaletteColor::Sky);
+        assert_eq!(PaletteColor::Cyan.adjust(-1), PaletteColor::White);
+    }
+
+    #[test]
+    fn settings_rows_include_live_grid_palette_roles() {
+        let settings = SettingsState::default();
+        let rows = settings.rows();
+
+        assert_eq!(rows.len(), SettingsState::ROW_COUNT);
+        assert_eq!(rows[1].label, "Activity badges");
+        assert_eq!(rows[1].value, "on");
+        assert_eq!(rows[SettingsState::BASE_ROW_COUNT].label, "Accent color");
+        assert_eq!(
+            rows[SettingsState::BASE_ROW_COUNT + 3].label,
+            "Quiet border"
+        );
+        assert_eq!(rows[SettingsState::BASE_ROW_COUNT + 3].value, "magenta");
     }
 }
 

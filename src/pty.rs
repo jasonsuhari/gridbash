@@ -3,6 +3,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -31,6 +32,40 @@ pub enum PtyEvent {
     },
 }
 
+#[derive(Debug, Clone, Default)]
+struct OutputActivity {
+    last_output_at: Option<Instant>,
+    quiet: bool,
+}
+
+impl OutputActivity {
+    fn record_output(&mut self, now: Instant) {
+        self.last_output_at = Some(now);
+        self.quiet = false;
+    }
+
+    fn refresh(&mut self, now: Instant, quiet_after: Duration) -> bool {
+        if self.quiet {
+            return false;
+        }
+
+        let Some(last_output_at) = self.last_output_at else {
+            return false;
+        };
+
+        if now.duration_since(last_output_at) < quiet_after {
+            return false;
+        }
+
+        self.quiet = true;
+        true
+    }
+
+    fn is_quiet(&self) -> bool {
+        self.quiet
+    }
+}
+
 pub struct PtyPane {
     id: PaneId,
     generation: u64,
@@ -42,6 +77,7 @@ pub struct PtyPane {
     rows: u16,
     cols: u16,
     response_scan_tail: Vec<u8>,
+    output_activity: OutputActivity,
     pub active: bool,
     pub exited: bool,
 }
@@ -102,6 +138,7 @@ impl PtyPane {
             rows: 24,
             cols: 80,
             response_scan_tail: Vec::new(),
+            output_activity: OutputActivity::default(),
             active: false,
             exited: false,
         })
@@ -126,7 +163,20 @@ impl PtyPane {
     pub fn process_output(&mut self, bytes: &[u8]) {
         self.parser.process(bytes);
         self.active = true;
+        self.output_activity.record_output(Instant::now());
         self.answer_terminal_queries(bytes);
+    }
+
+    pub fn output_quiet(&self) -> bool {
+        !self.exited && self.output_activity.is_quiet()
+    }
+
+    pub fn refresh_output_activity(&mut self, now: Instant, quiet_after: Duration) -> bool {
+        if self.exited {
+            return false;
+        }
+
+        self.output_activity.refresh(now, quiet_after)
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
@@ -296,6 +346,27 @@ mod tests {
         scan.extend_from_slice(b"prompt");
 
         assert_eq!(count_sequence(&scan, CURSOR_POSITION_QUERY), 0);
+    }
+
+    #[test]
+    fn output_activity_marks_quiet_after_output_stops() {
+        let start = Instant::now();
+        let quiet_after = Duration::from_secs(3);
+        let mut activity = OutputActivity::default();
+
+        assert!(!activity.refresh(start + quiet_after, quiet_after));
+        assert!(!activity.is_quiet());
+
+        activity.record_output(start);
+        assert!(!activity.refresh(start + Duration::from_secs(2), quiet_after));
+        assert!(!activity.is_quiet());
+
+        assert!(activity.refresh(start + quiet_after, quiet_after));
+        assert!(activity.is_quiet());
+        assert!(!activity.refresh(start + quiet_after + Duration::from_secs(1), quiet_after));
+
+        activity.record_output(start + quiet_after + Duration::from_secs(2));
+        assert!(!activity.is_quiet());
     }
 
     #[test]
