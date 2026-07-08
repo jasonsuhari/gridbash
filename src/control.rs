@@ -1,0 +1,500 @@
+use std::{
+    env,
+    io::{self, BufRead, Read, Write},
+    net::{Shutdown, TcpListener, TcpStream},
+    path::PathBuf,
+    sync::mpsc::{self, Sender},
+    thread,
+    time::Duration,
+};
+
+use anyhow::{Context, Result, anyhow};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+const CONTROL_READ_TIMEOUT: Duration = Duration::from_secs(8);
+const CONTROL_REQUEST_LIMIT_BYTES: u64 = 64 * 1024;
+
+#[derive(Debug, Clone)]
+pub struct ControlHandle {
+    endpoint: String,
+    token: String,
+}
+
+impl ControlHandle {
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ControlCommand {
+    SetStatus {
+        message: String,
+    },
+    SendCommand {
+        panes: Vec<usize>,
+        command: String,
+        submit: bool,
+    },
+    ShowImage {
+        path: PathBuf,
+        title: Option<String>,
+    },
+}
+
+#[derive(Debug)]
+pub struct ControlEnvelope {
+    pub command: ControlCommand,
+    pub response_tx: Sender<ControlResponse>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlResponse {
+    pub ok: bool,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
+impl ControlResponse {
+    pub fn ok(message: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            message: message.into(),
+            data: None,
+        }
+    }
+
+    pub fn with_data(message: impl Into<String>, data: Value) -> Self {
+        Self {
+            ok: true,
+            message: message.into(),
+            data: Some(data),
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            message: message.into(),
+            data: None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlWireRequest {
+    token: String,
+    command: ControlCommand,
+}
+
+pub fn start_control_server(
+    port: u16,
+    command_tx: Sender<ControlEnvelope>,
+) -> Result<ControlHandle> {
+    let listener = TcpListener::bind(("127.0.0.1", port)).context("failed to bind agent API")?;
+    let endpoint = listener
+        .local_addr()
+        .context("failed to read agent API address")?
+        .to_string();
+    let token = new_token()?;
+    let server_token = token.clone();
+
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => handle_control_stream(stream, &server_token, &command_tx),
+                Err(error) => eprintln!("gridbash agent API accept failed: {error}"),
+            }
+        }
+    });
+
+    Ok(ControlHandle { endpoint, token })
+}
+
+fn handle_control_stream(mut stream: TcpStream, token: &str, command_tx: &Sender<ControlEnvelope>) {
+    let _ = stream.set_read_timeout(Some(CONTROL_READ_TIMEOUT));
+    let response = read_control_request(&mut stream).and_then(|request| {
+        if request.token != token {
+            return Ok(ControlResponse::error("invalid GridBash control token"));
+        }
+
+        let (response_tx, response_rx) = mpsc::channel();
+        command_tx
+            .send(ControlEnvelope {
+                command: request.command,
+                response_tx,
+            })
+            .context("GridBash app is not accepting control commands")?;
+        response_rx
+            .recv_timeout(CONTROL_READ_TIMEOUT)
+            .context("GridBash app did not answer the control command")
+    });
+
+    let response = response.unwrap_or_else(|error| ControlResponse::error(format!("{error:#}")));
+    let _ = serde_json::to_writer(&mut stream, &response);
+    let _ = stream.flush();
+}
+
+fn read_control_request(stream: &mut TcpStream) -> Result<ControlWireRequest> {
+    let mut body = String::new();
+    stream
+        .take(CONTROL_REQUEST_LIMIT_BYTES)
+        .read_to_string(&mut body)
+        .context("failed to read control request")?;
+    serde_json::from_str(&body).context("invalid control request JSON")
+}
+
+fn new_token() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| anyhow!("failed to create agent API token: {error}"))?;
+    Ok(hex_encode(&bytes))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(TABLE[(byte >> 4) as usize] as char);
+        output.push(TABLE[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+pub fn run_mcp_server() -> Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+
+    for line in stdin.lock().lines() {
+        let line = line.context("failed to read MCP input")?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let response = handle_mcp_line(&line);
+        if let Some(response) = response {
+            writeln!(stdout, "{}", serde_json::to_string(&response)?)
+                .context("failed to write MCP response")?;
+            stdout.flush().context("failed to flush MCP response")?;
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_mcp_line(line: &str) -> Option<Value> {
+    let value = match serde_json::from_str::<Value>(line) {
+        Ok(value) => value,
+        Err(error) => {
+            return Some(rpc_error(
+                Value::Null,
+                -32700,
+                format!("Parse error: {error}"),
+            ));
+        }
+    };
+
+    let id = value.get("id").cloned();
+    let Some(method) = value.get("method").and_then(Value::as_str) else {
+        return id.map(|id| rpc_error(id, -32600, "Invalid request"));
+    };
+
+    match method {
+        "notifications/initialized" => None,
+        "initialize" => id.map(|id| rpc_result(id, initialize_result())),
+        "ping" => id.map(|id| rpc_result(id, json!({}))),
+        "tools/list" => id.map(|id| rpc_result(id, tools_list_result())),
+        "tools/call" => id.map(|id| {
+            let params = value.get("params").cloned().unwrap_or_else(|| json!({}));
+            match handle_tool_call(params) {
+                Ok(result) => rpc_result(id, result),
+                Err(error) => rpc_error(id, -32602, format!("{error:#}")),
+            }
+        }),
+        _ => id.map(|id| rpc_error(id, -32601, format!("Method not found: {method}"))),
+    }
+}
+
+fn initialize_result() -> Value {
+    json!({
+        "protocolVersion": MCP_PROTOCOL_VERSION,
+        "capabilities": {
+            "tools": {
+                "listChanged": false
+            }
+        },
+        "serverInfo": {
+            "name": "gridbash",
+            "title": "GridBash Agent Control",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+        "instructions": "Use these tools only against the current GridBash session. Mutating tools send input into live panes."
+    })
+}
+
+fn tools_list_result() -> Value {
+    json!({
+        "tools": [
+            {
+                "name": "gridbash_show_image",
+                "title": "Show Image",
+                "description": "Display a local image path as an overlay in the running GridBash session.",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Local filesystem path to a png, jpg, gif, or webp image."
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "Optional overlay title."
+                        }
+                    },
+                    "required": ["path"]
+                }
+            },
+            {
+                "name": "gridbash_send_command",
+                "title": "Send Command",
+                "description": "Send command text to one or more 1-based GridBash panes.",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "panes": {
+                            "type": "array",
+                            "description": "1-based pane numbers to receive the command.",
+                            "items": {
+                                "type": "integer",
+                                "minimum": 1
+                            },
+                            "minItems": 1
+                        },
+                        "command": {
+                            "type": "string",
+                            "description": "Text to write into each target pane."
+                        },
+                        "submit": {
+                            "type": "boolean",
+                            "description": "When true, append Enter after the command.",
+                            "default": true
+                        }
+                    },
+                    "required": ["panes", "command"]
+                }
+            },
+            {
+                "name": "gridbash_set_status",
+                "title": "Set Status",
+                "description": "Set the GridBash status bar text for the current session.",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "Short status message to show in the GridBash status bar."
+                        }
+                    },
+                    "required": ["message"]
+                }
+            }
+        ]
+    })
+}
+
+fn handle_tool_call(params: Value) -> Result<Value> {
+    let tool_name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing tool name"))?;
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let command = tool_arguments_to_command(tool_name, arguments)?;
+    let response = call_gridbash_control(command)?;
+    Ok(tool_response(response.ok, response.message, response.data))
+}
+
+fn tool_arguments_to_command(tool_name: &str, arguments: Value) -> Result<ControlCommand> {
+    match tool_name {
+        "gridbash_show_image" => {
+            #[derive(Deserialize)]
+            struct Args {
+                path: PathBuf,
+                title: Option<String>,
+            }
+
+            let args: Args = serde_json::from_value(arguments).context("invalid image args")?;
+            Ok(ControlCommand::ShowImage {
+                path: absolute_tool_path(args.path)?,
+                title: args.title,
+            })
+        }
+        "gridbash_send_command" => {
+            #[derive(Deserialize)]
+            struct Args {
+                panes: Vec<usize>,
+                command: String,
+                submit: Option<bool>,
+            }
+
+            let args: Args = serde_json::from_value(arguments).context("invalid command args")?;
+            if args.panes.is_empty() {
+                return Err(anyhow!("at least one pane is required"));
+            }
+            Ok(ControlCommand::SendCommand {
+                panes: args.panes,
+                command: args.command,
+                submit: args.submit.unwrap_or(true),
+            })
+        }
+        "gridbash_set_status" => {
+            #[derive(Deserialize)]
+            struct Args {
+                message: String,
+            }
+
+            let args: Args = serde_json::from_value(arguments).context("invalid status args")?;
+            Ok(ControlCommand::SetStatus {
+                message: args.message,
+            })
+        }
+        _ => Err(anyhow!("unknown GridBash tool: {tool_name}")),
+    }
+}
+
+fn absolute_tool_path(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+
+    Ok(env::current_dir()
+        .context("failed to resolve MCP server current directory")?
+        .join(path))
+}
+
+fn call_gridbash_control(command: ControlCommand) -> Result<ControlResponse> {
+    let endpoint = env::var("GRIDBASH_CONTROL_ADDR")
+        .context("GRIDBASH_CONTROL_ADDR is not set; start GridBash with --agent-api")?;
+    let token = env::var("GRIDBASH_CONTROL_TOKEN")
+        .context("GRIDBASH_CONTROL_TOKEN is not set; start GridBash with --agent-api")?;
+    let mut stream = TcpStream::connect(&endpoint)
+        .with_context(|| format!("failed to connect to GridBash control API at {endpoint}"))?;
+    stream
+        .set_read_timeout(Some(CONTROL_READ_TIMEOUT))
+        .context("failed to set GridBash control read timeout")?;
+    stream
+        .set_write_timeout(Some(CONTROL_READ_TIMEOUT))
+        .context("failed to set GridBash control write timeout")?;
+
+    serde_json::to_writer(&mut stream, &json!({ "token": token, "command": command }))
+        .context("failed to send GridBash control request")?;
+    stream
+        .shutdown(Shutdown::Write)
+        .context("failed to finish GridBash control request")?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .context("failed to read GridBash control response")?;
+    serde_json::from_str(&response).context("invalid GridBash control response")
+}
+
+fn tool_response(ok: bool, message: String, data: Option<Value>) -> Value {
+    let text = if let Some(data) = data {
+        format!(
+            "{message}\n{}",
+            serde_json::to_string_pretty(&data).unwrap_or(data.to_string())
+        )
+    } else {
+        message
+    };
+
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": text
+            }
+        ],
+        "isError": !ok
+    })
+}
+
+fn rpc_result(id: Value, result: Value) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result
+    })
+}
+
+fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": code,
+            "message": message.into()
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_lists_the_gridbash_control_tools() {
+        let response =
+            handle_mcp_line(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).expect("response");
+        let names = response["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .map(|tool| tool["name"].as_str().expect("name"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "gridbash_show_image",
+                "gridbash_send_command",
+                "gridbash_set_status"
+            ]
+        );
+    }
+
+    #[test]
+    fn send_command_defaults_to_submit() {
+        let command = tool_arguments_to_command(
+            "gridbash_send_command",
+            json!({
+                "panes": [2],
+                "command": "cargo test"
+            }),
+        )
+        .expect("command");
+
+        assert!(matches!(
+            command,
+            ControlCommand::SendCommand {
+                panes,
+                command,
+                submit: true
+            } if panes == vec![2] && command == "cargo test"
+        ));
+    }
+}
