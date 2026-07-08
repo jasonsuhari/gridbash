@@ -743,9 +743,9 @@ impl App {
             (None, None)
         };
         let base_status = if mouse_enabled {
-            "Drag copies within pane | Alt+t tab | Alt+n new tab | Alt+r pane rename | Alt+Shift+r tab rename | Alt+arrows move | Alt+Shift+arrows resize | Alt+x swap | Alt+z sleep | Alt+o settings"
+            "Drag copies within pane | Alt+t tab | Alt+Shift+t restart | Alt+n new tab | Alt+r pane rename | Alt+Shift+r tab rename | Alt+arrows move | Alt+Shift+arrows resize | Alt+x swap | Alt+z sleep | Alt+o settings"
         } else {
-            "Alt+t tab | Alt+n new tab | Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r pane rename | Alt+Shift+r tab rename | Alt+x swap | Alt+z sleep | Alt+o settings"
+            "Alt+t tab | Alt+Shift+t restart | Alt+n new tab | Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r pane rename | Alt+Shift+r tab rename | Alt+x swap | Alt+z sleep | Alt+o settings"
         };
         let status = control_handle
             .as_ref()
@@ -842,11 +842,15 @@ impl App {
     }
 
     fn spawn_pane_spec(&mut self, spec: &PaneLaunchSpec, pane_index: usize) -> Result<PtyPane> {
+        self.spawn_pane_instance(spec, pane_index)
+    }
+
+    fn spawn_pane_instance(&mut self, spec: &PaneLaunchSpec, pane_index: usize) -> Result<PtyPane> {
         let launch = spec.resolved_command()?;
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
         let extra_env = self.pane_env(pane_index);
-        let pane = PtyPane::spawn(
+        PtyPane::spawn(
             &spec.profile_name,
             id,
             0,
@@ -855,8 +859,7 @@ impl App {
             &spec.cwd,
             &extra_env,
             self.event_tx.clone(),
-        )?;
-        Ok(pane)
+        )
     }
 
     fn pane_env(&self, pane_index: usize) -> Vec<(String, String)> {
@@ -1193,8 +1196,14 @@ impl App {
         }
 
         if let Some(bytes) = terminal_key_bytes(key) {
-            self.route_input(&bytes)?;
+            let status_changed = self.route_input(&bytes)?;
+            return Ok(if selection_cleared || status_changed {
+                KeyOutcome::Render
+            } else {
+                KeyOutcome::Continue
+            });
         }
+
         Ok(if selection_cleared {
             KeyOutcome::Render
         } else {
@@ -1270,7 +1279,11 @@ impl App {
         match lower {
             'q' => Ok(Some(true)),
             't' => {
-                self.next_tab();
+                if modifiers.contains(KeyModifiers::SHIFT) {
+                    self.restart_exited_targets();
+                } else {
+                    self.next_tab();
+                }
                 Ok(Some(false))
             }
             'n' => {
@@ -2021,18 +2034,38 @@ impl App {
         self.status = format!("{} {} {}", action, targets.len(), pane_word(targets.len()));
     }
 
-    fn route_input(&mut self, bytes: &[u8]) -> Result<()> {
+    fn route_input(&mut self, bytes: &[u8]) -> Result<bool> {
         let targets = self.input_targets();
         let Some(tab) = self.active_tab_mut() else {
-            return Ok(());
+            return Ok(false);
         };
+        let mut skipped_exited = 0;
+
         for index in targets {
-            tab.panes
-                .get(index)
-                .ok_or_else(|| anyhow!("invalid pane index {index}"))?
-                .write(bytes)?;
+            let pane = tab
+                .panes
+                .get_mut(index)
+                .ok_or_else(|| anyhow!("invalid pane index {index}"))?;
+            if pane.exited {
+                skipped_exited += 1;
+                continue;
+            }
+            pane.write(bytes)?;
         }
-        Ok(())
+
+        if skipped_exited > 0 {
+            self.status = if skipped_exited == 1 {
+                "pane exited; press Alt+Shift+t to restart it".into()
+            } else {
+                format!(
+                    "skipped {skipped_exited} exited {}; press Alt+Shift+t to restart them",
+                    pane_word(skipped_exited)
+                )
+            };
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     fn input_targets(&self) -> Vec<usize> {
@@ -2047,6 +2080,71 @@ impl App {
         self.active_tab()
             .map(|tab| input_targets_for(tab.focus, &tab.selected, tab.panes.len()))
             .unwrap_or_default()
+    }
+
+    fn restart_exited_targets(&mut self) {
+        let targets = self.target_panes();
+        if targets.is_empty() {
+            self.status = "no panes to restart".into();
+            return;
+        }
+
+        let Some(tab) = self.active_tab() else {
+            self.status = "no active tab".into();
+            return;
+        };
+
+        let exited = tab.panes.iter().map(|pane| pane.exited).collect::<Vec<_>>();
+        let restart = restart_targets_for(&targets, &exited);
+        if restart.indices.is_empty() {
+            self.status = "no exited target panes; Alt+Shift+t restarts exited panes".into();
+            return;
+        }
+
+        let specs = restart
+            .indices
+            .iter()
+            .filter_map(|index| {
+                tab.launch_plan
+                    .panes
+                    .get(*index)
+                    .cloned()
+                    .map(|spec| (*index, spec))
+            })
+            .collect::<Vec<_>>();
+        if specs.is_empty() {
+            self.status = "cannot restart panes without a launch plan".into();
+            return;
+        }
+
+        let mut restarted = 0;
+        for (index, spec) in specs {
+            let pane = match self.spawn_pane_instance(&spec, index) {
+                Ok(pane) => pane,
+                Err(error) => {
+                    self.status = format!("restart failed for pane {}: {error:#}", index + 1);
+                    return;
+                }
+            };
+
+            if let Some(tab) = self.active_tab_mut() {
+                tab.panes[index] = pane;
+                tab.sleeping.remove(&index);
+            }
+            restarted += 1;
+        }
+
+        self.sync_pane_sizes();
+        self.status = if restart.running > 0 {
+            format!(
+                "restarted {restarted} {}; skipped {} running {}",
+                pane_word(restarted),
+                restart.running,
+                pane_word(restart.running)
+            )
+        } else {
+            format!("restarted {restarted} {}", pane_word(restarted))
+        };
     }
 
     fn focus_next(&mut self) {
@@ -2438,6 +2536,27 @@ fn input_targets_for(focus: usize, selected: &BTreeSet<usize>, pane_count: usize
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct RestartTargets {
+    indices: Vec<usize>,
+    running: usize,
+}
+
+fn restart_targets_for(targets: &[usize], exited: &[bool]) -> RestartTargets {
+    let mut indices = Vec::new();
+    let mut running = 0;
+
+    for index in targets {
+        match exited.get(*index) {
+            Some(true) => indices.push(*index),
+            Some(false) => running += 1,
+            None => {}
+        }
+    }
+
+    RestartTargets { indices, running }
+}
+
 fn normalized_pane_name(value: &str) -> Option<String> {
     let name = value
         .trim()
@@ -2761,6 +2880,28 @@ mod tests {
     fn input_targets_clamps_focus_to_available_panes() {
         assert_eq!(input_targets_for(8, &selected(&[]), 4), vec![3]);
         assert!(input_targets_for(0, &selected(&[]), 0).is_empty());
+    }
+
+    #[test]
+    fn restart_targets_include_only_exited_panes() {
+        assert_eq!(
+            restart_targets_for(&[0, 1, 2], &[true, false, true]),
+            RestartTargets {
+                indices: vec![0, 2],
+                running: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn restart_targets_ignore_invalid_indices() {
+        assert_eq!(
+            restart_targets_for(&[1, 4], &[false, true]),
+            RestartTargets {
+                indices: vec![1],
+                running: 0,
+            }
+        );
     }
 
     #[test]
