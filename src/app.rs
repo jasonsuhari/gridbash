@@ -17,7 +17,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, style::Color};
 use tokio::sync::mpsc;
 use vt100::Screen;
 
@@ -25,6 +25,8 @@ use crate::{
     cli::{Cli, GridMode},
     composer::Composer,
     config::Config,
+    control::{self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse},
+    image_preview::{self, ImagePreview},
     layout::{GridLayout, GridSize, PaneId, pane_at},
     orchestrator::{
         GroupColor, GroupId, MAX_GROUPS, SendBlock, SendTargets, extract_send_blocks, group_color,
@@ -46,6 +48,8 @@ const WORKER_RELAY_IDLE: Duration = Duration::from_millis(900);
 const WORKER_RELAY_MAX_BYTES: usize = 6000;
 const MAX_PANE_NAME_CHARS: usize = 32;
 const CONVERSATION_SUMMARY_MAX_CHARS: usize = 120;
+const ACTIVITY_DECAY_INTERVAL: Duration = Duration::from_millis(250);
+const OUTPUT_QUIET_AFTER: Duration = Duration::from_secs(3);
 
 pub struct App {
     config: Config,
@@ -65,6 +69,9 @@ pub struct App {
     prompt: Option<PromptState>,
     rects: Vec<Rect>,
     mouse_enabled: bool,
+    control_handle: Option<ControlHandle>,
+    control_rx: Option<std_mpsc::Receiver<ControlEnvelope>>,
+    image_overlay: Option<ImagePreview>,
     settings: SettingsState,
     rename: RenamePaneState,
     status: String,
@@ -195,11 +202,181 @@ pub struct PromptView {
     pub input: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteRole {
+    Accent,
+    Focus,
+    Selected,
+    Quiet,
+    Exited,
+}
+
+impl PaletteRole {
+    const ALL: [Self; 5] = [
+        Self::Accent,
+        Self::Focus,
+        Self::Selected,
+        Self::Quiet,
+        Self::Exited,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Accent => "Accent color",
+            Self::Focus => "Focus border",
+            Self::Selected => "Selected border",
+            Self::Quiet => "Quiet border",
+            Self::Exited => "Exited border",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteColor {
+    Cyan,
+    Sky,
+    Blue,
+    Teal,
+    Green,
+    Yellow,
+    Amber,
+    Orange,
+    Red,
+    Magenta,
+    Gray,
+    White,
+}
+
+impl PaletteColor {
+    const ALL: [Self; 12] = [
+        Self::Cyan,
+        Self::Sky,
+        Self::Blue,
+        Self::Teal,
+        Self::Green,
+        Self::Yellow,
+        Self::Amber,
+        Self::Orange,
+        Self::Red,
+        Self::Magenta,
+        Self::Gray,
+        Self::White,
+    ];
+
+    fn color(self) -> Color {
+        match self {
+            Self::Cyan => Color::Cyan,
+            Self::Sky => Color::Rgb(88, 166, 255),
+            Self::Blue => Color::Blue,
+            Self::Teal => Color::Rgb(54, 211, 153),
+            Self::Green => Color::Green,
+            Self::Yellow => Color::Yellow,
+            Self::Amber => Color::Rgb(245, 158, 11),
+            Self::Orange => Color::Rgb(249, 115, 22),
+            Self::Red => Color::Red,
+            Self::Magenta => Color::Magenta,
+            Self::Gray => Color::Gray,
+            Self::White => Color::White,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cyan => "cyan",
+            Self::Sky => "sky",
+            Self::Blue => "blue",
+            Self::Teal => "teal",
+            Self::Green => "green",
+            Self::Yellow => "yellow",
+            Self::Amber => "amber",
+            Self::Orange => "orange",
+            Self::Red => "red",
+            Self::Magenta => "magenta",
+            Self::Gray => "gray",
+            Self::White => "white",
+        }
+    }
+
+    fn adjust(self, delta: isize) -> Self {
+        let index = Self::ALL
+            .iter()
+            .position(|color| *color == self)
+            .unwrap_or_default();
+        let next = (index as isize + delta).rem_euclid(Self::ALL.len() as isize) as usize;
+        Self::ALL[next]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridPalette {
+    accent: PaletteColor,
+    focus: PaletteColor,
+    selected: PaletteColor,
+    quiet: PaletteColor,
+    exited: PaletteColor,
+}
+
+impl Default for GridPalette {
+    fn default() -> Self {
+        Self {
+            accent: PaletteColor::Cyan,
+            focus: PaletteColor::Yellow,
+            selected: PaletteColor::Cyan,
+            quiet: PaletteColor::Magenta,
+            exited: PaletteColor::Red,
+        }
+    }
+}
+
+impl GridPalette {
+    pub fn accent(&self) -> Color {
+        self.accent.color()
+    }
+
+    pub fn focus(&self) -> Color {
+        self.focus.color()
+    }
+
+    pub fn selected(&self) -> Color {
+        self.selected.color()
+    }
+
+    pub fn quiet(&self) -> Color {
+        self.quiet.color()
+    }
+
+    pub fn exited(&self) -> Color {
+        self.exited.color()
+    }
+
+    fn color_for(self, role: PaletteRole) -> PaletteColor {
+        match role {
+            PaletteRole::Accent => self.accent,
+            PaletteRole::Focus => self.focus,
+            PaletteRole::Selected => self.selected,
+            PaletteRole::Quiet => self.quiet,
+            PaletteRole::Exited => self.exited,
+        }
+    }
+
+    fn adjust(&mut self, role: PaletteRole, delta: isize) {
+        let target = match role {
+            PaletteRole::Accent => &mut self.accent,
+            PaletteRole::Focus => &mut self.focus,
+            PaletteRole::Selected => &mut self.selected,
+            PaletteRole::Quiet => &mut self.quiet,
+            PaletteRole::Exited => &mut self.exited,
+        };
+        *target = (*target).adjust(delta);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SettingsRow {
     pub selected: bool,
     pub label: &'static str,
     pub value: String,
+    pub value_color: Option<Color>,
     pub hint: &'static str,
 }
 
@@ -300,7 +477,7 @@ struct SettingsState {
     pane_density: i32,
     scrollback: i32,
     refresh_ms: i32,
-    accent_index: usize,
+    palette: GridPalette,
 }
 
 impl Default for SettingsState {
@@ -314,14 +491,14 @@ impl Default for SettingsState {
             pane_density: 2,
             scrollback: 10_000,
             refresh_ms: 16,
-            accent_index: 0,
+            palette: GridPalette::default(),
         }
     }
 }
 
 impl SettingsState {
-    const ROW_COUNT: usize = 7;
-    const ACCENTS: [&'static str; 4] = ["cyan", "yellow", "green", "magenta"];
+    const BASE_ROW_COUNT: usize = 6;
+    const ROW_COUNT: usize = Self::BASE_ROW_COUNT + PaletteRole::ALL.len();
 
     fn move_cursor(&mut self, delta: isize) {
         let current = self.cursor as isize;
@@ -329,16 +506,25 @@ impl SettingsState {
     }
 
     fn activate(&mut self) {
+        if self.palette_role().is_some() {
+            self.adjust(1);
+            return;
+        }
+
         match self.cursor {
             0 => self.compact_titles = !self.compact_titles,
             1 => self.activity_badges = !self.activity_badges,
             2 => self.confirm_quit = !self.confirm_quit,
-            6 => self.adjust(1),
             _ => self.adjust(1),
         }
     }
 
     fn adjust(&mut self, delta: i32) {
+        if let Some(role) = self.palette_role() {
+            self.palette.adjust(role, delta as isize);
+            return;
+        }
+
         match self.cursor {
             0 => {
                 if delta != 0 {
@@ -358,60 +544,80 @@ impl SettingsState {
             3 => self.pane_density = (self.pane_density + delta).clamp(1, 5),
             4 => self.scrollback = (self.scrollback + delta * 1000).clamp(1_000, 50_000),
             5 => self.refresh_ms = (self.refresh_ms + delta * 4).clamp(8, 100),
-            6 => {
-                let count = Self::ACCENTS.len() as isize;
-                self.accent_index =
-                    (self.accent_index as isize + delta as isize).rem_euclid(count) as usize;
-            }
             _ => {}
         }
     }
 
     fn rows(&self) -> Vec<SettingsRow> {
-        vec![
+        let mut rows = vec![
             self.row(
                 0,
                 "Compact pane titles",
                 switch_value(self.compact_titles),
+                None,
                 "shorter labels in pane chrome",
             ),
             self.row(
                 1,
                 "Activity badges",
                 switch_value(self.activity_badges),
-                "show live and selected state",
+                None,
+                "quiet markers",
             ),
             self.row(
                 2,
                 "Confirm before quit",
                 switch_value(self.confirm_quit),
+                None,
                 "extra guard for Alt+q",
             ),
             self.row(
                 3,
                 "Pane density",
                 self.pane_density.to_string(),
+                None,
                 "spacing scale from 1 to 5",
             ),
             self.row(
                 4,
                 "Scrollback rows",
                 self.scrollback.to_string(),
+                None,
                 "history budget per pane",
             ),
             self.row(
                 5,
                 "Refresh delay",
                 format!("{} ms", self.refresh_ms),
+                None,
                 "render loop throttle",
             ),
-            self.row(
-                6,
-                "Accent color",
-                Self::ACCENTS[self.accent_index].to_string(),
-                "cycle the UI highlight",
-            ),
-        ]
+        ];
+
+        rows.extend(
+            PaletteRole::ALL
+                .iter()
+                .enumerate()
+                .map(|(offset, role)| self.palette_row(Self::BASE_ROW_COUNT + offset, *role)),
+        );
+        rows
+    }
+
+    fn palette_role(&self) -> Option<PaletteRole> {
+        self.cursor
+            .checked_sub(Self::BASE_ROW_COUNT)
+            .and_then(|index| PaletteRole::ALL.get(index).copied())
+    }
+
+    fn palette_row(&self, index: usize, role: PaletteRole) -> SettingsRow {
+        let color = self.palette.color_for(role);
+        self.row(
+            index,
+            role.label(),
+            color.name().to_string(),
+            Some(color.color()),
+            "-/+ color",
+        )
     }
 
     fn row(
@@ -419,12 +625,14 @@ impl SettingsState {
         index: usize,
         label: &'static str,
         value: String,
+        value_color: Option<Color>,
         hint: &'static str,
     ) -> SettingsRow {
         SettingsRow {
             selected: self.cursor == index,
             label,
             value,
+            value_color,
             hint,
         }
     }
@@ -452,6 +660,28 @@ impl App {
             });
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (usage_tx, usage_rx) = std_mpsc::channel();
+        let agent_api_enabled = cli.agent_api || cli.agent_api_port != 0;
+        let (control_handle, control_rx) = if agent_api_enabled {
+            let (control_tx, control_rx) = std_mpsc::channel();
+            (
+                Some(control::start_control_server(
+                    cli.agent_api_port,
+                    control_tx,
+                )?),
+                Some(control_rx),
+            )
+        } else {
+            (None, None)
+        };
+        let base_status = if mouse_enabled {
+            "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        } else {
+            "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        };
+        let status = control_handle
+            .as_ref()
+            .map(|control| format!("agent API {} | {base_status}", control.endpoint()))
+            .unwrap_or_else(|| base_status.into());
 
         Ok(Self {
             config,
@@ -471,15 +701,12 @@ impl App {
             prompt: None,
             rects: Vec::new(),
             mouse_enabled,
+            control_handle,
+            control_rx,
+            image_overlay: None,
             settings: SettingsState::default(),
             rename: RenamePaneState::default(),
-            status: if mouse_enabled {
-                "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
-                    .into()
-            } else {
-                "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
-                    .into()
-            },
+            status,
             next_pane_id: 0,
             event_tx,
             event_rx,
@@ -560,16 +787,34 @@ impl App {
         let launch = spec.resolved_command()?;
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
+        let pane_index = self.panes.len();
+        let extra_env = self.pane_env(pane_index);
         let pane = PtyPane::spawn(
             id,
             0,
             &launch.command,
             &launch.args,
             &spec.cwd,
+            &extra_env,
             self.event_tx.clone(),
         )?;
         self.panes.push(pane);
         Ok(())
+    }
+
+    fn pane_env(&self, pane_index: usize) -> Vec<(String, String)> {
+        let Some(control) = &self.control_handle else {
+            return Vec::new();
+        };
+
+        vec![
+            (
+                "GRIDBASH_CONTROL_ADDR".into(),
+                control.endpoint().to_string(),
+            ),
+            ("GRIDBASH_CONTROL_TOKEN".into(), control.token().to_string()),
+            ("GRIDBASH_PANE_INDEX".into(), (pane_index + 1).to_string()),
+        ]
     }
 
     fn run_loop(&mut self, terminal: &mut Tui) -> Result<()> {
@@ -579,6 +824,7 @@ impl App {
         loop {
             needs_render |= self.drain_pty_events();
             needs_render |= self.drain_usage_events();
+            needs_render |= self.drain_control_events();
             needs_render |= self.decay_activity();
             needs_render |= self.relay_worker_output();
 
@@ -881,20 +1127,158 @@ impl App {
         changed
     }
 
+    fn drain_control_events(&mut self) -> bool {
+        let mut changed = false;
+
+        loop {
+            let envelope = self.control_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+            let Some(envelope) = envelope else {
+                break;
+            };
+
+            let response = self.handle_control_command(envelope.command);
+            changed = true;
+            let _ = envelope.response_tx.send(response);
+        }
+
+        changed
+    }
+
+    fn handle_control_command(&mut self, command: ControlCommand) -> ControlResponse {
+        match command {
+            ControlCommand::SetStatus { message } => self.set_control_status(message),
+            ControlCommand::SendCommand {
+                panes,
+                command,
+                submit,
+            } => self.send_control_command(&panes, &command, submit),
+            ControlCommand::ShowImage { path, title } => self.show_control_image(path, title),
+        }
+    }
+
+    fn set_control_status(&mut self, message: String) -> ControlResponse {
+        let message = truncate_chars(message.trim(), 180);
+        if message.is_empty() {
+            return ControlResponse::error("status message cannot be empty");
+        }
+
+        self.status = message.clone();
+        ControlResponse::ok(format!("status set: {message}"))
+    }
+
+    fn send_control_command(
+        &mut self,
+        pane_numbers: &[usize],
+        command: &str,
+        submit: bool,
+    ) -> ControlResponse {
+        let targets = match self.control_pane_indices(pane_numbers) {
+            Ok(targets) => targets,
+            Err(error) => return ControlResponse::error(format!("{error:#}")),
+        };
+        let command_bytes = command.as_bytes();
+
+        for index in &targets {
+            let Some(pane) = self.panes.get(*index) else {
+                return ControlResponse::error(format!("pane {} is unavailable", index + 1));
+            };
+            if !command_bytes.is_empty()
+                && let Err(error) = pane.write(command_bytes)
+            {
+                return ControlResponse::error(format!(
+                    "failed to send command to pane {}: {error:#}",
+                    index + 1
+                ));
+            }
+            if submit && let Err(error) = pane.write(b"\r") {
+                return ControlResponse::error(format!(
+                    "failed to submit command in pane {}: {error:#}",
+                    index + 1
+                ));
+            }
+        }
+
+        let panes = pane_number_list(&targets);
+        self.status = if submit {
+            format!("agent sent command to pane(s) {panes}")
+        } else {
+            format!("agent wrote text to pane(s) {panes}")
+        };
+        ControlResponse::ok(self.status.clone())
+    }
+
+    fn show_control_image(
+        &mut self,
+        path: std::path::PathBuf,
+        title: Option<String>,
+    ) -> ControlResponse {
+        let preview = match image_preview::load_image_preview(&path, title, 72, 24) {
+            Ok(preview) => preview,
+            Err(error) => return ControlResponse::error(format!("{error:#}")),
+        };
+        let title = preview.title.clone();
+        let data = serde_json::json!({
+            "path": preview.path.display().to_string(),
+            "source_width": preview.source_width,
+            "source_height": preview.source_height,
+            "preview_columns": preview.cell_width,
+            "preview_rows": preview.cell_height
+        });
+
+        self.status = format!(
+            "showing image {title} ({}x{})",
+            preview.source_width, preview.source_height
+        );
+        self.image_overlay = Some(preview);
+        ControlResponse::with_data(self.status.clone(), data)
+    }
+
+    fn control_pane_indices(&self, pane_numbers: &[usize]) -> Result<Vec<usize>> {
+        if pane_numbers.is_empty() {
+            return Err(anyhow!("at least one target pane is required"));
+        }
+
+        let mut targets = BTreeSet::new();
+        for pane_number in pane_numbers {
+            if *pane_number == 0 || *pane_number > self.panes.len() {
+                return Err(anyhow!("pane {pane_number} is not available"));
+            }
+            let index = pane_number - 1;
+            if self.sleeping.contains(&index) {
+                return Err(anyhow!("pane {pane_number} is asleep"));
+            }
+            if self.panes.get(index).is_some_and(|pane| pane.exited) {
+                return Err(anyhow!("pane {pane_number} has exited"));
+            }
+            targets.insert(index);
+        }
+
+        Ok(targets.into_iter().collect())
+    }
+
     fn decay_activity(&mut self) -> bool {
-        if self.last_activity_decay.elapsed() < Duration::from_millis(250) {
+        if self.last_activity_decay.elapsed() < ACTIVITY_DECAY_INTERVAL {
             return false;
         }
 
-        let changed = self.panes.iter().any(|pane| pane.active);
+        let now = Instant::now();
+        let mut changed = false;
         for pane in &mut self.panes {
-            pane.active = false;
+            if pane.active {
+                pane.active = false;
+                changed = true;
+            }
+            changed |= pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER);
         }
-        self.last_activity_decay = Instant::now();
+        self.last_activity_decay = now;
         changed
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if self.image_overlay.is_some() {
+            return Ok(self.handle_image_overlay_key(key));
+        }
+
         if self.rename.open {
             return self.handle_rename_key(key);
         }
@@ -929,6 +1313,21 @@ impl App {
         } else {
             KeyOutcome::Continue
         })
+    }
+
+    fn handle_image_overlay_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return KeyOutcome::Quit;
+        }
+
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                self.image_overlay = None;
+                self.status = "image closed".into();
+                KeyOutcome::Render
+            }
+            _ => KeyOutcome::Continue,
+        }
     }
 
     fn handle_app_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
@@ -1231,6 +1630,7 @@ impl App {
             &launch.command,
             &launch.args,
             &cwd,
+            &[],
             self.event_tx.clone(),
         ) {
             Ok(manager) => manager,
@@ -1977,8 +2377,20 @@ impl App {
         self.settings.open
     }
 
+    pub fn image_overlay_view(&self) -> Option<&ImagePreview> {
+        self.image_overlay.as_ref()
+    }
+
     pub fn settings_rows(&self) -> Vec<SettingsRow> {
         self.settings.rows()
+    }
+
+    pub fn activity_badges_enabled(&self) -> bool {
+        self.settings.activity_badges
+    }
+
+    pub fn palette(&self) -> &GridPalette {
+        &self.settings.palette
     }
 
     pub fn pane_label(&self, index: usize) -> String {
@@ -2411,6 +2823,14 @@ fn pane_word(count: usize) -> &'static str {
     if count == 1 { "pane" } else { "panes" }
 }
 
+fn pane_number_list(indices: &[usize]) -> String {
+    indices
+        .iter()
+        .map(|index| (index + 1).to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn control_byte(ch: char) -> Option<u8> {
     let lower = ch.to_ascii_lowercase();
     if lower.is_ascii_lowercase() {
@@ -2578,6 +2998,28 @@ mod tests {
             awake_input_targets_for(2, &selected(&[0, 3]), 4, &selected(&[0])),
             vec![3]
         );
+    }
+
+    #[test]
+    fn palette_color_cycles_in_both_directions() {
+        assert_eq!(PaletteColor::Cyan.adjust(1), PaletteColor::Sky);
+        assert_eq!(PaletteColor::Cyan.adjust(-1), PaletteColor::White);
+    }
+
+    #[test]
+    fn settings_rows_include_live_grid_palette_roles() {
+        let settings = SettingsState::default();
+        let rows = settings.rows();
+
+        assert_eq!(rows.len(), SettingsState::ROW_COUNT);
+        assert_eq!(rows[1].label, "Activity badges");
+        assert_eq!(rows[1].value, "on");
+        assert_eq!(rows[SettingsState::BASE_ROW_COUNT].label, "Accent color");
+        assert_eq!(
+            rows[SettingsState::BASE_ROW_COUNT + 3].label,
+            "Quiet border"
+        );
+        assert_eq!(rows[SettingsState::BASE_ROW_COUNT + 3].value, "magenta");
     }
 }
 
