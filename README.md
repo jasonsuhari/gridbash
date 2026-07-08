@@ -195,6 +195,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+r | Rename the focused pane |
+| Alt+t | Restart exited focused pane; when multiple panes are selected, restart exited selected panes |
 | Alt+z | Put the focused pane to sleep; when multiple panes are selected, sleep the selected panes |
 | Hover sleeping pane | Wake the pane and make its terminal contents visible again |
 | Alt+o | Open settings |

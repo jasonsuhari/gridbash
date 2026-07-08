@@ -133,7 +133,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(" | Alt+x swap | Alt+z sleep | hover wakes | Alt+q quit"),
+        Span::raw(" | Alt+t restart | Alt+x swap | Alt+z sleep | Alt+q quit"),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
