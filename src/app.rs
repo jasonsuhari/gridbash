@@ -69,6 +69,17 @@ pub struct App {
     last_activity_decay: Instant,
 }
 
+struct AppInit {
+    config: Config,
+    worktrees: Option<ManagedWorktreeOptions>,
+    launch_plan: Option<LaunchPlan>,
+    grid: GridSize,
+    mouse_enabled: bool,
+    restored_histories: Vec<SavedPaneHistory>,
+    session_recorder: Option<SessionRecorder>,
+    status: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyOutcome {
     Continue,
@@ -420,16 +431,16 @@ impl App {
                 rows: 2,
                 columns: 3,
             });
-        Ok(Self::from_parts(
+        Ok(Self::from_parts(AppInit {
             config,
             worktrees,
             launch_plan,
             grid,
             mouse_enabled,
-            Vec::new(),
-            None,
-            default_status(mouse_enabled),
-        ))
+            restored_histories: Vec::new(),
+            session_recorder: None,
+            status: default_status(mouse_enabled),
+        }))
     }
 
     pub fn resume(config: Config, record: SessionRecord, mouse_enabled: bool) -> Result<Self> {
@@ -439,36 +450,27 @@ impl App {
         let session_id = record.session.id.clone();
         let recorder = SessionRecorder::continue_record(record);
 
-        Ok(Self::from_parts(
+        Ok(Self::from_parts(AppInit {
             config,
-            None,
-            Some(launch_plan),
+            worktrees: None,
+            launch_plan: Some(launch_plan),
             grid,
             mouse_enabled,
             restored_histories,
-            Some(recorder),
-            format!("resumed session {session_id}"),
-        ))
+            session_recorder: Some(recorder),
+            status: format!("resumed session {session_id}"),
+        }))
     }
 
-    fn from_parts(
-        config: Config,
-        worktrees: Option<ManagedWorktreeOptions>,
-        launch_plan: Option<LaunchPlan>,
-        grid: GridSize,
-        mouse_enabled: bool,
-        restored_histories: Vec<SavedPaneHistory>,
-        session_recorder: Option<SessionRecorder>,
-        status: String,
-    ) -> Self {
+    fn from_parts(init: AppInit) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (usage_tx, usage_rx) = std_mpsc::channel();
 
         Self {
-            config,
-            worktrees,
-            launch_plan,
-            layout: GridLayout::new(grid),
+            config: init.config,
+            worktrees: init.worktrees,
+            launch_plan: init.launch_plan,
+            layout: GridLayout::new(init.grid),
             grid_area: Rect::default(),
             panes: Vec::new(),
             focus: 0,
@@ -477,12 +479,12 @@ impl App {
             text_selection: None,
             sleeping: BTreeSet::new(),
             rects: Vec::new(),
-            mouse_enabled,
+            mouse_enabled: init.mouse_enabled,
             settings: SettingsState::default(),
             rename: RenamePaneState::default(),
-            status,
-            restored_histories,
-            session_recorder,
+            status: init.status,
+            restored_histories: init.restored_histories,
+            session_recorder: init.session_recorder,
             next_pane_id: 0,
             event_tx,
             event_rx,
