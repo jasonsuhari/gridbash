@@ -1,15 +1,33 @@
 [defaults]
 profile = "git-bash"
+manager_profile = "claude-1"
+
+[todos]
+idle_seconds = 90
+prompts = [
+  "Review the latest changes and summarize anything risky.",
+  "Run the fastest relevant validation and report failures.",
+]
+
+[auth]
+home = "C:\\Users\\Jason\\.claude-profiles"
+usage_status = true
+
+[auth.defaults]
+claude = "claude-1"
+codex = "codex-2"
 
 [profiles.codex-fast]
 command = "codex"
 args = ["--model", "gpt-5.4-mini"]
 title = "Codex Fast"
+agent_kind = "codex"
 
 [profiles.claude-review]
 command = "claude"
 args = []
 title = "Claude Review"
+agent_kind = "claude"
 
 [profiles.git-worktree]
 command = "bash"

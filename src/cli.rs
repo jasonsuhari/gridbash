@@ -1,12 +1,15 @@
 use std::path::PathBuf;
 
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "gridbash")]
 #[command(about = "Fast, beautiful terminal grids for CLI agents")]
 #[command(version)]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Grid size as rows x columns, for example 2x3.
     pub grid: Option<String>,
 
@@ -17,6 +20,10 @@ pub struct Cli {
     /// Profile to launch in every pane. Overrides GRIDBASH_PROFILE and config defaults.
     #[arg(long)]
     pub profile: Option<String>,
+
+    /// Profile for hidden manager agents attached to worker groups.
+    #[arg(long)]
+    pub manager_profile: Option<String>,
 
     /// Persist the default profile to the GridBash config file and exit.
     #[arg(long, visible_alias = "set-default")]
@@ -71,4 +78,49 @@ pub struct Cli {
 pub enum GridMode {
     Grid,
     Auto,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum Command {
+    /// Find and reopen a saved GridBash session.
+    Resume(ResumeArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ResumeArgs {
+    /// Session id or unique id prefix to resume.
+    pub session: Option<String>,
+
+    /// Print saved sessions and exit.
+    #[arg(long)]
+    pub list: bool,
+
+    /// Resume the most recently updated session without prompting.
+    #[arg(long)]
+    pub latest: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_resume_subcommand() {
+        let cli = Cli::parse_from(["gridbash", "resume", "--latest"]);
+        let Some(Command::Resume(args)) = cli.command else {
+            panic!("expected resume command");
+        };
+
+        assert!(args.latest);
+        assert!(cli.grid.is_none());
+    }
+
+    #[test]
+    fn keeps_grid_positional_launches() {
+        let cli = Cli::parse_from(["gridbash", "2x3", "--profile", "git-bash"]);
+
+        assert!(cli.command.is_none());
+        assert_eq!(cli.grid.as_deref(), Some("2x3"));
+        assert_eq!(cli.profile.as_deref(), Some("git-bash"));
+    }
 }

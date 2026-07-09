@@ -17,6 +17,7 @@ pub fn load_profiles() -> Result<Vec<VibeProfile>> {
         command: "vibe".into(),
         args: vec!["profiles".into()],
         title: None,
+        agent_kind: None,
     }
     .resolved_command()
     .context("vibe is required for GridBash orchestration, but it was not found")?;
@@ -44,6 +45,18 @@ pub fn parse_profiles(raw: &str) -> Vec<VibeProfile> {
     raw.lines()
         .filter_map(parse_profile_line)
         .collect::<Vec<_>>()
+}
+
+pub fn profile_for_name(name: &str, profiles: &[VibeProfile]) -> Option<Profile> {
+    profiles
+        .iter()
+        .find(|profile| profile.name == name && profile.ready)
+        .map(|profile| Profile {
+            command: "vibe".into(),
+            args: vec!["run".into(), profile.name.clone(), "--".into()],
+            title: Some(profile.name.clone()),
+            agent_kind: None,
+        })
 }
 
 fn parse_profile_line(line: &str) -> Option<VibeProfile> {
@@ -104,5 +117,26 @@ Profiles in C:\Users\Jason\.claude-profiles:
                 },
             ]
         );
+    }
+
+    #[test]
+    fn builds_profile_for_ready_vibe_agent() {
+        let profiles = vec![
+            VibeProfile {
+                name: "claude-1".into(),
+                ready: true,
+                status: "auth files present".into(),
+            },
+            VibeProfile {
+                name: "codex-1".into(),
+                ready: false,
+                status: "not logged in".into(),
+            },
+        ];
+
+        let profile = profile_for_name("claude-1", &profiles).expect("ready profile");
+        assert_eq!(profile.command, "vibe");
+        assert_eq!(profile.args, vec!["run", "claude-1", "--"]);
+        assert!(profile_for_name("codex-1", &profiles).is_none());
     }
 }

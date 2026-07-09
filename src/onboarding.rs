@@ -56,7 +56,8 @@ struct TerminalChoice {
 }
 
 pub fn should_run(cli: &Cli, config: &Config) -> bool {
-    cli.profile.is_none()
+    cli.command.is_none()
+        && cli.profile.is_none()
         && env::var_os("GRIDBASH_PROFILE").is_none()
         && config.defaults.profile.is_none()
 }

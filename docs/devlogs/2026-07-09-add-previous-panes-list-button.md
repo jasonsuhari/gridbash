@@ -25,4 +25,4 @@ Release target: unreleased
 
 ## Release Notes
 
-- Added a previous panes list button and `Alt+p` selector for focusing panes by their conversation summary.
+- Added a previous panes list button and `Alt+Shift+p` selector for focusing panes by their conversation summary.

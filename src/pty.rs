@@ -1,4 +1,6 @@
 use std::{
+    collections::BTreeMap,
+    env,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -18,6 +20,12 @@ const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
 const PRIMARY_DEVICE_ATTRIBUTES_QUERY: &[u8] = b"\x1b[c";
 const PRIMARY_DEVICE_ATTRIBUTES_ZERO_QUERY: &[u8] = b"\x1b[0c";
 const MAX_TERMINAL_QUERY_LEN: usize = 4;
+const MAX_INPUT_HISTORY: usize = 200;
+const MAX_INPUT_LINE_CHARS: usize = 4096;
+const MAX_OUTPUT_TAIL_CHARS: usize = 40_000;
+const MAX_REPLAY_OUTPUT_CHARS: usize = 18_000;
+const MAX_OSC_SCAN: usize = 4096;
+const PTY_READ_BUFFER_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone)]
 pub enum PtyEvent {
@@ -78,6 +86,10 @@ pub struct PtyPane {
     cols: u16,
     response_scan_tail: Vec<u8>,
     output_activity: OutputActivity,
+    osc_scan_tail: Vec<u8>,
+    input_history: Vec<String>,
+    pending_input: String,
+    output_tail: String,
     pub active: bool,
     pub exited: bool,
 }
@@ -85,10 +97,12 @@ pub struct PtyPane {
 impl PtyPane {
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
+        profile_name: &str,
         id: PaneId,
         generation: u64,
         command: &Path,
         args: &[String],
+        env: &BTreeMap<String, String>,
         cwd: &Path,
         extra_env: &[(String, String)],
         event_tx: mpsc::UnboundedSender<PtyEvent>,
@@ -104,12 +118,17 @@ impl PtyPane {
             .context("failed to open PTY")?;
 
         let mut command_builder = CommandBuilder::new(command);
-        for arg in args {
+        configure_cwd_reporting(profile_name, &mut command_builder);
+        let args = args_with_cwd_reporting(profile_name, args);
+        for arg in &args {
             command_builder.arg(arg);
         }
         command_builder.cwd(cwd);
         command_builder.env("TERM", "xterm-256color");
         command_builder.env("COLORTERM", "truecolor");
+        for (key, value) in env {
+            command_builder.env(key, value);
+        }
         for (key, value) in extra_env {
             command_builder.env(key, value);
         }
@@ -143,6 +162,10 @@ impl PtyPane {
             cols: 80,
             response_scan_tail: Vec::new(),
             output_activity: OutputActivity::default(),
+            osc_scan_tail: Vec::new(),
+            input_history: Vec::new(),
+            pending_input: String::new(),
+            output_tail: String::new(),
             active: false,
             exited: false,
         })
@@ -165,7 +188,9 @@ impl PtyPane {
     }
 
     pub fn process_output(&mut self, bytes: &[u8]) {
+        self.update_cwd_from_osc7(bytes);
         self.parser.process(bytes);
+        self.append_plain_output(bytes);
         self.active = true;
         self.output_activity.record_output(Instant::now());
         self.answer_terminal_queries(bytes);
@@ -181,6 +206,36 @@ impl PtyPane {
         }
 
         self.output_activity.refresh(now, quiet_after)
+    }
+
+    pub fn record_input(&mut self, bytes: &[u8]) {
+        record_input_bytes(bytes, &mut self.pending_input, &mut self.input_history);
+    }
+
+    pub fn input_history(&self) -> &[String] {
+        &self.input_history
+    }
+
+    pub fn output_tail(&self) -> &str {
+        &self.output_tail
+    }
+
+    pub fn restore_history_display(&mut self, output_tail: &str, input_history: &[String]) {
+        self.output_tail = output_tail.to_string();
+        trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
+        self.input_history = input_history
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .rev()
+            .take(MAX_INPUT_HISTORY)
+            .cloned()
+            .collect::<Vec<_>>();
+        self.input_history.reverse();
+
+        let replay = history_replay_text(&self.output_tail, &self.input_history);
+        if !replay.is_empty() {
+            self.parser.process(replay.as_bytes());
+        }
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
@@ -252,6 +307,21 @@ impl PtyPane {
         self.response_scan_tail = terminal_query_scan_tail(&scan);
     }
 
+    fn update_cwd_from_osc7(&mut self, bytes: &[u8]) {
+        let mut scan = Vec::with_capacity(self.osc_scan_tail.len() + bytes.len());
+        scan.extend_from_slice(&self.osc_scan_tail);
+        scan.extend_from_slice(bytes);
+
+        for payload in osc_payloads(&scan) {
+            if let Some(path) = cwd_from_osc7_payload(payload) {
+                self.cwd = path;
+            }
+        }
+
+        let tail_start = scan.len().saturating_sub(MAX_OSC_SCAN);
+        self.osc_scan_tail = scan[tail_start..].to_vec();
+    }
+
     pub fn terminate(&mut self) {
         if self.exited {
             return;
@@ -259,6 +329,16 @@ impl PtyPane {
 
         let _ = self.child.kill();
         self.exited = true;
+    }
+
+    fn append_plain_output(&mut self, bytes: &[u8]) {
+        let plain = plain_terminal_text(bytes);
+        if plain.is_empty() {
+            return;
+        }
+
+        self.output_tail.push_str(&plain);
+        trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
     }
 }
 
@@ -268,6 +348,47 @@ impl Drop for PtyPane {
     }
 }
 
+fn configure_cwd_reporting(profile_name: &str, command_builder: &mut CommandBuilder) {
+    match profile_name {
+        "git-bash" => configure_bash_cwd_reporting(command_builder),
+        "cmd" => command_builder.env("PROMPT", "$E]7;file:///$P$E\\$P$G"),
+        _ => {}
+    }
+}
+
+fn configure_bash_cwd_reporting(command_builder: &mut CommandBuilder) {
+    let hook = "printf '\\033]7;file://%s%s\\007' \"${HOSTNAME:-localhost}\" \"$PWD\"";
+    let prompt_command = match env::var("PROMPT_COMMAND") {
+        Ok(existing) if !existing.trim().is_empty() => format!("{hook}; {existing}"),
+        _ => hook.to_string(),
+    };
+    command_builder.env("PROMPT_COMMAND", prompt_command);
+}
+
+fn args_with_cwd_reporting(profile_name: &str, args: &[String]) -> Vec<String> {
+    let mut args = args.to_vec();
+    if matches!(profile_name, "pwsh" | "powershell") && !has_powershell_entrypoint(&args) {
+        args.push("-NoExit".into());
+        args.push("-Command".into());
+        args.push(powershell_cwd_hook().into());
+    }
+    args
+}
+
+fn has_powershell_entrypoint(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        let normalized = arg.trim_start_matches('/').trim_start_matches('-');
+        matches!(
+            normalized.to_ascii_lowercase().as_str(),
+            "command" | "c" | "file" | "f" | "encodedcommand" | "e" | "ec"
+        )
+    })
+}
+
+fn powershell_cwd_hook() -> &'static str {
+    "$global:__GridBashPrompt = (Get-Command prompt -CommandType Function -ErrorAction SilentlyContinue).ScriptBlock; function global:prompt { $p = $ExecutionContext.SessionState.Path.CurrentLocation.ProviderPath; if ($p) { [Console]::Write(\"$([char]27)]7;$([System.Uri]::new($p).AbsoluteUri)$([char]7)\") }; if ($global:__GridBashPrompt) { & $global:__GridBashPrompt } else { \"PS $($ExecutionContext.SessionState.Path.CurrentLocation)> \" } }"
+}
+
 fn spawn_reader(
     pane: PaneId,
     generation: u64,
@@ -275,7 +396,7 @@ fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
 ) {
     thread::spawn(move || {
-        let mut buffer = [0_u8; 8192];
+        let mut buffer = [0_u8; PTY_READ_BUFFER_BYTES];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
@@ -319,6 +440,358 @@ fn terminal_query_scan_tail(scan: &[u8]) -> Vec<u8> {
     scan[tail_start..].to_vec()
 }
 
+fn osc_payloads(buffer: &[u8]) -> Vec<&[u8]> {
+    let mut payloads = Vec::new();
+    let mut cursor = 0;
+
+    while let Some(start_offset) = find_sequence(&buffer[cursor..], b"\x1b]") {
+        let payload_start = cursor + start_offset + 2;
+        let mut index = payload_start;
+        let mut payload_end = None;
+        let mut next_cursor = payload_start;
+
+        while index < buffer.len() {
+            if buffer[index] == 0x07 {
+                payload_end = Some(index);
+                next_cursor = index + 1;
+                break;
+            }
+            if buffer[index] == 0x1b && buffer.get(index + 1) == Some(&b'\\') {
+                payload_end = Some(index);
+                next_cursor = index + 2;
+                break;
+            }
+            index += 1;
+        }
+
+        let Some(payload_end) = payload_end else {
+            break;
+        };
+
+        payloads.push(&buffer[payload_start..payload_end]);
+        cursor = next_cursor;
+    }
+
+    payloads
+}
+
+fn cwd_from_osc7_payload(payload: &[u8]) -> Option<PathBuf> {
+    let payload = String::from_utf8_lossy(payload);
+    let body = payload.strip_prefix("7;file://")?;
+    let uri_path = if body.starts_with('/') {
+        body
+    } else {
+        let path_start = body.find('/')?;
+        &body[path_start..]
+    };
+
+    let decoded = percent_decode(uri_path);
+    let path = windows_path_from_uri_path(&decoded);
+    Some(PathBuf::from(path))
+}
+
+fn windows_path_from_uri_path(path: &str) -> String {
+    let path = path.replace('\\', "/");
+
+    if path.len() >= 3 {
+        let bytes = path.as_bytes();
+        if bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && (bytes[2] == b':' || bytes[2] == b'|')
+        {
+            return format!("{}:{}", (bytes[1] as char).to_ascii_uppercase(), &path[3..]);
+        }
+    }
+
+    if path.len() >= 3 {
+        let bytes = path.as_bytes();
+        if bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b'/' {
+            return format!(
+                "{}:/{}",
+                (bytes[1] as char).to_ascii_uppercase(),
+                &path[3..]
+            );
+        }
+    }
+
+    path
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            decoded.push((high << 4) | low);
+            index += 3;
+            continue;
+        }
+
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn find_sequence(buffer: &[u8], sequence: &[u8]) -> Option<usize> {
+    if sequence.is_empty() || buffer.len() < sequence.len() {
+        return None;
+    }
+
+    buffer
+        .windows(sequence.len())
+        .position(|window| window == sequence)
+}
+
+fn record_input_bytes(bytes: &[u8], pending_input: &mut String, input_history: &mut Vec<String>) {
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == 0x1b {
+            index = skip_escape_sequence(bytes, index);
+            continue;
+        }
+
+        match byte {
+            b'\r' | b'\n' => finish_pending_input(pending_input, input_history),
+            0x08 | 0x7f => {
+                pending_input.pop();
+            }
+            b'\t' => push_pending_input(pending_input, '\t'),
+            0x20..=0x7e => push_pending_input(pending_input, byte as char),
+            _ => {}
+        }
+        index += 1;
+    }
+}
+
+fn push_pending_input(pending_input: &mut String, ch: char) {
+    if pending_input.chars().count() < MAX_INPUT_LINE_CHARS {
+        pending_input.push(ch);
+    }
+}
+
+fn finish_pending_input(pending_input: &mut String, input_history: &mut Vec<String>) {
+    let line = pending_input.trim().to_string();
+    pending_input.clear();
+    if line.is_empty() {
+        return;
+    }
+
+    input_history.push(line);
+    if input_history.len() > MAX_INPUT_HISTORY {
+        let extra = input_history.len() - MAX_INPUT_HISTORY;
+        input_history.drain(..extra);
+    }
+}
+
+fn history_replay_text(output_tail: &str, input_history: &[String]) -> String {
+    if output_tail.trim().is_empty() && input_history.is_empty() {
+        return String::new();
+    }
+
+    let mut replay = String::from(
+        "\x1b[90mGridBash resumed pane history. Commands were not replayed.\x1b[0m\r\n",
+    );
+
+    if !input_history.is_empty() {
+        replay.push_str("\x1b[36mprevious commands\x1b[0m\r\n");
+        for line in input_history
+            .iter()
+            .rev()
+            .take(12)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            replay.push_str("> ");
+            replay.push_str(line);
+            replay.push_str("\r\n");
+        }
+    }
+
+    let output = tail_chars(output_tail, MAX_REPLAY_OUTPUT_CHARS);
+    if !output.trim().is_empty() {
+        if !input_history.is_empty() {
+            replay.push_str("\r\n");
+        }
+        replay.push_str("\x1b[36mlast output\x1b[0m\r\n");
+        replay.push_str(&output.replace('\n', "\r\n"));
+        replay.push_str("\r\n");
+    }
+
+    replay
+}
+
+fn plain_terminal_text(bytes: &[u8]) -> String {
+    let raw = String::from_utf8_lossy(bytes);
+    let mut plain = String::new();
+    let chars = raw.chars().collect::<Vec<_>>();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '\x1b' {
+            index = skip_escape_chars(&chars, index);
+            continue;
+        }
+
+        match ch {
+            '\r' => {
+                if !plain.ends_with('\n') {
+                    plain.push('\n');
+                }
+            }
+            '\n' => {
+                if !plain.ends_with('\n') {
+                    plain.push('\n');
+                }
+            }
+            '\t' => plain.push(ch),
+            '\x08' => {
+                plain.pop();
+            }
+            ch if ch.is_control() => {}
+            ch => plain.push(ch),
+        }
+        index += 1;
+    }
+
+    plain
+}
+
+fn skip_escape_sequence(bytes: &[u8], start: usize) -> usize {
+    let mut index = start.saturating_add(1);
+    if index >= bytes.len() {
+        return index;
+    }
+
+    match bytes[index] {
+        b'[' => {
+            index += 1;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                index += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+        }
+        b'O' => {
+            index += 1;
+            if index < bytes.len() {
+                index += 1;
+            }
+        }
+        b']' => {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == 0x07 {
+                    index += 1;
+                    break;
+                }
+                if bytes[index] == 0x1b && index + 1 < bytes.len() && bytes[index + 1] == b'\\' {
+                    index += 2;
+                    break;
+                }
+                index += 1;
+            }
+        }
+        _ => index += 1,
+    }
+
+    index
+}
+
+fn skip_escape_chars(chars: &[char], start: usize) -> usize {
+    let mut index = start.saturating_add(1);
+    if index >= chars.len() {
+        return index;
+    }
+
+    match chars[index] {
+        '[' => {
+            index += 1;
+            while index < chars.len() {
+                let ch = chars[index];
+                index += 1;
+                if ('\u{40}'..='\u{7e}').contains(&ch) {
+                    break;
+                }
+            }
+        }
+        'O' => {
+            index += 1;
+            if index < chars.len() {
+                index += 1;
+            }
+        }
+        ']' => {
+            index += 1;
+            while index < chars.len() {
+                if chars[index] == '\x07' {
+                    index += 1;
+                    break;
+                }
+                if chars[index] == '\x1b' && index + 1 < chars.len() && chars[index + 1] == '\\' {
+                    index += 2;
+                    break;
+                }
+                index += 1;
+            }
+        }
+        _ => index += 1,
+    }
+
+    index
+}
+
+fn trim_string_tail(value: &mut String, max_chars: usize) {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return;
+    }
+
+    let keep_from = char_count - max_chars;
+    let byte_index = value
+        .char_indices()
+        .nth(keep_from)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    value.drain(..byte_index);
+}
+
+fn tail_chars(value: &str, max_chars: usize) -> String {
+    let char_count = value.chars().count();
+    if char_count <= max_chars {
+        return value.to_string();
+    }
+
+    let keep_from = char_count - max_chars;
+    let byte_index = value
+        .char_indices()
+        .nth(keep_from)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+    value[byte_index..].to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -353,6 +826,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_osc7_windows_cwd() {
+        let payload = b"7;file://localhost/C:/Users/Jason/My%20Repo";
+        assert_eq!(
+            cwd_from_osc7_payload(payload),
+            Some(PathBuf::from("C:/Users/Jason/My Repo"))
+        );
+    }
+
+    #[test]
+    fn parses_osc7_msys_cwd() {
+        let payload = b"7;file://host/c/Users/Jason/gridbash";
+        assert_eq!(
+            cwd_from_osc7_payload(payload),
+            Some(PathBuf::from("C:/Users/Jason/gridbash"))
+        );
+    }
+
+    #[test]
+    fn finds_osc_payloads_with_bel_and_st_terminators() {
+        let payloads = osc_payloads(b"a\x1b]7;file://localhost/C:/one\x07b\x1b]0;title\x1b\\c");
+        assert_eq!(
+            payloads,
+            vec![&b"7;file://localhost/C:/one"[..], &b"0;title"[..],]
+        );
+    }
+
+    #[test]
     fn output_activity_marks_quiet_after_output_stops() {
         let start = Instant::now();
         let quiet_after = Duration::from_secs(3);
@@ -374,11 +874,32 @@ mod tests {
     }
 
     #[test]
+    fn records_entered_command_lines() {
+        let mut pending = String::new();
+        let mut history = Vec::new();
+
+        record_input_bytes(b"cargo test\r", &mut pending, &mut history);
+        record_input_bytes(b"\x1b[A", &mut pending, &mut history);
+        record_input_bytes(b"\x1bOP", &mut pending, &mut history);
+        record_input_bytes(b"git status\x7f\x7f\r", &mut pending, &mut history);
+
+        assert_eq!(history, ["cargo test", "git stat"]);
+    }
+
+    #[test]
+    fn strips_escape_sequences_from_output_history() {
+        let plain = plain_terminal_text(b"\x1b[31mred\x1b[0m\r\nok\x1b]0;title\x07");
+
+        assert_eq!(plain, "red\nok");
+    }
+
+    #[test]
     #[ignore = "Windows ConPTY smoke test requires an interactive console; run manually when debugging PTY I/O"]
     fn spawned_pty_receives_output_and_input() {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
         let cwd = env::current_dir().expect("current dir");
         let mut pane = PtyPane::spawn(
+            "cmd",
             PaneId(0),
             0,
             Path::new("cmd.exe"),
@@ -389,6 +910,7 @@ mod tests {
                 "/c".to_string(),
                 "set /p GRIDBASH_IN= & echo GRIDBASH_READY:!GRIDBASH_IN!".to_string(),
             ],
+            &BTreeMap::new(),
             &cwd,
             &[],
             event_tx,

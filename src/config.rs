@@ -8,12 +8,16 @@ use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::profiles::Profile;
+use crate::{auth::AuthConfig, profiles::Profile};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Defaults::is_empty")]
     pub defaults: Defaults,
+    #[serde(default, skip_serializing_if = "TodoSettings::is_empty")]
+    pub todos: TodoSettings,
+    #[serde(default, skip_serializing_if = "AuthConfig::is_empty")]
+    pub auth: AuthConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, Profile>,
 }
@@ -22,6 +26,34 @@ pub struct Config {
 pub struct Defaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TodoSettings {
+    #[serde(
+        default = "TodoSettings::default_enabled",
+        skip_serializing_if = "TodoSettings::is_enabled"
+    )]
+    pub enabled: bool,
+    #[serde(
+        default = "TodoSettings::default_idle_seconds",
+        skip_serializing_if = "TodoSettings::is_default_idle_seconds"
+    )]
+    pub idle_seconds: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<String>,
+}
+
+impl Default for TodoSettings {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            idle_seconds: Self::default_idle_seconds(),
+            prompts: Vec::new(),
+        }
+    }
 }
 
 impl Config {
@@ -71,7 +103,40 @@ impl Config {
 
 impl Defaults {
     fn is_empty(&self) -> bool {
-        self.profile.is_none()
+        self.profile.is_none() && self.manager_profile.is_none()
+    }
+}
+
+impl TodoSettings {
+    pub fn default_enabled() -> bool {
+        true
+    }
+
+    pub fn default_idle_seconds() -> u64 {
+        90
+    }
+
+    pub fn normalized_prompts(&self) -> Vec<String> {
+        self.prompts
+            .iter()
+            .map(|prompt| prompt.trim())
+            .filter(|prompt| !prompt.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.enabled == Self::default_enabled()
+            && self.idle_seconds == Self::default_idle_seconds()
+            && self.prompts.is_empty()
+    }
+
+    fn is_enabled(value: &bool) -> bool {
+        *value
+    }
+
+    fn is_default_idle_seconds(value: &u64) -> bool {
+        *value == Self::default_idle_seconds()
     }
 }
 
@@ -93,6 +158,39 @@ mod tests {
     }
 
     #[test]
+    fn parses_auth_defaults() {
+        let config: Config = toml::from_str(
+            r#"
+            [auth]
+            home = "C:\\Users\\Jason\\.claude-profiles"
+            usage_status = true
+
+            [auth.defaults]
+            claude = "claude-1"
+            codex = "codex-2"
+            "#,
+        )
+        .expect("parse config");
+
+        assert_eq!(config.auth.defaults.claude.as_deref(), Some("claude-1"));
+        assert_eq!(config.auth.defaults.codex.as_deref(), Some("codex-2"));
+        assert_eq!(config.auth.usage_status, Some(true));
+    }
+
+    #[test]
+    fn parses_manager_profile_default() {
+        let config: Config = toml::from_str(
+            r#"
+            [defaults]
+            manager_profile = "claude-1"
+            "#,
+        )
+        .expect("parse config");
+
+        assert_eq!(config.defaults.manager_profile.as_deref(), Some("claude-1"));
+    }
+
+    #[test]
     fn ignores_legacy_setups_table() {
         let config: Config = toml::from_str(
             r#"
@@ -111,5 +209,25 @@ mod tests {
 
         assert_eq!(config.defaults.profile.as_deref(), Some("powershell"));
         assert!(config.profiles.is_empty());
+    }
+
+    #[test]
+    fn parses_todo_settings() {
+        let config: Config = toml::from_str(
+            r#"
+            [todos]
+            enabled = false
+            idle_seconds = 45
+            prompts = ["Review the diff", "Run tests"]
+            "#,
+        )
+        .expect("parse config");
+
+        assert!(!config.todos.enabled);
+        assert_eq!(config.todos.idle_seconds, 45);
+        assert_eq!(
+            config.todos.normalized_prompts(),
+            vec!["Review the diff".to_string(), "Run tests".to_string()]
+        );
     }
 }
