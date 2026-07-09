@@ -188,6 +188,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Input | Action |
 | --- | --- |
 | Drag mouse | Select/copy terminal text within the source pane |
+| Right-click pane | Toggle that pane in or out of the selected set |
 | Alt+Left / Alt+Right | Focus previous / next pane |
 | Alt+Up / Alt+Down | Focus pane above / below |
 | Alt+Shift+Up / Alt+Shift+Down | Remove / add a row when safe |
