@@ -161,6 +161,13 @@ enum SwapSelection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitedRecoveryAction {
+    Restart,
+    Sleep,
+    HoldAltPrefix,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PaletteRole {
     Accent,
     Focus,
@@ -344,6 +351,12 @@ pub struct RenamePaneView {
     pub pane_label: String,
     pub value: String,
     pub cursor: usize,
+}
+
+pub struct ExitedPaneRecoveryView {
+    pub pane_index: usize,
+    pub pane_label: String,
+    pub target_count: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1082,6 +1095,12 @@ impl App {
             });
         }
 
+        if self.exited_recovery_view().is_some()
+            && let Some(outcome) = self.handle_exited_recovery_key(key)
+        {
+            return Ok(outcome);
+        }
+
         if let Some(bytes) = terminal_key_bytes(key) {
             let status_changed = self.route_input(&bytes)?;
             return Ok(if selection_cleared || status_changed {
@@ -1196,6 +1215,20 @@ impl App {
                 Ok(Some(false))
             }
             _ => Ok(None),
+        }
+    }
+
+    fn handle_exited_recovery_key(&mut self, key: KeyEvent) -> Option<KeyOutcome> {
+        match exited_recovery_action_for(key)? {
+            ExitedRecoveryAction::Restart => {
+                self.restart_focused_exited_pane();
+                Some(KeyOutcome::Render)
+            }
+            ExitedRecoveryAction::Sleep => {
+                self.toggle_sleep_for_focused_pane();
+                Some(KeyOutcome::Render)
+            }
+            ExitedRecoveryAction::HoldAltPrefix => Some(KeyOutcome::Render),
         }
     }
 
@@ -1689,13 +1722,17 @@ impl App {
 
     fn toggle_sleep_for_targets(&mut self) {
         let targets = self.target_panes();
+        self.toggle_sleep_for_panes(&targets);
+    }
+
+    fn toggle_sleep_for_panes(&mut self, targets: &[usize]) {
         if targets.is_empty() {
             return;
         }
 
         let should_sleep = targets.iter().any(|index| !self.sleeping.contains(index));
         if should_sleep {
-            for index in &targets {
+            for index in targets {
                 self.sleeping.insert(*index);
                 self.selected.remove(index);
             }
@@ -1706,7 +1743,7 @@ impl App {
                 self.focus = index;
             }
         } else {
-            for index in &targets {
+            for index in targets {
                 self.sleeping.remove(index);
             }
             self.focus = targets[0];
@@ -1734,7 +1771,7 @@ impl App {
 
         if skipped_exited > 0 {
             self.status = if skipped_exited == 1 {
-                "pane exited; press Alt+t to restart it".into()
+                "pane exited; press R or Enter to restart, Z to sleep".into()
             } else {
                 format!(
                     "skipped {skipped_exited} exited {}; press Alt+t to restart them",
@@ -1755,8 +1792,32 @@ impl App {
         input_targets_for(self.focus, &self.selected, self.panes.len())
     }
 
+    fn toggle_sleep_for_focused_pane(&mut self) {
+        if self.panes.is_empty() {
+            self.status = "no panes to sleep".into();
+            return;
+        }
+
+        let target = self.focus.min(self.panes.len() - 1);
+        self.toggle_sleep_for_panes(&[target]);
+    }
+
+    fn restart_focused_exited_pane(&mut self) {
+        if self.panes.is_empty() {
+            self.status = "no panes to restart".into();
+            return;
+        }
+
+        let target = self.focus.min(self.panes.len() - 1);
+        self.restart_exited_panes(&[target]);
+    }
+
     fn restart_exited_targets(&mut self) {
         let targets = self.target_panes();
+        self.restart_exited_panes(&targets);
+    }
+
+    fn restart_exited_panes(&mut self, targets: &[usize]) {
         if targets.is_empty() {
             self.status = "no panes to restart".into();
             return;
@@ -1767,7 +1828,7 @@ impl App {
             .iter()
             .map(|pane| pane.exited)
             .collect::<Vec<_>>();
-        let restart = restart_targets_for(&targets, &exited);
+        let restart = restart_targets_for(targets, &exited);
         if restart.indices.is_empty() {
             self.status = "no exited target panes; Alt+t restarts exited panes".into();
             return;
@@ -1901,6 +1962,19 @@ impl App {
 
     pub fn image_overlay_view(&self) -> Option<&ImagePreview> {
         self.image_overlay.as_ref()
+    }
+
+    pub fn exited_recovery_view(&self) -> Option<ExitedPaneRecoveryView> {
+        let pane = self.panes.get(self.focus)?;
+        if !pane.exited || self.sleeping.contains(&self.focus) {
+            return None;
+        }
+
+        Some(ExitedPaneRecoveryView {
+            pane_index: self.focus,
+            pane_label: self.pane_label(self.focus),
+            target_count: 1,
+        })
     }
 
     pub fn settings_rows(&self) -> Vec<SettingsRow> {
@@ -2143,6 +2217,23 @@ fn restart_targets_for(targets: &[usize], exited: &[bool]) -> RestartTargets {
     }
 
     RestartTargets { indices, running }
+}
+
+fn exited_recovery_action_for(key: KeyEvent) -> Option<ExitedRecoveryAction> {
+    if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Enter => Some(ExitedRecoveryAction::Restart),
+        KeyCode::Esc => Some(ExitedRecoveryAction::HoldAltPrefix),
+        KeyCode::Char(ch) => match ch.to_ascii_lowercase() {
+            'r' | 't' => Some(ExitedRecoveryAction::Restart),
+            's' | 'z' => Some(ExitedRecoveryAction::Sleep),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn normalized_pane_name(value: &str) -> Option<String> {
@@ -2463,6 +2554,42 @@ mod tests {
                 indices: vec![1],
                 running: 0,
             }
+        );
+    }
+
+    #[test]
+    fn exited_recovery_keys_map_to_dialog_actions() {
+        assert_eq!(
+            exited_recovery_action_for(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Some(ExitedRecoveryAction::Restart)
+        );
+        assert_eq!(
+            exited_recovery_action_for(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            Some(ExitedRecoveryAction::Restart)
+        );
+        assert_eq!(
+            exited_recovery_action_for(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)),
+            Some(ExitedRecoveryAction::Restart)
+        );
+        assert_eq!(
+            exited_recovery_action_for(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)),
+            Some(ExitedRecoveryAction::Sleep)
+        );
+        assert_eq!(
+            exited_recovery_action_for(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)),
+            Some(ExitedRecoveryAction::Sleep)
+        );
+    }
+
+    #[test]
+    fn exited_recovery_keeps_escape_for_alt_prefixes() {
+        assert_eq!(
+            exited_recovery_action_for(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Some(ExitedRecoveryAction::HoldAltPrefix)
+        );
+        assert_eq!(
+            exited_recovery_action_for(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT)),
+            None
         );
     }
 
