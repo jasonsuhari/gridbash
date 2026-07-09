@@ -10,8 +10,8 @@ use vt100::Cell;
 
 use crate::{
     app::{
-        App, ExitedPaneRecoveryView, GridPalette, PaneSelection, PreviousPaneView,
-        PreviousPanesView, RenamePaneView, SettingsRow,
+        App, ExitedPaneRecoveryView, GridPalette, PaneSelection, PaneSettingsView, RenamePaneView,
+        SettingsRow,
     },
     image_preview::ImagePreview,
 };
@@ -28,13 +28,13 @@ const SETTINGS_TEXT: Color = Color::Rgb(230, 237, 243);
 pub struct DrawState {
     pub grid_area: Rect,
     pub pane_rects: Vec<Rect>,
-    pub previous_panes_button: Option<Rect>,
-    pub previous_pane_rows: Vec<(usize, Rect)>,
+    pub pane_settings_button: Option<Rect>,
+    pub pane_settings_reload_button: Option<Rect>,
 }
 
 const QUIET_MARKER: &str = " *";
 const STATUS_BRAND: &str = " GridBash ";
-const PREVIOUS_PANES_BUTTON: &str = " Panes ";
+const PANE_SETTINGS_BUTTON: &str = " Pane ";
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
@@ -48,10 +48,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let rects = app.pane_rects(grid_area);
     let palette = app.palette();
     let rename_view = app.rename_pane_view();
-    let previous_panes_view = app.previous_panes_view();
+    let pane_settings_open = app.pane_settings_open();
     let image_overlay = app.image_overlay_view();
     let exited_recovery = if app.settings_open()
-        || previous_panes_view.is_some()
+        || pane_settings_open
         || rename_view.is_some()
         || image_overlay.is_some()
     {
@@ -60,10 +60,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         app.exited_recovery_view()
     };
     let modal_open = app.settings_open()
-        || previous_panes_view.is_some()
+        || pane_settings_open
         || rename_view.is_some()
         || image_overlay.is_some()
         || exited_recovery.is_some();
+    let mut pane_settings_reload_button = None;
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -110,7 +111,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
 
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
-        if sleeping {
+        if let Some(view) = app.pane_settings_view(index) {
+            pane_settings_reload_button = render_pane_settings(frame, inner, &view, palette);
+        } else if sleeping {
             render_sleeping_screen(frame, inner);
         } else {
             render_screen(frame, inner, pane.screen(), app.selection_for_pane(index));
@@ -126,7 +129,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     } else {
         "focused pane"
     };
-    let previous_panes_button = previous_panes_button_rect(status_area);
+    let pane_settings_button = pane_settings_button_rect(status_area);
     let status = Line::from(vec![
         Span::styled(
             STATUS_BRAND,
@@ -137,8 +140,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         ),
         Span::raw(" "),
         Span::styled(
-            PREVIOUS_PANES_BUTTON,
-            previous_panes_button_style(app.previous_panes_open(), palette),
+            PANE_SETTINGS_BUTTON,
+            pane_settings_button_style(app.pane_settings_open(), palette),
         ),
         Span::raw(" "),
         Span::styled(
@@ -160,7 +163,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(" | Alt+p panes | Alt+t restart | Alt+x swap | Alt+z sleep | Alt+q quit"),
+        Span::raw(" | Alt+p pane settings | Alt+t restart | Alt+x swap | Alt+z sleep | Alt+q quit"),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
@@ -170,11 +173,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     if app.settings_open() {
         render_settings(frame, area, &app.settings_rows(), palette);
     }
-    let previous_pane_rows = if let Some(view) = previous_panes_view.as_ref() {
-        render_previous_panes(frame, area, view, palette)
-    } else {
-        Vec::new()
-    };
     if let Some(rename) = rename_view.as_ref() {
         render_rename_pane(frame, area, rename);
     }
@@ -188,8 +186,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     DrawState {
         grid_area,
         pane_rects: rects,
-        previous_panes_button,
-        previous_pane_rows,
+        pane_settings_button,
+        pane_settings_reload_button,
     }
 }
 
@@ -266,9 +264,9 @@ fn pane_chrome(
     }
 }
 
-fn previous_panes_button_rect(status_area: Rect) -> Option<Rect> {
+fn pane_settings_button_rect(status_area: Rect) -> Option<Rect> {
     let offset = STATUS_BRAND.len() as u16 + 1;
-    let width = PREVIOUS_PANES_BUTTON.len() as u16;
+    let width = PANE_SETTINGS_BUTTON.len() as u16;
     if status_area.height == 0 || status_area.width < offset.saturating_add(width) {
         return None;
     }
@@ -281,7 +279,7 @@ fn previous_panes_button_rect(status_area: Rect) -> Option<Rect> {
     })
 }
 
-fn previous_panes_button_style(open: bool, palette: &GridPalette) -> Style {
+fn pane_settings_button_style(open: bool, palette: &GridPalette) -> Style {
     if open {
         Style::default()
             .fg(Color::Black)
@@ -295,148 +293,132 @@ fn previous_panes_button_style(open: bool, palette: &GridPalette) -> Style {
     }
 }
 
-fn render_previous_panes(
+fn render_pane_settings(
     frame: &mut Frame<'_>,
     area: Rect,
-    view: &PreviousPanesView,
+    view: &PaneSettingsView,
     palette: &GridPalette,
-) -> Vec<(usize, Rect)> {
-    let modal = previous_panes_modal_rect(area, view.panes.len());
-    let shadow = settings_shadow_rect(area, modal);
-    let mut row_hits = Vec::new();
-
-    if shadow != modal {
-        frame.render_widget(Clear, shadow);
-        frame.render_widget(
-            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
-            shadow,
-        );
+) -> Option<Rect> {
+    if area.width == 0 || area.height == 0 {
+        return None;
     }
 
-    frame.render_widget(Clear, modal);
+    frame.render_widget(Clear, area);
+    let lines = pane_settings_lines(view, area.width, palette);
+    frame.render_widget(Paragraph::new(lines).style(settings_panel_style()), area);
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(palette.focus())
-                .add_modifier(Modifier::BOLD),
-        )
-        .style(settings_panel_style())
-        .title(" Previous Panes ");
-    let inner = block.inner(modal);
-    frame.render_widget(block, modal);
-
-    if inner.width == 0 || inner.height == 0 {
-        return row_hits;
-    }
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(1),
-        ])
-        .split(inner);
-
-    let header = Line::from(vec![
-        Span::raw("  "),
-        Span::styled(
-            format!("{} panes", view.panes.len()),
-            Style::default()
-                .fg(palette.focus())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  current session", Style::default().fg(Color::Gray)),
-    ]);
-    frame.render_widget(
-        Paragraph::new(vec![header, Line::from("")]).style(settings_panel_style()),
-        chunks[0],
-    );
-
-    let list_area = chunks[1];
-    let visible =
-        visible_previous_pane_range(view.panes.len(), view.cursor, list_area.height as usize);
-    let mut rows = Vec::new();
-
-    for (row_offset, index) in visible.enumerate() {
-        let Some(pane) = view.panes.get(index) else {
-            continue;
-        };
-        let row_area = Rect {
-            x: list_area.x,
-            y: list_area.y.saturating_add(row_offset as u16),
-            width: list_area.width,
-            height: 1,
-        };
-        row_hits.push((index, row_area));
-        rows.push(previous_pane_line(
-            pane,
-            view.cursor == index,
-            list_area.width,
-        ));
-    }
-
-    frame.render_widget(
-        Paragraph::new(rows).style(settings_panel_style()),
-        list_area,
-    );
-    frame.render_widget(
-        Paragraph::new(previous_panes_command_bar(chunks[2].width)).style(settings_panel_style()),
-        chunks[2],
-    );
-
-    row_hits
+    pane_settings_reload_rect(area)
 }
 
-fn previous_pane_line(pane: &PreviousPaneView, active: bool, width: u16) -> Line<'static> {
-    let (state, state_color) = previous_pane_state(pane);
-    let label_width = if width < 62 { 10 } else { 16 };
-    let location_width = if width < 62 { 14 } else { 24 };
-    let marker = if active { ">" } else { " " };
-    let location = pane
-        .worktree
-        .as_ref()
-        .map(|worktree| format!("{} | {worktree}", pane.folder))
-        .unwrap_or_else(|| pane.folder.clone());
-    let text = format!(
-        "{marker} {:>2} {:<label_width$} {:<8} {:<location_width$} {}",
-        pane.index + 1,
-        truncate_text(&pane.label, label_width),
-        state,
-        truncate_text(&location, location_width),
-        pane.summary,
-    );
-    let bg = active.then_some(SETTINGS_ROW_ACTIVE);
-    let fg = if active { SETTINGS_TEXT } else { state_color };
-
-    Line::from(Span::styled(
-        fixed_width(&text, width as usize),
-        row_style(fg, bg, active || pane.focused),
-    ))
-}
-
-fn previous_pane_state(pane: &PreviousPaneView) -> (&'static str, Color) {
-    if pane.exited {
+fn pane_settings_state(view: &PaneSettingsView) -> (&'static str, Color) {
+    if view.exited {
         ("exited", Color::Red)
-    } else if pane.sleeping {
+    } else if view.sleeping {
         ("asleep", Color::DarkGray)
-    } else if pane.focused {
+    } else if view.focused {
         ("focus", Color::Yellow)
-    } else if pane.selected {
+    } else if view.selected {
         ("selected", Color::Cyan)
     } else {
         ("live", SETTINGS_TEXT)
     }
 }
 
-fn previous_panes_command_bar(width: u16) -> Line<'static> {
-    if width < 44 {
+fn pane_settings_lines(
+    view: &PaneSettingsView,
+    width: u16,
+    palette: &GridPalette,
+) -> Vec<Line<'static>> {
+    let (state, state_color) = pane_settings_state(view);
+    let location = view
+        .worktree
+        .as_ref()
+        .map(|worktree| format!("{} | {worktree}", view.folder))
+        .unwrap_or_else(|| view.folder.clone());
+    let mut lines = Vec::new();
+
+    if width < 36 {
+        lines.push(Line::from(Span::styled(
+            fixed_width(" Pane Settings", width as usize),
+            Style::default()
+                .fg(palette.focus())
+                .bg(SETTINGS_BG)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(pane_settings_reload_line(width, palette));
+        lines.push(pane_settings_command_bar(width));
+        return lines;
+    }
+
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            "Pane Settings",
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("pane {} {}", view.index + 1, view.label),
+            Style::default().fg(SETTINGS_TEXT),
+        ),
+        Span::raw("  "),
+        Span::styled(state, Style::default().fg(state_color)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            truncate_text(&location, width.saturating_sub(2) as usize),
+            Style::default().fg(SETTINGS_MUTED),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(settings_section(
+        "HISTORY",
+        "visible conversation snapshot",
+        width,
+    ));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            truncate_text(&view.history_summary, width.saturating_sub(2) as usize),
+            Style::default().fg(SETTINGS_TEXT),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(pane_settings_reload_line(width, palette));
+    lines.push(Line::from(""));
+    lines.push(pane_settings_command_bar(width));
+
+    lines
+}
+
+fn pane_settings_reload_line(width: u16, palette: &GridPalette) -> Line<'static> {
+    let label = "[ Reload past history ]";
+    let text = if width as usize <= label.len() + 4 {
+        fixed_width(label, width as usize)
+    } else {
+        let left = ((width as usize).saturating_sub(label.len())) / 2;
+        let right = (width as usize).saturating_sub(left + label.len());
+        format!("{}{}{}", " ".repeat(left), label, " ".repeat(right))
+    };
+
+    Line::from(Span::styled(
+        text,
+        Style::default()
+            .fg(Color::Black)
+            .bg(palette.focus())
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn pane_settings_command_bar(width: u16) -> Line<'static> {
+    if width < 50 {
         return Line::from(vec![
             Span::raw("  "),
             command_key("Enter"),
-            Span::styled(" focus  ", Style::default().fg(Color::Gray)),
+            Span::styled(" reload  ", Style::default().fg(Color::Gray)),
             command_key("Esc"),
             Span::styled(" close", Style::default().fg(Color::Gray)),
         ]);
@@ -444,49 +426,27 @@ fn previous_panes_command_bar(width: u16) -> Line<'static> {
 
     Line::from(vec![
         Span::raw("  "),
-        command_key("Up/Down"),
-        Span::styled(" move  ", Style::default().fg(Color::Gray)),
-        command_key("Enter"),
-        Span::styled(" focus  ", Style::default().fg(Color::Gray)),
+        command_key("Enter/Space"),
+        Span::styled(" reload  ", Style::default().fg(Color::Gray)),
+        command_key("Alt+o"),
+        Span::styled(" global settings  ", Style::default().fg(Color::Gray)),
         command_key("Esc"),
         Span::styled(" close", Style::default().fg(Color::Gray)),
     ])
 }
 
-fn previous_panes_modal_rect(area: Rect, pane_count: usize) -> Rect {
-    let width = area.width.saturating_sub(4).min(96).max(area.width.min(1));
-    let desired_height = (pane_count as u16).saturating_add(6).clamp(8, 24);
-    let height = area
-        .height
-        .saturating_sub(2)
-        .min(desired_height)
-        .max(area.height.min(1));
-
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    }
-}
-
-fn visible_previous_pane_range(
-    pane_count: usize,
-    cursor: usize,
-    capacity: usize,
-) -> std::ops::Range<usize> {
-    if pane_count == 0 || capacity == 0 {
-        return 0..0;
+fn pane_settings_reload_rect(area: Rect) -> Option<Rect> {
+    let row = if area.width < 36 { 1 } else { 6 };
+    if area.width == 0 || area.height <= row {
+        return None;
     }
 
-    let capacity = capacity.min(pane_count);
-    let cursor = cursor.min(pane_count - 1);
-    let mut start = cursor.saturating_sub(capacity / 2);
-    if start + capacity > pane_count {
-        start = pane_count - capacity;
-    }
-
-    start..start + capacity
+    Some(Rect {
+        x: area.x,
+        y: area.y.saturating_add(row),
+        width: area.width,
+        height: 1,
+    })
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow], palette: &GridPalette) {
@@ -1404,12 +1364,16 @@ mod tests {
     }
 
     #[test]
-    fn previous_pane_range_keeps_cursor_visible() {
-        assert_eq!(visible_previous_pane_range(10, 0, 4), 0..4);
-        assert_eq!(visible_previous_pane_range(10, 5, 4), 3..7);
-        assert_eq!(visible_previous_pane_range(10, 9, 4), 6..10);
-        assert_eq!(visible_previous_pane_range(3, 8, 10), 0..3);
-        assert_eq!(visible_previous_pane_range(3, 1, 0), 0..0);
+    fn pane_settings_reload_button_uses_expected_row() {
+        assert_eq!(
+            pane_settings_reload_rect(Rect::new(5, 10, 40, 12)),
+            Some(Rect::new(5, 16, 40, 1))
+        );
+        assert_eq!(
+            pane_settings_reload_rect(Rect::new(5, 10, 20, 4)),
+            Some(Rect::new(5, 11, 20, 1))
+        );
+        assert_eq!(pane_settings_reload_rect(Rect::new(5, 10, 40, 6)), None);
     }
 
     #[test]

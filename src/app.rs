@@ -62,11 +62,11 @@ pub struct App {
     image_overlay: Option<ImagePreview>,
     settings: SettingsState,
     rename: RenamePaneState,
-    previous_panes: PreviousPanesState,
+    pane_settings: PaneSettingsState,
     status: String,
     next_pane_id: usize,
-    previous_panes_button: Option<Rect>,
-    previous_pane_rows: Vec<(usize, Rect)>,
+    pane_settings_button: Option<Rect>,
+    pane_settings_reload_button: Option<Rect>,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
     usage_tx: std_mpsc::Sender<UsageEvent>,
@@ -361,18 +361,12 @@ pub struct RenamePaneView {
 }
 
 #[derive(Debug, Clone)]
-pub struct PreviousPanesView {
-    pub cursor: usize,
-    pub panes: Vec<PreviousPaneView>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PreviousPaneView {
+pub struct PaneSettingsView {
     pub index: usize,
     pub label: String,
     pub folder: String,
     pub worktree: Option<String>,
-    pub summary: String,
+    pub history_summary: String,
     pub focused: bool,
     pub selected: bool,
     pub sleeping: bool,
@@ -380,36 +374,26 @@ pub struct PreviousPaneView {
 }
 
 #[derive(Debug, Clone, Default)]
-struct PreviousPanesState {
+struct PaneSettingsState {
     open: bool,
-    cursor: usize,
+    pane_index: usize,
+    history_summary: Option<String>,
 }
 
-impl PreviousPanesState {
-    fn begin(&mut self, focus: usize, pane_count: usize) {
+impl PaneSettingsState {
+    fn open(&mut self, pane_index: usize, history_summary: String) {
         self.open = true;
-        self.cursor = focus.min(pane_count.saturating_sub(1));
+        self.pane_index = pane_index;
+        self.history_summary = Some(history_summary);
     }
 
     fn close(&mut self) {
         self.open = false;
+        self.history_summary = None;
     }
 
-    fn move_cursor(&mut self, delta: isize, pane_count: usize) {
-        if pane_count == 0 {
-            self.cursor = 0;
-            return;
-        }
-
-        self.cursor = (self.cursor as isize + delta).clamp(0, pane_count as isize - 1) as usize;
-    }
-
-    fn move_to_start(&mut self) {
-        self.cursor = 0;
-    }
-
-    fn move_to_end(&mut self, pane_count: usize) {
-        self.cursor = pane_count.saturating_sub(1);
+    fn refresh_history(&mut self, history_summary: String) {
+        self.history_summary = Some(history_summary);
     }
 }
 
@@ -733,11 +717,11 @@ impl App {
             image_overlay: None,
             settings: SettingsState::default(),
             rename: RenamePaneState::default(),
-            previous_panes: PreviousPanesState::default(),
+            pane_settings: PaneSettingsState::default(),
             status,
             next_pane_id: 0,
-            previous_panes_button: None,
-            previous_pane_rows: Vec::new(),
+            pane_settings_button: None,
+            pane_settings_reload_button: None,
             event_tx,
             event_rx,
             usage_tx,
@@ -863,8 +847,8 @@ impl App {
                     let draw_state = ui::draw(frame, self);
                     self.grid_area = draw_state.grid_area;
                     self.rects = draw_state.pane_rects;
-                    self.previous_panes_button = draw_state.previous_panes_button;
-                    self.previous_pane_rows = draw_state.previous_pane_rows;
+                    self.pane_settings_button = draw_state.pane_settings_button;
+                    self.pane_settings_reload_button = draw_state.pane_settings_reload_button;
                 })?;
                 self.sync_pane_sizes();
                 needs_render = false;
@@ -887,7 +871,7 @@ impl App {
                     }
                     Event::Paste(text)
                         if !self.settings.open
-                            && !self.previous_panes.open
+                            && !self.pane_settings.open
                             && self.image_overlay.is_none() =>
                     {
                         self.route_input(text.as_bytes())?;
@@ -1150,8 +1134,8 @@ impl App {
 
         let selection_cleared = self.clear_text_selection();
 
-        if self.previous_panes.open {
-            let outcome = self.handle_previous_panes_key(key);
+        if self.pane_settings.open {
+            let outcome = self.handle_pane_settings_key(key);
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
         }
 
@@ -1285,7 +1269,7 @@ impl App {
                 Ok(Some(false))
             }
             'p' => {
-                self.open_previous_panes();
+                self.toggle_pane_settings();
                 Ok(Some(false))
             }
             'r' => {
@@ -1325,55 +1309,59 @@ impl App {
         self.status = format!("renaming pane {}", pane_index + 1);
     }
 
-    fn open_previous_panes(&mut self) {
-        if self.panes.is_empty() {
-            self.status = "no panes to list".into();
+    fn toggle_pane_settings(&mut self) {
+        if self.pane_settings.open && self.pane_settings.pane_index == self.focus {
+            self.close_pane_settings();
             return;
         }
 
-        self.previous_panes.begin(self.focus, self.panes.len());
-        self.status = "previous panes open".into();
+        self.open_pane_settings();
     }
 
-    fn close_previous_panes(&mut self) {
-        self.previous_panes.close();
-        self.status = "previous panes closed".into();
+    fn open_pane_settings(&mut self) {
+        if self.panes.is_empty() {
+            self.status = "no pane settings to show".into();
+            return;
+        }
+
+        let pane_index = self.focus.min(self.panes.len() - 1);
+        let history_summary = self.pane_history_summary(pane_index);
+        self.pane_settings.open(pane_index, history_summary);
+        self.status = format!("pane {} settings open", pane_index + 1);
     }
 
-    fn handle_previous_panes_key(&mut self, key: KeyEvent) -> KeyOutcome {
+    fn close_pane_settings(&mut self) {
+        let pane_number = self.pane_settings.pane_index + 1;
+        self.pane_settings.close();
+        self.status = format!("pane {pane_number} settings closed");
+    }
+
+    fn handle_pane_settings_key(&mut self, key: KeyEvent) -> KeyOutcome {
         if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
             return KeyOutcome::Quit;
         }
         if key.modifiers.contains(KeyModifiers::ALT)
             && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
         {
-            self.close_previous_panes();
+            self.close_pane_settings();
+            return KeyOutcome::Render;
+        }
+        if key.modifiers.contains(KeyModifiers::ALT)
+            && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
+        {
+            self.pane_settings.close();
+            self.settings.open = true;
+            self.status = "settings open".into();
             return KeyOutcome::Render;
         }
 
         let changed = match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
-                self.close_previous_panes();
+                self.close_pane_settings();
                 true
             }
-            KeyCode::Up => {
-                self.previous_panes.move_cursor(-1, self.panes.len());
-                true
-            }
-            KeyCode::Down => {
-                self.previous_panes.move_cursor(1, self.panes.len());
-                true
-            }
-            KeyCode::Home => {
-                self.previous_panes.move_to_start();
-                true
-            }
-            KeyCode::End => {
-                self.previous_panes.move_to_end(self.panes.len());
-                true
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                self.focus_previous_pane_entry(self.previous_panes.cursor);
+            KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.reload_pane_history();
                 true
             }
             _ => false,
@@ -1386,21 +1374,17 @@ impl App {
         }
     }
 
-    fn focus_previous_pane_entry(&mut self, index: usize) {
+    fn reload_pane_history(&mut self) {
+        let index = self.pane_settings.pane_index;
         if index >= self.panes.len() {
-            self.previous_panes.close();
+            self.pane_settings.close();
             self.status = format!("pane {} is no longer available", index + 1);
             return;
         }
 
-        self.focus = index;
-        let woke = self.sleeping.remove(&index);
-        self.previous_panes.close();
-        self.status = if woke {
-            format!("woke pane {}", index + 1)
-        } else {
-            format!("focused pane {}", index + 1)
-        };
+        let history_summary = self.pane_history_summary(index);
+        self.pane_settings.refresh_history(history_summary);
+        self.status = format!("reloaded past history for pane {}", index + 1);
     }
 
     fn handle_rename_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -1591,19 +1575,15 @@ impl App {
 
         if self.mouse_enabled
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && self.previous_panes_button_at(mouse.column, mouse.row)
+            && self.pane_settings_button_at(mouse.column, mouse.row)
         {
-            if self.previous_panes.open {
-                self.close_previous_panes();
-            } else {
-                self.open_previous_panes();
-            }
+            self.toggle_pane_settings();
             return Ok(true);
         }
 
-        if self.previous_panes.open {
+        if self.pane_settings.open {
             return Ok(if self.mouse_enabled {
-                self.handle_previous_panes_mouse(mouse)
+                self.handle_pane_settings_mouse(mouse)
             } else {
                 false
             });
@@ -1701,29 +1681,27 @@ impl App {
         Ok(changed)
     }
 
-    fn handle_previous_panes_mouse(&mut self, mouse: MouseEvent) -> bool {
+    fn handle_pane_settings_mouse(&mut self, mouse: MouseEvent) -> bool {
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return false;
         }
 
-        let Some(index) = self.previous_pane_row_at(mouse.column, mouse.row) else {
-            return false;
-        };
+        if self.pane_settings_reload_button_at(mouse.column, mouse.row) {
+            self.reload_pane_history();
+            return true;
+        }
 
-        self.previous_panes.cursor = index;
-        self.focus_previous_pane_entry(index);
-        true
+        false
     }
 
-    fn previous_panes_button_at(&self, x: u16, y: u16) -> bool {
-        self.previous_panes_button
+    fn pane_settings_button_at(&self, x: u16, y: u16) -> bool {
+        self.pane_settings_button
             .is_some_and(|rect| rect_contains(rect, x, y))
     }
 
-    fn previous_pane_row_at(&self, x: u16, y: u16) -> Option<usize> {
-        self.previous_pane_rows
-            .iter()
-            .find_map(|(index, rect)| rect_contains(*rect, x, y).then_some(*index))
+    fn pane_settings_reload_button_at(&self, x: u16, y: u16) -> bool {
+        self.pane_settings_reload_button
+            .is_some_and(|rect| rect_contains(rect, x, y))
     }
 
     fn pane_cell_at(&self, x: u16, y: u16) -> Option<PaneCell> {
@@ -2224,8 +2202,8 @@ impl App {
         self.settings.open
     }
 
-    pub fn previous_panes_open(&self) -> bool {
-        self.previous_panes.open
+    pub fn pane_settings_open(&self) -> bool {
+        self.pane_settings.open
     }
 
     pub fn image_overlay_view(&self) -> Option<&ImagePreview> {
@@ -2275,44 +2253,29 @@ impl App {
         })
     }
 
-    pub fn previous_panes_view(&self) -> Option<PreviousPanesView> {
-        self.previous_panes.open.then(|| PreviousPanesView {
-            cursor: self
-                .previous_panes
-                .cursor
-                .min(self.panes.len().saturating_sub(1)),
-            panes: self
-                .panes
-                .iter()
-                .enumerate()
-                .map(|(index, pane)| {
-                    let agent_label = self
-                        .launch_plan
-                        .as_ref()
-                        .and_then(|plan| plan.panes.get(index))
-                        .and_then(|pane| pane.agent_label());
-                    let summary = conversation_summary(pane.screen())
-                        .unwrap_or_else(|| "waiting for output".into());
-                    let summary = agent_label
-                        .map(|label| format!("{label} | {summary}"))
-                        .unwrap_or(summary);
+    pub fn pane_settings_view(&self, index: usize) -> Option<PaneSettingsView> {
+        if !self.pane_settings.open || self.pane_settings.pane_index != index {
+            return None;
+        }
 
-                    PreviousPaneView {
-                        index,
-                        label: self.pane_label(index),
-                        folder: self
-                            .pane_folder(index)
-                            .map(str::to_string)
-                            .unwrap_or_else(|| path_label(pane.cwd())),
-                        worktree: self.pane_worktree(index).map(str::to_string),
-                        summary,
-                        focused: self.focus == index,
-                        selected: self.selected.contains(&index),
-                        sleeping: self.sleeping.contains(&index),
-                        exited: pane.exited,
-                    }
-                })
-                .collect(),
+        let pane = self.panes.get(index)?;
+        Some(PaneSettingsView {
+            index,
+            label: self.pane_label(index),
+            folder: self
+                .pane_folder(index)
+                .map(str::to_string)
+                .unwrap_or_else(|| path_label(pane.cwd())),
+            worktree: self.pane_worktree(index).map(str::to_string),
+            history_summary: self
+                .pane_settings
+                .history_summary
+                .clone()
+                .unwrap_or_else(|| self.pane_history_summary(index)),
+            focused: self.focus == index,
+            selected: self.selected.contains(&index),
+            sleeping: self.sleeping.contains(&index),
+            exited: pane.exited,
         })
     }
 
@@ -2340,6 +2303,21 @@ impl App {
         let summary = conversation_summary(pane.screen())
             .unwrap_or_else(|| "waiting for conversation".into());
         Some(truncate_chars(&format!("{label} | {summary}"), max_chars))
+    }
+
+    fn pane_history_summary(&self, index: usize) -> String {
+        let Some(pane) = self.panes.get(index) else {
+            return "pane is no longer available".into();
+        };
+
+        let summary =
+            conversation_summary(pane.screen()).unwrap_or_else(|| "waiting for output".into());
+        self.launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .and_then(|pane| pane.agent_label())
+            .map(|label| format!("{label} | {summary}"))
+            .unwrap_or(summary)
     }
 
     pub fn pane_usage_label(&self, index: usize) -> Option<String> {
@@ -3138,19 +3116,25 @@ mod tests {
     }
 
     #[test]
-    fn previous_panes_cursor_clamps_to_available_panes() {
-        let mut previous = PreviousPanesState::default();
-        previous.begin(8, 3);
-        assert_eq!(previous.cursor, 2);
+    fn pane_settings_tracks_active_pane_history() {
+        let mut settings = PaneSettingsState::default();
+        settings.open(2, "Assistant: ready".into());
+        assert!(settings.open);
+        assert_eq!(settings.pane_index, 2);
+        assert_eq!(
+            settings.history_summary.as_deref(),
+            Some("Assistant: ready")
+        );
 
-        previous.move_cursor(-5, 3);
-        assert_eq!(previous.cursor, 0);
+        settings.refresh_history("User: rerun tests".into());
+        assert_eq!(
+            settings.history_summary.as_deref(),
+            Some("User: rerun tests")
+        );
 
-        previous.move_cursor(10, 3);
-        assert_eq!(previous.cursor, 2);
-
-        previous.move_cursor(1, 0);
-        assert_eq!(previous.cursor, 0);
+        settings.close();
+        assert!(!settings.open);
+        assert!(settings.history_summary.is_none());
     }
 }
 
