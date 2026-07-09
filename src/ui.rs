@@ -239,9 +239,7 @@ fn pane_chrome(
     } else if exited {
         Style::default().fg(palette.exited())
     } else if quiet {
-        Style::default()
-            .fg(palette.quiet())
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(palette.quiet())
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -1430,6 +1428,7 @@ mod tests {
         let active_quiet = pane_chrome(false, false, true, false, false, true, &palette);
 
         assert_eq!(quiet.quiet_marker, QUIET_MARKER);
+        assert_eq!(quiet.border_style, Style::default().fg(Color::DarkGray));
         assert_eq!(quiet.border_style, active_quiet.border_style);
     }
 }

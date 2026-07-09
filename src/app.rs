@@ -211,12 +211,13 @@ enum PaletteColor {
     Orange,
     Red,
     Magenta,
+    DarkGray,
     Gray,
     White,
 }
 
 impl PaletteColor {
-    const ALL: [Self; 12] = [
+    const ALL: [Self; 13] = [
         Self::Cyan,
         Self::Sky,
         Self::Blue,
@@ -227,6 +228,7 @@ impl PaletteColor {
         Self::Orange,
         Self::Red,
         Self::Magenta,
+        Self::DarkGray,
         Self::Gray,
         Self::White,
     ];
@@ -243,6 +245,7 @@ impl PaletteColor {
             Self::Orange => Color::Rgb(249, 115, 22),
             Self::Red => Color::Red,
             Self::Magenta => Color::Magenta,
+            Self::DarkGray => Color::DarkGray,
             Self::Gray => Color::Gray,
             Self::White => Color::White,
         }
@@ -260,6 +263,7 @@ impl PaletteColor {
             Self::Orange => "orange",
             Self::Red => "red",
             Self::Magenta => "magenta",
+            Self::DarkGray => "dark gray",
             Self::Gray => "gray",
             Self::White => "white",
         }
@@ -290,7 +294,7 @@ impl Default for GridPalette {
             accent: PaletteColor::Cyan,
             focus: PaletteColor::Yellow,
             selected: PaletteColor::Cyan,
-            quiet: PaletteColor::Magenta,
+            quiet: PaletteColor::DarkGray,
             exited: PaletteColor::Red,
         }
     }
@@ -2953,7 +2957,7 @@ mod tests {
             rows[SettingsState::BASE_ROW_COUNT + 3].label,
             "Quiet border"
         );
-        assert_eq!(rows[SettingsState::BASE_ROW_COUNT + 3].value, "magenta");
+        assert_eq!(rows[SettingsState::BASE_ROW_COUNT + 3].value, "dark gray");
     }
 
     #[test]
