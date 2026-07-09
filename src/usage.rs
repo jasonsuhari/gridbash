@@ -11,6 +11,8 @@ use std::{
 
 use serde::Deserialize;
 
+use crate::auth::AgentKind;
+
 const CLAUDE_USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/usage";
 const OPENAI_COSTS_ENDPOINT: &str = "https://api.openai.com/v1/organization/costs";
@@ -20,6 +22,8 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 pub struct UsageTarget {
     pub profile_name: String,
     pub command: String,
+    pub auth_kind: Option<AgentKind>,
+    pub auth_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +41,15 @@ pub enum UsageEvent {
 enum AuthKind {
     Claude,
     Codex,
+}
+
+impl From<AgentKind> for AuthKind {
+    fn from(value: AgentKind) -> Self {
+        match value {
+            AgentKind::Claude => Self::Claude,
+            AgentKind::Codex => Self::Codex,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +113,16 @@ fn resolve_usage_sources(targets: &[UsageTarget]) -> Vec<UsageSource> {
 }
 
 fn resolve_usage_source(target: &UsageTarget) -> Option<UsageSource> {
+    if let (Some(kind), Some(dir)) = (target.auth_kind, target.auth_dir.as_ref())
+        && dir.is_dir()
+    {
+        return Some(UsageSource {
+            profile_name: target.profile_name.clone(),
+            dir: dir.clone(),
+            kind: kind.into(),
+        });
+    }
+
     let vibe_dir = profiles_home().join(&target.profile_name);
     if vibe_dir.is_dir() {
         let kind = profile_kind(&vibe_dir)
@@ -601,5 +624,29 @@ mod tests {
             usage_label(usage.five, usage.seven),
             Some("5h 30% left / 7d 80% left".into())
         );
+    }
+
+    #[test]
+    fn resolves_usage_from_applied_auth_dir_first() {
+        let temp = env::temp_dir().join(format!(
+            "gridbash-usage-source-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir(&temp).expect("temp auth dir");
+
+        let source = resolve_usage_source(&UsageTarget {
+            profile_name: "codex".into(),
+            command: "codex".into(),
+            auth_kind: Some(AgentKind::Codex),
+            auth_dir: Some(temp.clone()),
+        })
+        .expect("usage source");
+        let _ = fs::remove_dir_all(&temp);
+
+        assert_eq!(source.dir, temp);
+        assert_eq!(source.kind, AuthKind::Codex);
     }
 }

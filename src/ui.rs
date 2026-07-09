@@ -11,8 +11,10 @@ use vt100::Cell;
 use crate::{
     app::{
         App, ExitedPaneRecoveryView, FollowUpDialog, GridPalette, PaneSelection, PreviousPaneView,
-        PreviousPanesView, RenamePaneView, SettingsGroup, SettingsRow, SettingsValueKind,
+        PreviousPanesView, RenamePaneView, SettingsGroup, SettingsRow, SettingsTab,
+        SettingsValueKind,
     },
+    auth::{AgentKind, AuthProfile},
     image_preview::ImagePreview,
 };
 
@@ -97,6 +99,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             chrome.quiet_marker,
             &folder,
             app.pane_worktree(index),
+            app.pane_profile(index),
+            app.pane_auth(index),
             usage.as_deref(),
             chrome.badge,
         );
@@ -171,7 +175,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     );
 
     if app.settings_open() {
-        render_settings(frame, area, &app.settings_rows(), palette);
+        render_settings(frame, area, app, palette);
     } else if let Some(dialog) = follow_up_dialog.as_ref() {
         render_follow_up_dialog(frame, area, dialog);
     }
@@ -198,21 +202,32 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pane_title(
     label: &str,
     quiet_marker: &str,
     folder: &str,
     worktree: Option<&str>,
+    profile: Option<&str>,
+    auth: Option<&str>,
     usage: Option<&str>,
     badge: &str,
 ) -> String {
-    let label = format!("{label}{quiet_marker}");
-    let usage = usage.map(|label| format!(" | {label}")).unwrap_or_default();
-    if let Some(worktree) = worktree {
-        format!(" {label} | {folder} | {worktree}{usage}{badge} ")
-    } else {
-        format!(" {label} | {folder}{usage}{badge} ")
+    let mut parts = vec![format!("{label}{quiet_marker}"), folder.to_string()];
+    if let Some(worktree) = worktree.filter(|value| !value.is_empty()) {
+        parts.push(worktree.to_string());
     }
+    if let Some(profile) = profile.filter(|value| !value.is_empty()) {
+        parts.push(profile.to_string());
+    }
+    if let Some(auth) = auth.filter(|value| !value.is_empty()) {
+        parts.push(auth.to_string());
+    }
+    if let Some(usage) = usage.filter(|value| !value.is_empty()) {
+        parts.push(usage.to_string());
+    }
+
+    format!(" {}{} ", parts.join(" | "), badge)
 }
 
 #[derive(Debug, PartialEq)]
@@ -496,8 +511,8 @@ fn visible_previous_pane_range(
     start..start + capacity
 }
 
-fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow], palette: &GridPalette) {
-    let modal = settings_modal_rect(area, rows.len());
+fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &GridPalette) {
+    let modal = settings_modal_rect(area, settings_content_row_count(app));
     let shadow = settings_shadow_rect(area, modal);
 
     if shadow != modal {
@@ -522,7 +537,7 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow], pale
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
     frame.render_widget(
-        Paragraph::new(settings_lines(rows, inner.width)).style(settings_panel_style()),
+        Paragraph::new(settings_lines(app, inner.width)).style(settings_panel_style()),
         inner,
     );
 }
@@ -705,6 +720,45 @@ fn render_follow_up_dialog(frame: &mut Frame<'_>, area: Rect, dialog: &FollowUpD
     );
 }
 
+fn settings_content_row_count(app: &App) -> usize {
+    match app.settings_tab() {
+        SettingsTab::General => app.settings_rows().len(),
+        SettingsTab::Auth => {
+            app.auth_profiles().len().max(1) + usize::from(app.auth_create().is_some()) * 3
+        }
+    }
+}
+
+fn settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    match app.settings_tab() {
+        SettingsTab::General => general_settings_lines(&app.settings_rows(), width),
+        SettingsTab::Auth => auth_settings_lines(app, width),
+    }
+}
+
+fn settings_tabs(active: SettingsTab) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("  "),
+        settings_tab("General", active == SettingsTab::General),
+        Span::raw("  "),
+        settings_tab("Auth", active == SettingsTab::Auth),
+        Span::raw("  "),
+        Span::styled("Tab switches", Style::default().fg(SETTINGS_MUTED)),
+    ])
+}
+
+fn settings_tab(label: &'static str, active: bool) -> Span<'static> {
+    let style = if active {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::LightCyan).bg(SETTINGS_SURFACE)
+    };
+    Span::styled(format!(" {label} "), style)
+}
+
 fn render_image_overlay(frame: &mut Frame<'_>, area: Rect, image: &ImagePreview) {
     let modal = image_modal_rect(area, image);
     frame.render_widget(Clear, modal);
@@ -876,8 +930,10 @@ fn image_modal_rect(area: Rect, image: &ImagePreview) -> Rect {
     }
 }
 
-fn settings_lines(rows: &[SettingsRow], width: u16) -> Vec<Line<'static>> {
+fn general_settings_lines(rows: &[SettingsRow], width: u16) -> Vec<Line<'static>> {
     let mut lines = vec![
+        settings_tabs(SettingsTab::General),
+        Line::from(""),
         Line::from(vec![
             Span::raw("  "),
             Span::styled(
@@ -946,6 +1002,158 @@ fn settings_lines(rows: &[SettingsRow], width: u16) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
     lines.push(settings_command_bar(width));
     lines
+}
+
+fn auth_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        settings_tabs(SettingsTab::Auth),
+        Line::from(""),
+        settings_section(
+            "AUTH PROFILES",
+            if app.auth_refreshing() {
+                "refreshing local account and usage status"
+            } else {
+                "Claude and Codex defaults"
+            },
+            width,
+        ),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("home", Style::default().fg(SETTINGS_MUTED)),
+            Span::raw("  "),
+            Span::styled(
+                truncate_text(&app.auth_home_label(), width.saturating_sub(8) as usize),
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+        Line::from(""),
+    ];
+
+    if app.auth_profiles().is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("No auth profiles found.", Style::default().fg(Color::Gray)),
+            Span::raw("  "),
+            Span::styled("n", Style::default().fg(Color::Yellow)),
+            Span::styled(" creates one", Style::default().fg(SETTINGS_MUTED)),
+        ]));
+    } else {
+        for (index, profile) in app.auth_profiles().iter().enumerate() {
+            lines.push(auth_profile_row(
+                profile,
+                index == app.auth_cursor(),
+                app.auth_default(profile.kind) == Some(profile.name.as_str()),
+                width,
+            ));
+        }
+    }
+
+    if let Some(create) = app.auth_create() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Create", Style::default().fg(SETTINGS_MUTED)),
+            Span::raw("  "),
+            Span::styled(
+                create.kind.display_name(),
+                Style::default().fg(kind_color(create.kind)),
+            ),
+            Span::raw("  "),
+            Span::styled(create.name.clone(), Style::default().fg(Color::Yellow)),
+            Span::styled("_", Style::default().fg(Color::Yellow)),
+        ]));
+        lines.push(auth_create_command_bar());
+    }
+
+    lines.push(Line::from(""));
+    lines.push(auth_command_bar(width));
+    lines
+}
+
+fn auth_profile_row(
+    profile: &AuthProfile,
+    selected: bool,
+    is_default: bool,
+    width: u16,
+) -> Line<'static> {
+    let row_bg = selected.then_some(SETTINGS_ROW_ACTIVE);
+    let marker = if selected { "> " } else { "  " };
+    let default = if is_default { "default" } else { "" };
+    let account = profile.account_label.as_deref().unwrap_or("no account");
+    let detail = profile.account_detail.as_deref().unwrap_or("");
+    let usage = profile
+        .usage
+        .as_ref()
+        .map(|usage| usage.display_label())
+        .unwrap_or_else(|| "usage n/a".into());
+    let summary = format!(
+        "{:<14} {:<7} {:<8} {:<12} {:<24} {:<8} {}",
+        profile.name,
+        profile.kind.as_str(),
+        default,
+        profile.status_label(),
+        account,
+        detail,
+        usage
+    );
+    let available = width.saturating_sub(2) as usize;
+
+    Line::from(vec![
+        Span::styled(marker.to_string(), row_style(Color::Yellow, row_bg, false)),
+        Span::styled(
+            truncate_text(&summary, available),
+            row_style(SETTINGS_TEXT, row_bg, selected),
+        ),
+    ])
+}
+
+fn auth_command_bar(width: u16) -> Line<'static> {
+    if width < 58 {
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Up/Down"),
+            Span::styled(" move  ", Style::default().fg(Color::Gray)),
+            command_key("d"),
+            Span::styled(" default  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" close", Style::default().fg(Color::Gray)),
+        ]);
+    }
+
+    Line::from(vec![
+        Span::raw("  "),
+        command_key("Up/Down"),
+        Span::styled(" move  ", Style::default().fg(Color::Gray)),
+        command_key("d"),
+        Span::styled(" default  ", Style::default().fg(Color::Gray)),
+        command_key("n"),
+        Span::styled(" new  ", Style::default().fg(Color::Gray)),
+        command_key("l"),
+        Span::styled(" login  ", Style::default().fg(Color::Gray)),
+        command_key("r"),
+        Span::styled(" refresh  ", Style::default().fg(Color::Gray)),
+        command_key("Esc"),
+        Span::styled(" close", Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn auth_create_command_bar() -> Line<'static> {
+    Line::from(vec![
+        Span::raw("  "),
+        command_key("Tab"),
+        Span::styled(" kind  ", Style::default().fg(Color::Gray)),
+        command_key("Enter"),
+        Span::styled(" create  ", Style::default().fg(Color::Gray)),
+        command_key("Esc"),
+        Span::styled(" cancel", Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn kind_color(kind: AgentKind) -> Color {
+    match kind {
+        AgentKind::Claude => Color::Magenta,
+        AgentKind::Codex => Color::Cyan,
+    }
 }
 
 fn conversation_footer(summary: String, emphasized: bool) -> Line<'static> {
@@ -1669,23 +1877,54 @@ mod tests {
     #[test]
     fn pane_title_uses_custom_label_in_number_slot() {
         assert_eq!(
-            pane_title("api", "", "gridbash/", Some("feat/rename-panes"), None, ""),
+            pane_title(
+                "api",
+                "",
+                "gridbash/",
+                Some("feat/rename-panes"),
+                None,
+                None,
+                None,
+                ""
+            ),
             " api | gridbash/ | feat/rename-panes "
         );
         assert_eq!(
-            pane_title("1", "", "gridbash/", None, None, " selected"),
+            pane_title("1", "", "gridbash/", None, None, None, None, " selected"),
             " 1 | gridbash/ selected "
         );
         assert_eq!(
-            pane_title("2", "", "gridbash/", None, Some("5h 80% left"), " selected"),
+            pane_title(
+                "2",
+                "",
+                "gridbash/",
+                None,
+                None,
+                None,
+                Some("5h 80% left"),
+                " selected"
+            ),
             " 2 | gridbash/ | 5h 80% left selected "
+        );
+        assert_eq!(
+            pane_title(
+                "api",
+                "",
+                "gridbash/",
+                Some("main"),
+                Some("codex"),
+                Some("codex-2"),
+                Some("5h 80% left"),
+                " selected"
+            ),
+            " api | gridbash/ | main | codex | codex-2 | 5h 80% left selected "
         );
     }
 
     #[test]
     fn pane_title_keeps_quiet_marker_with_custom_label() {
         assert_eq!(
-            pane_title("api", QUIET_MARKER, "gridbash/", None, None, ""),
+            pane_title("api", QUIET_MARKER, "gridbash/", None, None, None, None, ""),
             " api * | gridbash/ "
         );
     }

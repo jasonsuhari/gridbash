@@ -1,4 +1,5 @@
 mod app;
+mod auth;
 mod cli;
 mod composer;
 mod config;

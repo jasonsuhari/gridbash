@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -6,6 +7,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 
 use crate::{
+    auth::AgentKind,
     layout::GridSize,
     profiles::{AGENT_PROFILE_NAMES, LaunchCommand, Profile},
     worktrees::{ManagedWorktreeOptions, ensure_pane_worktrees},
@@ -33,9 +35,13 @@ pub struct LaunchPlan {
 pub struct PaneLaunchSpec {
     pub profile_name: String,
     pub command: Profile,
+    pub env: BTreeMap<String, String>,
     pub cwd: PathBuf,
     pub folder_name: String,
     pub worktree_name: Option<String>,
+    pub auth_name: Option<String>,
+    pub auth_kind: Option<AgentKind>,
+    pub auth_dir: Option<PathBuf>,
 }
 
 impl LaunchSelection {
@@ -154,9 +160,13 @@ impl LaunchPlan {
             .map(|_| PaneLaunchSpec {
                 profile_name: profile_name.clone(),
                 command: command.clone(),
+                env: BTreeMap::new(),
                 cwd: cwd.clone(),
                 folder_name: folder_name.clone(),
                 worktree_name: worktree_name.clone(),
+                auth_name: None,
+                auth_kind: None,
+                auth_dir: None,
             })
             .collect();
 
@@ -176,9 +186,13 @@ impl LaunchPlan {
             .map(|worktree| PaneLaunchSpec {
                 profile_name: profile_name.clone(),
                 command: command.clone(),
+                env: BTreeMap::new(),
                 cwd: worktree.cwd,
                 folder_name: worktree.folder_name,
                 worktree_name: Some(worktree.branch_name),
+                auth_name: None,
+                auth_kind: None,
+                auth_dir: None,
             })
             .collect();
 
@@ -270,10 +284,15 @@ fn vibe_pane_spec_for_worktree(
             command: "vibe".into(),
             args: vec!["run".into(), agent.into(), "--".into()],
             title: Some(agent.into()),
+            agent_kind: None,
         },
+        env: BTreeMap::new(),
         cwd,
         folder_name,
         worktree_name: (!worktree_name.is_empty()).then_some(worktree_name),
+        auth_name: None,
+        auth_kind: None,
+        auth_dir: None,
     }
 }
 
@@ -375,5 +394,74 @@ mod tests {
         let plan = selection.launch_plan(None).expect("launch plan");
         assert_eq!(plan.panes[0].command.command, "vibe");
         assert_eq!(plan.panes[0].command.args, vec!["run", "claude-1", "--"]);
+    }
+
+    #[test]
+    fn detects_vibe_agent_panes() {
+        let cwd = env::current_dir().expect("cwd");
+        let spec = PaneLaunchSpec {
+            profile_name: "claude-1".into(),
+            command: Profile {
+                command: "vibe".into(),
+                args: vec!["run".into(), "claude-1".into(), "--".into()],
+                title: Some("claude-1".into()),
+                agent_kind: None,
+            },
+            env: BTreeMap::new(),
+            cwd,
+            folder_name: "repo".into(),
+            worktree_name: None,
+            auth_name: None,
+            auth_kind: None,
+            auth_dir: None,
+        };
+
+        assert_eq!(spec.agent_label().as_deref(), Some("claude-1"));
+    }
+
+    #[test]
+    fn detects_custom_agent_profiles() {
+        let cwd = env::current_dir().expect("cwd");
+        let spec = PaneLaunchSpec {
+            profile_name: "review".into(),
+            command: Profile {
+                command: "codex".into(),
+                args: vec!["--model".into(), "gpt-5.5".into()],
+                title: Some("Codex Review".into()),
+                agent_kind: Some(AgentKind::Codex),
+            },
+            env: BTreeMap::new(),
+            cwd,
+            folder_name: "repo".into(),
+            worktree_name: None,
+            auth_name: None,
+            auth_kind: None,
+            auth_dir: None,
+        };
+
+        assert_eq!(spec.agent_label().as_deref(), Some("Codex Review"));
+    }
+
+    #[test]
+    fn ignores_plain_terminal_profiles() {
+        let cwd = env::current_dir().expect("cwd");
+        let spec = PaneLaunchSpec {
+            profile_name: "git-bash".into(),
+            command: Profile {
+                command: "bash".into(),
+                args: vec!["--login".into()],
+                title: Some("Git Bash".into()),
+                agent_kind: None,
+            },
+            env: BTreeMap::new(),
+            cwd,
+            folder_name: "repo".into(),
+            worktree_name: None,
+            auth_name: None,
+            auth_kind: None,
+            auth_dir: None,
+        };
+
+        assert_eq!(spec.agent_label(), None);
     }
 }

@@ -218,9 +218,35 @@ Typing goes to selected panes whenever multiple panes are selected. With zero or
 
 Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
 
+Settings includes a General tab for local runtime display controls and an Auth tab for GridBash-wide Claude/Codex auth defaults.
+
 Pane titles add a small quiet-output marker after roughly three seconds without output. The marker means a pane produced output and then went idle; it does not mean the process exited or completed its task.
 
 The settings screen includes sample controls plus live color controls for the accent, focus, selected, quiet, and exited grid roles. Palette changes apply immediately for the current run.
+
+## Auth Profiles
+
+GridBash can launch Claude and Codex with isolated auth/config directories. It discovers profiles from:
+
+```text
+GRIDBASH_AUTH_HOME > CLAUDE_PROFILES_HOME > [auth].home > %USERPROFILE%\.claude-profiles
+```
+
+Claude profiles launch with `CLAUDE_CONFIG_DIR=<profile-dir>`. Codex profiles launch with `CODEX_HOME=<profile-dir>`.
+
+Auth settings controls:
+
+| Input | Action |
+| --- | --- |
+| Tab | Switch Settings tabs |
+| Up / Down | Move through auth profiles |
+| d | Set selected profile as the GridBash-wide default for its kind |
+| n | Create a profile directory |
+| l | Open the selected profile's login command |
+| r | Refresh local account and usage status |
+| Esc / q | Close settings |
+
+Usage status is best-effort. GridBash reads local auth metadata, masks account emails, and uses short-timeout `curl.exe` requests only while the Auth settings view is refreshed.
 
 ## Profiles
 
@@ -235,7 +261,7 @@ GridBash resolves Windows `.exe` and `.cmd` shims before extensionless npm shims
 Optional config file:
 
 ```text
-%APPDATA%\GridBash\config.toml
+%APPDATA%\GridBash\config\config.toml
 ```
 
 Example:
@@ -244,10 +270,19 @@ Example:
 [defaults]
 profile = "powershell"
 
+[auth]
+home = "C:\\Users\\Jason\\.claude-profiles"
+usage_status = true
+
+[auth.defaults]
+claude = "claude-1"
+codex = "codex-2"
+
 [profiles.review]
 command = "codex"
 args = ["--model", "gpt-5.5"]
 title = "Codex Review"
+agent_kind = "codex"
 ```
 
 Then run:

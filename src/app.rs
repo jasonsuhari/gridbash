@@ -3,7 +3,9 @@ use std::{
     env,
     io::{self, Stdout, Write},
     path::PathBuf,
+    process::Command,
     sync::mpsc as std_mpsc,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -22,6 +24,7 @@ use tokio::sync::mpsc;
 use vt100::Screen;
 
 use crate::{
+    auth::{self, AgentKind, AuthProfile},
     cli::{Cli, GridMode},
     composer::Composer,
     config::Config,
@@ -71,6 +74,8 @@ pub struct App {
     rename: RenamePaneState,
     previous_panes: PreviousPanesState,
     follow_up: Option<FollowUpPromptState>,
+    auth_profiles: Vec<AuthProfile>,
+    auth_refresh_rx: Option<std_mpsc::Receiver<Result<Vec<AuthProfile>, String>>>,
     status: String,
     next_pane_id: usize,
     previous_panes_button: Option<Rect>,
@@ -84,10 +89,11 @@ pub struct App {
     last_activity_decay: Instant,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum KeyOutcome {
     Continue,
     Render,
+    AuthLogin(AuthProfile),
     Quit,
 }
 
@@ -500,6 +506,18 @@ pub struct ExitedPaneRecoveryView {
     pub target_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    General,
+    Auth,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthCreateState {
+    pub kind: AgentKind,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Default)]
 struct RenamePaneState {
     open: bool,
@@ -582,7 +600,11 @@ impl RenamePaneState {
 #[derive(Debug, Clone)]
 struct SettingsState {
     open: bool,
+    tab: SettingsTab,
     cursor: usize,
+    auth_cursor: usize,
+    auth_refreshing: bool,
+    create_auth: Option<AuthCreateState>,
     compact_titles: bool,
     activity_badges: bool,
     confirm_quit: bool,
@@ -600,7 +622,11 @@ impl Default for SettingsState {
     fn default() -> Self {
         Self {
             open: false,
+            tab: SettingsTab::General,
             cursor: 0,
+            auth_cursor: 0,
+            auth_refreshing: false,
+            create_auth: None,
             compact_titles: false,
             activity_badges: true,
             confirm_quit: false,
@@ -1071,8 +1097,11 @@ impl App {
             .worktrees
             .then(|| ManagedWorktreeOptions::new(cli.worktree_prefix.clone()))
             .transpose()?;
-        let launch_plan = resolve_direct_launch_plan(&cli, &config, worktrees.as_ref())?;
+        let mut launch_plan = resolve_direct_launch_plan(&cli, &config, worktrees.as_ref())?;
         let config_path = cli.config.clone();
+        if let Some(plan) = launch_plan.as_mut() {
+            apply_auth_defaults(plan, &config)?;
+        }
         let mouse_enabled = !cli.no_mouse;
         let grid = launch_plan
             .as_ref()
@@ -1130,6 +1159,8 @@ impl App {
             rename: RenamePaneState::default(),
             previous_panes: PreviousPanesState::default(),
             follow_up: None,
+            auth_profiles: Vec::new(),
+            auth_refresh_rx: None,
             status,
             next_pane_id: 0,
             previous_panes_button: None,
@@ -1158,7 +1189,7 @@ impl App {
             let Some(plan) = composer.run(terminal, &self.config)? else {
                 return Ok(());
             };
-            self.set_launch_plan(plan);
+            self.set_launch_plan(plan)?;
         }
 
         self.spawn_initial_panes()?;
@@ -1166,9 +1197,11 @@ impl App {
         self.run_loop(terminal)
     }
 
-    fn set_launch_plan(&mut self, plan: LaunchPlan) {
+    fn set_launch_plan(&mut self, mut plan: LaunchPlan) -> Result<()> {
+        apply_auth_defaults(&mut plan, &self.config)?;
         self.layout = GridLayout::new(plan.grid);
         self.launch_plan = Some(plan);
+        Ok(())
     }
 
     fn spawn_initial_panes(&mut self) -> Result<()> {
@@ -1203,6 +1236,8 @@ impl App {
             .map(|spec| UsageTarget {
                 profile_name: spec.profile_name.clone(),
                 command: spec.command.command.clone(),
+                auth_kind: spec.auth_kind,
+                auth_dir: spec.auth_dir.clone(),
             })
             .collect::<Vec<_>>();
         usage::spawn_usage_monitor(targets, self.usage_tx.clone());
@@ -1226,6 +1261,7 @@ impl App {
             0,
             &launch.command,
             &launch.args,
+            &spec.env,
             &spec.cwd,
             &extra_env,
             self.event_tx.clone(),
@@ -1254,6 +1290,7 @@ impl App {
         loop {
             needs_render |= self.drain_pty_events();
             needs_render |= self.drain_usage_events();
+            needs_render |= self.drain_auth_refresh();
             needs_render |= self.drain_control_events();
             needs_render |= self.decay_activity();
             needs_render |= self.update_follow_up_prompt();
@@ -1277,6 +1314,11 @@ impl App {
                         match self.handle_key(key)? {
                             KeyOutcome::Continue => {}
                             KeyOutcome::Render => needs_render = true,
+                            KeyOutcome::AuthLogin(profile) => {
+                                self.run_auth_login(terminal, profile)?;
+                                mouse_capture_enabled = false;
+                                needs_render = true;
+                            }
                             KeyOutcome::Quit => break,
                         }
                     }
@@ -1711,6 +1753,9 @@ impl App {
             }
             'o' => {
                 self.settings.open = true;
+                if self.settings.tab == SettingsTab::Auth {
+                    self.start_auth_refresh();
+                }
                 self.status = "settings open".into();
                 Ok(Some(false))
             }
@@ -1979,6 +2024,23 @@ impl App {
             return Ok(KeyOutcome::Render);
         }
 
+        if self.settings.create_auth.is_some() {
+            return Ok(if self.handle_auth_create_key(key)? {
+                KeyOutcome::Render
+            } else {
+                KeyOutcome::Continue
+            });
+        }
+
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            self.toggle_settings_tab();
+            return Ok(KeyOutcome::Render);
+        }
+
+        if self.settings.tab == SettingsTab::Auth {
+            return self.handle_auth_settings_key(key);
+        }
+
         let change = match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 self.settings.open = false;
@@ -2006,6 +2068,85 @@ impl App {
         } else {
             KeyOutcome::Continue
         })
+    }
+
+    fn handle_auth_settings_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        let changed = match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.settings.open = false;
+                self.status = "settings closed".into();
+                true
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.move_auth_cursor(-1);
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.move_auth_cursor(1);
+                true
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.start_auth_refresh();
+                true
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                self.set_selected_auth_default()?;
+                true
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.start_auth_create()?;
+                true
+            }
+            KeyCode::Char('l') | KeyCode::Char('L') => {
+                if let Some(profile) = self.selected_auth_profile().cloned() {
+                    return Ok(KeyOutcome::AuthLogin(profile));
+                }
+                self.status = "no auth profile selected".into();
+                true
+            }
+            _ => false,
+        };
+
+        Ok(if changed {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        })
+    }
+
+    fn handle_auth_create_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let changed = match key.code {
+            KeyCode::Esc => {
+                self.settings.create_auth = None;
+                self.status = "auth profile creation cancelled".into();
+                true
+            }
+            KeyCode::Tab | KeyCode::Left | KeyCode::Right => {
+                self.toggle_create_auth_kind()?;
+                true
+            }
+            KeyCode::Enter => {
+                self.create_auth_profile()?;
+                true
+            }
+            KeyCode::Backspace => {
+                if let Some(create) = &mut self.settings.create_auth {
+                    create.name.pop();
+                }
+                true
+            }
+            KeyCode::Char(ch) if valid_auth_name_char(ch) => {
+                if let Some(create) = &mut self.settings.create_auth
+                    && create.name.len() < 64
+                {
+                    create.name.push(ch);
+                }
+                true
+            }
+            _ => false,
+        };
+
+        Ok(changed)
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, terminal: &mut Tui) -> Result<bool> {
@@ -2883,6 +3024,36 @@ impl App {
         self.settings.rows()
     }
 
+    pub fn settings_tab(&self) -> SettingsTab {
+        self.settings.tab
+    }
+
+    pub fn auth_profiles(&self) -> &[AuthProfile] {
+        &self.auth_profiles
+    }
+
+    pub fn auth_cursor(&self) -> usize {
+        self.settings.auth_cursor
+    }
+
+    pub fn auth_refreshing(&self) -> bool {
+        self.settings.auth_refreshing
+    }
+
+    pub fn auth_create(&self) -> Option<&AuthCreateState> {
+        self.settings.create_auth.as_ref()
+    }
+
+    pub fn auth_default(&self, kind: AgentKind) -> Option<&str> {
+        self.config.auth.defaults.get(kind)
+    }
+
+    pub fn auth_home_label(&self) -> String {
+        auth::resolve_home(&self.config.auth)
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|error| format!("unresolved: {error:#}"))
+    }
+
     pub fn activity_badges_enabled(&self) -> bool {
         self.settings.activity_badges
     }
@@ -2975,11 +3146,25 @@ impl App {
             .map(|pane| pane.folder_name.as_str())
     }
 
+    pub fn pane_profile(&self, index: usize) -> Option<&str> {
+        self.launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .map(|pane| pane.profile_name.as_str())
+    }
+
     pub fn pane_worktree(&self, index: usize) -> Option<&str> {
         self.launch_plan
             .as_ref()
             .and_then(|plan| plan.panes.get(index))
             .and_then(|pane| pane.worktree_name.as_deref())
+    }
+
+    pub fn pane_auth(&self, index: usize) -> Option<&str> {
+        self.launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .and_then(|pane| pane.auth_name.as_deref())
     }
 
     pub fn pane_conversation_footer(&self, index: usize, max_chars: usize) -> Option<String> {
@@ -3035,6 +3220,168 @@ impl App {
         self.sync_pane_sizes();
         Ok(())
     }
+
+    fn toggle_settings_tab(&mut self) {
+        self.settings.tab = match self.settings.tab {
+            SettingsTab::General => SettingsTab::Auth,
+            SettingsTab::Auth => SettingsTab::General,
+        };
+        if self.settings.tab == SettingsTab::Auth && self.auth_profiles.is_empty() {
+            self.start_auth_refresh();
+        }
+    }
+
+    fn start_auth_refresh(&mut self) {
+        if self.settings.auth_refreshing {
+            self.status = "auth refresh already running".into();
+            return;
+        }
+
+        let auth_config = self.config.auth.clone();
+        let (tx, rx) = std_mpsc::channel();
+        self.auth_refresh_rx = Some(rx);
+        self.settings.auth_refreshing = true;
+        self.status = "refreshing auth profiles".into();
+
+        thread::spawn(move || {
+            let result = auth::discover_profiles_with_usage(&auth_config)
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(result);
+        });
+    }
+
+    fn drain_auth_refresh(&mut self) -> bool {
+        let Some(rx) = &self.auth_refresh_rx else {
+            return false;
+        };
+
+        let result = match rx.try_recv() {
+            Ok(result) => Some(result),
+            Err(std_mpsc::TryRecvError::Empty) => None,
+            Err(std_mpsc::TryRecvError::Disconnected) => Some(Err("auth refresh stopped".into())),
+        };
+
+        let Some(result) = result else {
+            return false;
+        };
+
+        self.auth_refresh_rx = None;
+        self.settings.auth_refreshing = false;
+        match result {
+            Ok(profiles) => {
+                self.auth_profiles = profiles;
+                self.settings.auth_cursor = self
+                    .settings
+                    .auth_cursor
+                    .min(self.auth_profiles.len().saturating_sub(1));
+                self.status = format!("loaded {} auth profiles", self.auth_profiles.len());
+            }
+            Err(error) => self.status = format!("auth refresh failed: {error}"),
+        }
+        true
+    }
+
+    fn move_auth_cursor(&mut self, delta: isize) {
+        if self.auth_profiles.is_empty() {
+            return;
+        }
+
+        let len = self.auth_profiles.len() as isize;
+        self.settings.auth_cursor =
+            (self.settings.auth_cursor as isize + delta).clamp(0, len - 1) as usize;
+    }
+
+    fn selected_auth_profile(&self) -> Option<&AuthProfile> {
+        self.auth_profiles.get(self.settings.auth_cursor)
+    }
+
+    fn set_selected_auth_default(&mut self) -> Result<()> {
+        let Some(profile) = self.selected_auth_profile().cloned() else {
+            self.status = "no auth profile selected".into();
+            return Ok(());
+        };
+
+        self.config
+            .auth
+            .defaults
+            .set(profile.kind, profile.name.clone());
+        let path = self.config.save(self.config_path.as_deref())?;
+        self.status = format!(
+            "{} default auth: {} ({})",
+            profile.kind.display_name(),
+            profile.name,
+            path.display()
+        );
+        Ok(())
+    }
+
+    fn start_auth_create(&mut self) -> Result<()> {
+        let kind = self
+            .selected_auth_profile()
+            .map(|profile| profile.kind)
+            .unwrap_or(AgentKind::Claude);
+        let name = auth::next_profile_name(&self.config.auth, kind)?;
+        self.settings.create_auth = Some(AuthCreateState { kind, name });
+        self.status = "creating auth profile".into();
+        Ok(())
+    }
+
+    fn toggle_create_auth_kind(&mut self) -> Result<()> {
+        let Some(create) = &mut self.settings.create_auth else {
+            return Ok(());
+        };
+        let kind = create.kind.toggle();
+        let name = auth::next_profile_name(&self.config.auth, kind)?;
+        *create = AuthCreateState { kind, name };
+        Ok(())
+    }
+
+    fn create_auth_profile(&mut self) -> Result<()> {
+        let Some(create) = self.settings.create_auth.clone() else {
+            return Ok(());
+        };
+        let profile = auth::create_profile(&self.config.auth, create.kind, create.name.trim())?;
+        self.settings.create_auth = None;
+        self.auth_profiles = auth::discover_profiles(&self.config.auth)?;
+        if let Some(index) = self
+            .auth_profiles
+            .iter()
+            .position(|candidate| candidate.name == profile.name)
+        {
+            self.settings.auth_cursor = index;
+        }
+        self.status = format!(
+            "created {} auth profile {}",
+            create.kind.as_str(),
+            profile.name
+        );
+        Ok(())
+    }
+
+    fn run_auth_login(&mut self, terminal: &mut Tui, profile: AuthProfile) -> Result<()> {
+        let launch = auth::login_command(&profile);
+        suspend_terminal(terminal)?;
+        let run_result = Command::new(&launch.command)
+            .args(&launch.args)
+            .envs(&launch.env)
+            .status()
+            .with_context(|| format!("failed to run {}", launch.command.display()));
+        let resume_result = resume_terminal(terminal);
+        resume_result?;
+
+        match run_result {
+            Ok(status) if status.success() => {
+                self.status = format!("{} login completed", profile.name);
+                self.start_auth_refresh();
+            }
+            Ok(status) => {
+                self.status = format!("{} login exited with {}", profile.name, status);
+                self.start_auth_refresh();
+            }
+            Err(error) => self.status = format!("auth login failed: {error:#}"),
+        }
+        Ok(())
+    }
 }
 
 fn resolve_grid(cli: &Cli) -> Result<GridSize> {
@@ -3083,6 +3430,22 @@ fn resolve_direct_launch_plan(
         grid,
         worktrees,
     )?))
+}
+
+fn apply_auth_defaults(plan: &mut LaunchPlan, config: &Config) -> Result<()> {
+    for spec in &mut plan.panes {
+        let Some(kind) = spec.command.agent_kind else {
+            continue;
+        };
+        let Some(auth_env) = auth::env_for_default(&config.auth, kind)? else {
+            continue;
+        };
+        spec.env.extend(auth_env.env_map());
+        spec.auth_name = Some(auth_env.name);
+        spec.auth_kind = Some(auth_env.kind);
+        spec.auth_dir = Some(auth_env.dir);
+    }
+    Ok(())
 }
 
 fn uses_direct_launch(cli: &Cli) -> bool {
@@ -3379,6 +3742,10 @@ fn pane_word(count: usize) -> &'static str {
     if count == 1 { "pane" } else { "panes" }
 }
 
+fn valid_auth_name_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-')
+}
+
 fn pane_number_list(indices: &[usize]) -> String {
     indices
         .iter()
@@ -3459,7 +3826,35 @@ fn function_key_sequence(number: u8) -> Option<&'static [u8]> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use super::*;
+    use crate::profiles::Profile;
+
+    struct TempHome {
+        path: PathBuf,
+    }
+
+    impl TempHome {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos();
+            let path = env::temp_dir().join(format!("gridbash-app-auth-test-{nonce}"));
+            fs::create_dir_all(&path).expect("temp home");
+            Self { path }
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 
     fn selected(indices: &[usize]) -> BTreeSet<usize> {
         indices.iter().copied().collect()
@@ -3631,6 +4026,43 @@ mod tests {
     }
 
     #[test]
+    fn applies_auth_defaults_to_agent_launch_specs() {
+        let temp = TempHome::new();
+        let codex_dir = temp.path.join("codex-2");
+        fs::create_dir(&codex_dir).expect("codex dir");
+        fs::write(codex_dir.join(".profile-kind"), "codex").expect("kind");
+        let mut config = Config::default();
+        config.auth.home = Some(temp.path.clone());
+        config.auth.defaults.set(AgentKind::Codex, "codex-2");
+        let cwd = env::current_dir().expect("cwd");
+        let mut plan = LaunchPlan::legacy(
+            "codex".into(),
+            Profile {
+                command: "codex".into(),
+                args: vec![],
+                title: Some("codex".into()),
+                agent_kind: Some(AgentKind::Codex),
+            },
+            cwd,
+            1,
+            GridSize {
+                rows: 1,
+                columns: 1,
+            },
+        );
+
+        apply_auth_defaults(&mut plan, &config).expect("apply auth");
+
+        assert_eq!(
+            plan.panes[0].env.get("CODEX_HOME"),
+            Some(&codex_dir.display().to_string())
+        );
+        assert_eq!(plan.panes[0].auth_name.as_deref(), Some("codex-2"));
+        assert_eq!(plan.panes[0].auth_kind, Some(AgentKind::Codex));
+        assert_eq!(plan.panes[0].auth_dir.as_deref(), Some(codex_dir.as_path()));
+    }
+
+    #[test]
     fn palette_color_cycles_in_both_directions() {
         assert_eq!(PaletteColor::Cyan.adjust(1), PaletteColor::Sky);
         assert_eq!(PaletteColor::Cyan.adjust(-1), PaletteColor::White);
@@ -3743,6 +4175,28 @@ fn teardown_terminal(terminal: &mut Tui, enable_mouse: bool) -> Result<()> {
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
+    Ok(())
+}
+
+fn suspend_terminal(terminal: &mut Tui) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+fn resume_terminal(terminal: &mut Tui) -> Result<()> {
+    enable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        EnterAlternateScreen,
+        EnableBracketedPaste
+    )?;
     Ok(())
 }
 
