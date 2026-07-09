@@ -161,7 +161,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             render_group_badge(frame, rect, group);
         }
 
-        if focused && !sleeping && !modal_open {
+        if focused && !sleeping && !modal_open && pane.screen().scrollback() == 0 {
             set_terminal_cursor(frame, inner, pane.screen());
         }
     }
