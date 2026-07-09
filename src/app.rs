@@ -3,6 +3,7 @@ use std::{
     env,
     ffi::OsString,
     io::{self, Stdout, Write},
+    mem,
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc as std_mpsc,
@@ -52,6 +53,7 @@ const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const WORKER_RELAY_IDLE: Duration = Duration::from_millis(900);
 const WORKER_RELAY_MAX_BYTES: usize = 6000;
 const MAX_PANE_NAME_CHARS: usize = 32;
+const MAX_TAB_TITLE_CHARS: usize = 40;
 const CONVERSATION_SUMMARY_MAX_CHARS: usize = 120;
 const TODO_INPUT_LIMIT: usize = 240;
 const MIN_TODO_IDLE_SECONDS: u64 = 15;
@@ -66,6 +68,9 @@ pub struct App {
     config_path: Option<PathBuf>,
     manager_profile_name: Option<String>,
     worktrees: Option<ManagedWorktreeOptions>,
+    tabs: Vec<Option<GridTabSnapshot>>,
+    active_tab: usize,
+    tab_title: String,
     launch_plan: Option<LaunchPlan>,
     layout: GridLayout,
     grid_area: Rect,
@@ -89,6 +94,7 @@ pub struct App {
     image_overlay: Option<ImagePreview>,
     settings: SettingsState,
     rename: RenamePaneState,
+    tab_rename: RenameTabState,
     previous_panes: PreviousPanesState,
     follow_up: Option<FollowUpPromptState>,
     auth_profiles: Vec<AuthProfile>,
@@ -98,6 +104,7 @@ pub struct App {
     restored_histories: Vec<SavedPaneHistory>,
     session_recorder: Option<SessionRecorder>,
     next_pane_id: usize,
+    next_tab_number: usize,
     previous_panes_button: Option<Rect>,
     previous_pane_rows: Vec<(usize, Rect)>,
     pane_settings_button: Option<Rect>,
@@ -126,6 +133,31 @@ struct AppInit {
     restored_histories: Vec<SavedPaneHistory>,
     session_recorder: Option<SessionRecorder>,
     status: String,
+}
+
+struct GridTabSnapshot {
+    title: String,
+    launch_plan: Option<LaunchPlan>,
+    layout: GridLayout,
+    panes: Vec<PtyPane>,
+    pane_idle: Vec<PaneIdleState>,
+    focus: usize,
+    selected: BTreeSet<usize>,
+    pane_names: Vec<Option<String>>,
+    text_selection: Option<MouseSelection>,
+    sleeping: BTreeSet<usize>,
+    groups: Vec<AgentGroup>,
+    next_group_id: usize,
+    prompt: Option<PromptState>,
+    rects: Vec<Rect>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TabLabel {
+    pub title: String,
+    pub active: bool,
+    pub activity: bool,
+    pub exited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -520,6 +552,13 @@ pub struct RenamePaneView {
 }
 
 #[derive(Debug, Clone)]
+pub struct RenameTabView {
+    pub title: String,
+    pub value: String,
+    pub cursor: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct PreviousPanesView {
     pub cursor: usize,
     pub panes: Vec<PreviousPaneView>,
@@ -670,6 +709,83 @@ impl RenamePaneState {
 
     fn insert_char(&mut self, ch: char) {
         if ch.is_control() || self.value.chars().count() >= MAX_PANE_NAME_CHARS {
+            return;
+        }
+
+        let index = char_to_byte_index(&self.value, self.cursor);
+        self.value.insert(index, ch);
+        self.cursor += 1;
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        for ch in text.chars() {
+            self.insert_char(ch);
+        }
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+
+        let start = char_to_byte_index(&self.value, self.cursor - 1);
+        let end = char_to_byte_index(&self.value, self.cursor);
+        self.value.replace_range(start..end, "");
+        self.cursor -= 1;
+    }
+
+    fn delete(&mut self) {
+        let count = self.value.chars().count();
+        if self.cursor >= count {
+            return;
+        }
+
+        let start = char_to_byte_index(&self.value, self.cursor);
+        let end = char_to_byte_index(&self.value, self.cursor + 1);
+        self.value.replace_range(start..end, "");
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RenameTabState {
+    open: bool,
+    value: String,
+    cursor: usize,
+}
+
+impl RenameTabState {
+    fn begin(&mut self, title: &str) {
+        self.open = true;
+        self.value = title.to_string();
+        self.cursor = self.value.chars().count();
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.value.clear();
+        self.cursor = 0;
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        let count = self.value.chars().count() as isize;
+        self.cursor = (self.cursor as isize + delta).clamp(0, count) as usize;
+    }
+
+    fn move_to_start(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_to_end(&mut self) {
+        self.cursor = self.value.chars().count();
+    }
+
+    fn clear(&mut self) {
+        self.value.clear();
+        self.cursor = 0;
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        if ch.is_control() || self.value.chars().count() >= MAX_TAB_TITLE_CHARS {
             return;
         }
 
@@ -1340,10 +1456,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+c command | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
             .into()
     } else {
-        "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+c command | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        "Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
             .into()
     }
 }
@@ -1450,6 +1566,9 @@ impl App {
             config_path: init.config_path,
             manager_profile_name: init.manager_profile_name,
             worktrees: init.worktrees,
+            tabs: vec![None],
+            active_tab: 0,
+            tab_title: "Grid 1".into(),
             launch_plan: init.launch_plan,
             layout: GridLayout::new(init.grid),
             grid_area: Rect::default(),
@@ -1473,6 +1592,7 @@ impl App {
             image_overlay: None,
             settings: init.settings,
             rename: RenamePaneState::default(),
+            tab_rename: RenameTabState::default(),
             previous_panes: PreviousPanesState::default(),
             follow_up: None,
             auth_profiles: Vec::new(),
@@ -1482,6 +1602,7 @@ impl App {
             restored_histories: init.restored_histories,
             session_recorder: init.session_recorder,
             next_pane_id: 0,
+            next_tab_number: 2,
             previous_panes_button: None,
             previous_pane_rows: Vec::new(),
             pane_settings_button: None,
@@ -1538,6 +1659,12 @@ impl App {
             .launch_plan
             .clone()
             .ok_or_else(|| anyhow!("no launch plan selected"))?;
+        self.tabs.clear();
+        self.tabs.push(None);
+        self.active_tab = 0;
+        self.tab_title = "Grid 1".into();
+        self.next_tab_number = 2;
+        self.tab_rename.close();
         self.layout = GridLayout::new(plan.grid);
         self.panes.clear();
         self.pane_names = vec![None; plan.panes.len()];
@@ -1558,6 +1685,107 @@ impl App {
         self.start_usage_monitor(&plan);
 
         self.save_session_snapshot()
+    }
+
+    fn next_tab_title(&mut self) -> String {
+        let title = format!("Grid {}", self.next_tab_number);
+        self.next_tab_number += 1;
+        title
+    }
+
+    fn take_current_tab_snapshot(&mut self) -> GridTabSnapshot {
+        let placeholder_layout = GridLayout::new(self.layout.size());
+        GridTabSnapshot {
+            title: mem::take(&mut self.tab_title),
+            launch_plan: self.launch_plan.take(),
+            layout: mem::replace(&mut self.layout, placeholder_layout),
+            panes: mem::take(&mut self.panes),
+            pane_idle: mem::take(&mut self.pane_idle),
+            focus: self.focus,
+            selected: mem::take(&mut self.selected),
+            pane_names: mem::take(&mut self.pane_names),
+            text_selection: self.text_selection.take(),
+            sleeping: mem::take(&mut self.sleeping),
+            groups: mem::take(&mut self.groups),
+            next_group_id: self.next_group_id,
+            prompt: self.prompt.take(),
+            rects: mem::take(&mut self.rects),
+        }
+    }
+
+    fn restore_tab_snapshot(&mut self, tab: GridTabSnapshot) {
+        self.tab_title = tab.title;
+        self.launch_plan = tab.launch_plan;
+        self.layout = tab.layout;
+        self.panes = tab.panes;
+        self.pane_idle = tab.pane_idle;
+        self.focus = tab.focus.min(self.panes.len().saturating_sub(1));
+        self.selected = tab.selected;
+        self.pane_names = tab.pane_names;
+        self.text_selection = tab.text_selection;
+        self.sleeping = tab.sleeping;
+        self.groups = tab.groups;
+        self.next_group_id = tab.next_group_id;
+        self.prompt = tab.prompt;
+        self.rects = tab.rects;
+    }
+
+    fn save_current_tab(&mut self) {
+        if self.active_tab >= self.tabs.len() {
+            self.tabs.resize_with(self.active_tab + 1, || None);
+        }
+        let snapshot = self.take_current_tab_snapshot();
+        self.tabs[self.active_tab] = Some(snapshot);
+    }
+
+    fn close_tab_modals(&mut self) {
+        self.rename.close();
+        self.tab_rename.close();
+        self.previous_panes.close();
+        self.pane_settings.close();
+        self.follow_up = None;
+        self.prompt = None;
+        self.text_selection = None;
+        self.command_line.focused = false;
+    }
+
+    fn activate_plan_as_tab(&mut self, title: String, mut plan: LaunchPlan) -> Result<()> {
+        apply_auth_defaults(&mut plan, &self.config)?;
+        self.tab_title = title.clone();
+        self.launch_plan = Some(plan.clone());
+        self.layout = GridLayout::new(plan.grid);
+        self.panes.clear();
+        self.pane_idle.clear();
+        self.focus = 0;
+        self.selected.clear();
+        self.pane_names = vec![None; plan.panes.len()];
+        self.text_selection = None;
+        self.sleeping.clear();
+        self.groups.clear();
+        self.next_group_id = 0;
+        self.prompt = None;
+        self.rects.clear();
+        self.follow_up = None;
+        self.restored_histories.clear();
+        if let Some(cwd) = plan.panes.first().map(|pane| pane.cwd.clone()) {
+            self.command_line.cwd = cwd;
+        }
+
+        for (index, spec) in plan.panes.iter().enumerate() {
+            self.spawn_pane_spec(index, spec)?;
+        }
+        self.start_usage_monitor(&plan);
+        self.status = format!("opened tab {title}");
+        Ok(())
+    }
+
+    fn add_tab_from_plan(&mut self, plan: LaunchPlan) -> Result<()> {
+        self.save_current_tab();
+        self.tabs.push(None);
+        self.active_tab = self.tabs.len() - 1;
+        let title = self.next_tab_title();
+        self.close_tab_modals();
+        self.activate_plan_as_tab(title, plan)
     }
 
     fn start_usage_monitor(&mut self, plan: &LaunchPlan) {
@@ -1593,6 +1821,7 @@ impl App {
         self.next_pane_id += 1;
         let extra_env = self.pane_env(pane_index);
         PtyPane::spawn(
+            &spec.profile_name,
             id,
             0,
             &launch.command,
@@ -1651,7 +1880,7 @@ impl App {
             if event::poll(INPUT_POLL_INTERVAL)? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        match self.handle_key(key)? {
+                        match self.handle_key(terminal, key)? {
                             KeyOutcome::Continue => {}
                             KeyOutcome::Render => needs_render = true,
                             KeyOutcome::AuthLogin(profile) => {
@@ -1663,6 +1892,10 @@ impl App {
                         }
                     }
                     Event::Resize(_, _) => needs_render = true,
+                    Event::Paste(text) if self.tab_rename.open => {
+                        self.tab_rename.insert_text(&text);
+                        needs_render = true;
+                    }
                     Event::Paste(text) if self.rename.open => {
                         self.rename.insert_text(&text);
                         needs_render = true;
@@ -1749,6 +1982,8 @@ impl App {
                     } else if self.process_manager_output(pane, generation, &bytes, &mut dispatches)
                     {
                         changed = true;
+                    } else if self.process_inactive_output(pane, generation, &bytes) {
+                        changed = true;
                     }
                 }
                 PtyEvent::Exited { pane, generation } => {
@@ -1765,6 +2000,8 @@ impl App {
                             self.follow_up = None;
                         }
                     } else if self.process_manager_exit(pane, generation) {
+                        changed = true;
+                    } else if self.process_inactive_exit(pane, generation) {
                         changed = true;
                     }
                 }
@@ -1788,6 +2025,18 @@ impl App {
                 group.status = "manager exited".into();
             }
             changed |= exited_now;
+        }
+        for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
+            for pane in &mut tab.panes {
+                changed |= pane.poll_exit();
+            }
+            for group in &mut tab.groups {
+                let exited_now = group.manager.poll_exit();
+                if exited_now {
+                    group.status = "manager exited".into();
+                }
+                changed |= exited_now;
+            }
         }
 
         changed |= self.dispatch_manager_commands(dispatches);
@@ -1847,6 +2096,61 @@ impl App {
         group.status = "manager exited".into();
         self.status = format!("group {label}: manager exited");
         true
+    }
+
+    fn process_inactive_output(&mut self, pane: PaneId, generation: u64, bytes: &[u8]) -> bool {
+        for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
+            if let Some(target) = tab
+                .panes
+                .iter_mut()
+                .find(|target| target.id() == pane && target.generation() == generation)
+            {
+                target.process_output(bytes);
+                return true;
+            }
+
+            if let Some(group) = tab.groups.iter_mut().find(|group| {
+                group.manager.id() == pane && group.manager.generation() == generation
+            }) {
+                group.manager.process_output(bytes);
+                group
+                    .manager_buffer
+                    .push_str(&String::from_utf8_lossy(bytes));
+                group.status = "manager active".into();
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn process_inactive_exit(&mut self, pane: PaneId, generation: u64) -> bool {
+        for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
+            if let Some(target) = tab
+                .panes
+                .iter_mut()
+                .find(|target| target.id() == pane && target.generation() == generation)
+            {
+                if target.exited {
+                    return false;
+                }
+                target.exited = true;
+                return true;
+            }
+
+            if let Some(group) = tab.groups.iter_mut().find(|group| {
+                group.manager.id() == pane && group.manager.generation() == generation
+            }) {
+                if group.manager.exited {
+                    return false;
+                }
+                group.manager.exited = true;
+                group.status = "manager exited".into();
+                return true;
+            }
+        }
+
+        false
     }
 
     fn capture_worker_output(&mut self, pane_index: usize, bytes: &[u8]) {
@@ -2156,13 +2460,26 @@ impl App {
             }
             changed |= pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER);
         }
+        for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
+            for pane in &mut tab.panes {
+                if pane.active {
+                    pane.active = false;
+                    changed = true;
+                }
+                changed |= pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER);
+            }
+        }
         self.last_activity_decay = now;
         changed
     }
 
-    fn handle_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+    fn handle_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<KeyOutcome> {
         if self.image_overlay.is_some() {
             return Ok(self.handle_image_overlay_key(key));
+        }
+
+        if self.tab_rename.open {
+            return self.handle_tab_rename_key(key);
         }
 
         if self.rename.open {
@@ -2197,7 +2514,7 @@ impl App {
         }
 
         if key.modifiers.contains(KeyModifiers::ALT)
-            && let Some(quit) = self.handle_app_key(key)?
+            && let Some(quit) = self.handle_app_key(terminal, key)?
         {
             return Ok(if quit {
                 KeyOutcome::Quit
@@ -2251,9 +2568,9 @@ impl App {
         }
     }
 
-    fn handle_app_key(&mut self, key: KeyEvent) -> Result<Option<bool>> {
+    fn handle_app_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<Option<bool>> {
         match key.code {
-            KeyCode::Char(ch) => self.handle_alt_char(ch, key.modifiers),
+            KeyCode::Char(ch) => self.handle_alt_char(terminal, ch, key.modifiers),
             KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.adjust_grid(GridAxis::Columns, -1)?;
                 Ok(Some(false))
@@ -2294,7 +2611,12 @@ impl App {
         }
     }
 
-    fn handle_alt_char(&mut self, ch: char, modifiers: KeyModifiers) -> Result<Option<bool>> {
+    fn handle_alt_char(
+        &mut self,
+        terminal: &mut Tui,
+        ch: char,
+        modifiers: KeyModifiers,
+    ) -> Result<Option<bool>> {
         let lower = ch.to_ascii_lowercase();
         match lower {
             'q' => Ok(Some(true)),
@@ -2319,8 +2641,16 @@ impl App {
                 self.toggle_sleep_for_targets();
                 Ok(Some(false))
             }
-            't' => {
+            't' if modifiers.contains(KeyModifiers::SHIFT) => {
                 self.restart_exited_targets();
+                Ok(Some(false))
+            }
+            't' => {
+                self.next_tab();
+                Ok(Some(false))
+            }
+            'n' => {
+                self.open_new_tab(terminal)?;
                 Ok(Some(false))
             }
             'x' => {
@@ -2369,6 +2699,10 @@ impl App {
                 self.open_previous_panes();
                 Ok(Some(false))
             }
+            'r' if modifiers.contains(KeyModifiers::SHIFT) => {
+                self.begin_tab_rename();
+                Ok(Some(false))
+            }
             'r' => {
                 self.begin_rename();
                 Ok(Some(false))
@@ -2388,6 +2722,128 @@ impl App {
                 Some(KeyOutcome::Render)
             }
             ExitedRecoveryAction::HoldAltPrefix => Some(KeyOutcome::Render),
+        }
+    }
+
+    fn open_new_tab(&mut self, terminal: &mut Tui) -> Result<()> {
+        let current_dir = self.active_pane_cwd().unwrap_or(resolved_current_dir()?);
+        let mut composer = Composer::new(current_dir, self.worktrees.clone());
+        match composer.run(terminal, &self.config)? {
+            Some(plan) => {
+                self.add_tab_from_plan(plan)?;
+                self.sync_initial_pane_sizes(terminal)?;
+            }
+            None => {
+                self.status = "new tab canceled".into();
+            }
+        }
+        Ok(())
+    }
+
+    fn next_tab(&mut self) {
+        if self.tabs.len() <= 1 {
+            self.status = "only one tab open".into();
+            return;
+        }
+
+        let next = (self.active_tab + 1) % self.tabs.len();
+        self.switch_to_tab(next);
+    }
+
+    fn switch_to_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() || index == self.active_tab {
+            return;
+        }
+
+        self.close_tab_modals();
+        self.save_current_tab();
+        let Some(snapshot) = self.tabs[index].take() else {
+            self.status = format!("tab {} is not available", index + 1);
+            return;
+        };
+        self.active_tab = index;
+        self.restore_tab_snapshot(snapshot);
+        self.start_usage_for_active_tab();
+        self.status = format!("active tab {}", self.tab_title);
+    }
+
+    fn begin_tab_rename(&mut self) {
+        self.rename.close();
+        self.tab_rename.begin(&self.tab_title);
+        self.status = format!("renaming tab {}", self.tab_title);
+    }
+
+    fn handle_tab_rename_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return Ok(KeyOutcome::Quit);
+        }
+
+        let changed = match key.code {
+            KeyCode::Esc => {
+                self.tab_rename.close();
+                self.status = "tab rename canceled".into();
+                true
+            }
+            KeyCode::Enter => {
+                self.save_tab_rename();
+                true
+            }
+            KeyCode::Backspace => {
+                self.tab_rename.backspace();
+                true
+            }
+            KeyCode::Delete => {
+                self.tab_rename.delete();
+                true
+            }
+            KeyCode::Left => {
+                self.tab_rename.move_cursor(-1);
+                true
+            }
+            KeyCode::Right => {
+                self.tab_rename.move_cursor(1);
+                true
+            }
+            KeyCode::Home => {
+                self.tab_rename.move_to_start();
+                true
+            }
+            KeyCode::End => {
+                self.tab_rename.move_to_end();
+                true
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.tab_rename.clear();
+                true
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.tab_rename.insert_char(ch);
+                true
+            }
+            _ => false,
+        };
+
+        Ok(if changed {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        })
+    }
+
+    fn save_tab_rename(&mut self) {
+        let name = normalized_tab_title(&self.tab_rename.value);
+        match name {
+            Some(name) => {
+                self.tab_title = name.clone();
+                self.tab_rename.close();
+                self.status = format!("renamed tab to {name}");
+            }
+            None => {
+                self.status = "tab name cannot be empty".into();
+            }
         }
     }
 
@@ -2762,6 +3218,7 @@ impl App {
             manager_env.extend(auth_env.env_map());
         }
         let manager = match PtyPane::spawn(
+            &manager_name,
             PaneId(manager_pane_id(group_id)),
             group_id.0 as u64 + 1,
             &launch.command,
@@ -4066,7 +4523,7 @@ impl App {
             .collect::<Vec<_>>();
         let restart = restart_targets_for(targets, &exited);
         if restart.indices.is_empty() {
-            self.status = "no exited target panes; Alt+t restarts exited panes".into();
+            self.status = "no exited target panes; Alt+Shift+t restarts exited panes".into();
             return;
         }
 
@@ -4317,6 +4774,45 @@ impl App {
         })
     }
 
+    pub fn rename_tab_view(&self) -> Option<RenameTabView> {
+        self.tab_rename.open.then(|| RenameTabView {
+            title: self.tab_title.clone(),
+            value: self.tab_rename.value.clone(),
+            cursor: self.tab_rename.cursor,
+        })
+    }
+
+    pub fn tab_labels(&self) -> Vec<TabLabel> {
+        (0..self.tabs.len())
+            .map(|index| {
+                if index == self.active_tab {
+                    return TabLabel {
+                        title: self.tab_title.clone(),
+                        active: true,
+                        activity: self.panes.iter().any(|pane| pane.active),
+                        exited: !self.panes.is_empty() && self.panes.iter().all(|pane| pane.exited),
+                    };
+                }
+
+                let Some(tab) = self.tabs.get(index).and_then(Option::as_ref) else {
+                    return TabLabel {
+                        title: format!("Grid {}", index + 1),
+                        active: false,
+                        activity: false,
+                        exited: false,
+                    };
+                };
+
+                TabLabel {
+                    title: tab.title.clone(),
+                    active: false,
+                    activity: tab.panes.iter().any(|pane| pane.active),
+                    exited: !tab.panes.is_empty() && tab.panes.iter().all(|pane| pane.exited),
+                }
+            })
+            .collect()
+    }
+
     pub fn pane_settings_view(&self, index: usize) -> Option<PaneSettingsView> {
         if !self.pane_settings.open || self.pane_settings.pane_index != index {
             return None;
@@ -4554,10 +5050,29 @@ impl App {
 
     fn sync_initial_pane_sizes(&mut self, terminal: &Tui) -> Result<()> {
         let size = terminal.size().context("failed to read terminal size")?;
-        self.grid_area = Rect::new(0, 0, size.width, size.height.saturating_sub(2));
+        self.grid_area = Rect::new(0, 1, size.width, size.height.saturating_sub(3));
         self.rects = self.pane_rects(self.grid_area);
         self.sync_pane_sizes();
         Ok(())
+    }
+
+    fn active_pane_cwd(&self) -> Option<PathBuf> {
+        self.panes
+            .get(self.focus)
+            .map(|pane| pane.cwd().to_path_buf())
+            .or_else(|| self.panes.first().map(|pane| pane.cwd().to_path_buf()))
+            .or_else(|| {
+                self.launch_plan
+                    .as_ref()
+                    .and_then(|plan| plan.panes.first())
+                    .map(|pane| pane.cwd.clone())
+            })
+    }
+
+    fn start_usage_for_active_tab(&mut self) {
+        if let Some(plan) = self.launch_plan.clone() {
+            self.start_usage_monitor(&plan);
+        }
     }
 
     fn toggle_settings_tab(&mut self) {
@@ -5190,6 +5705,19 @@ fn normalized_pane_name(value: &str) -> Option<String> {
         .to_string();
 
     (!name.is_empty()).then_some(name)
+}
+
+fn normalized_tab_title(value: &str) -> Option<String> {
+    let title = value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .take(MAX_TAB_TITLE_CHARS)
+        .collect::<String>();
+
+    (!title.is_empty()).then_some(title)
 }
 
 fn char_to_byte_index(value: &str, cursor: usize) -> usize {

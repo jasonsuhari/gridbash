@@ -12,7 +12,7 @@ use crate::{
     app::{
         App, ExitedPaneRecoveryView, FollowUpDialog, GridPalette, PaneGroupView, PaneSelection,
         PaneSettingsView, PreviousPaneView, PreviousPanesView, PromptView, RenamePaneView,
-        SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind,
+        RenameTabView, SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
     },
     auth::{AgentKind, AuthProfile},
     image_preview::ImagePreview,
@@ -51,6 +51,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(output_height),
             Constraint::Length(1),
@@ -58,13 +59,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         ])
         .split(area);
 
-    let grid_area = chunks[0];
-    let command_output_area = chunks[1];
-    let command_area = chunks[2];
-    let status_area = chunks[3];
+    let tab_area = chunks[0];
+    let grid_area = chunks[1];
+    let command_output_area = chunks[2];
+    let command_area = chunks[3];
+    let status_area = chunks[4];
     let rects = app.pane_rects(grid_area);
     let palette = app.palette();
     let rename_view = app.rename_pane_view();
+    let tab_rename_view = app.rename_tab_view();
     let previous_panes_view = app.previous_panes_view();
     let follow_up_dialog = app.follow_up_dialog();
     let prompt_view = app.prompt_view();
@@ -74,6 +77,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || previous_panes_view.is_some()
         || pane_settings_open
         || rename_view.is_some()
+        || tab_rename_view.is_some()
         || follow_up_dialog.is_some()
         || prompt_view.is_some()
         || image_overlay.is_some()
@@ -86,11 +90,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || previous_panes_view.is_some()
         || pane_settings_open
         || rename_view.is_some()
+        || tab_rename_view.is_some()
         || follow_up_dialog.is_some()
         || prompt_view.is_some()
         || image_overlay.is_some()
         || exited_recovery.is_some();
     let mut pane_settings_reload_button = None;
+    render_tabs(frame, tab_area, &app.tab_labels(), palette);
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -205,7 +211,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(
-            " | Alt+c command | Alt+e output | Alt+p panes | Alt+P pane | Alt+t restart | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+q quit",
+            " | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+e output | Alt+p panes | Alt+P pane | Alt+x swap | Alt+z sleep | Alt+q quit",
         ),
     ]);
     frame.render_widget(
@@ -225,6 +231,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     };
     if let Some(rename) = rename_view.as_ref() {
         render_rename_pane(frame, area, rename);
+    }
+    if let Some(rename) = tab_rename_view.as_ref() {
+        render_rename_tab(frame, area, rename);
     }
     if let Some(prompt) = prompt_view.as_ref() {
         render_manager_prompt(frame, area, prompt);
@@ -272,6 +281,68 @@ fn pane_title(
     }
 
     format!(" {}{} ", parts.join(" | "), badge)
+}
+
+fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel], palette: &GridPalette) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let mut spans = vec![
+        Span::styled(
+            STATUS_BRAND,
+            Style::default()
+                .fg(Color::Black)
+                .bg(palette.accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+    ];
+
+    for (index, tab) in tabs.iter().enumerate() {
+        let marker = if tab.exited {
+            "!"
+        } else if tab.activity && !tab.active {
+            "*"
+        } else {
+            ""
+        };
+        let label = format!(
+            " {}:{}{} ",
+            index + 1,
+            truncate_text(&tab.title, 18),
+            marker
+        );
+        let style = if tab.active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else if tab.exited {
+            Style::default().fg(palette.exited())
+        } else if tab.activity {
+            Style::default().fg(palette.quiet())
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        spans.push(Span::styled(label, style));
+    }
+
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        "Alt+n new",
+        Style::default().fg(Color::DarkGray),
+    ));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        "Alt+Shift+r rename tab",
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(APP_BG)),
+        area,
+    );
 }
 
 fn render_group_badge(frame: &mut Frame<'_>, rect: Rect, group: PaneGroupView) {
@@ -1028,6 +1099,86 @@ fn render_rename_pane(frame: &mut Frame<'_>, area: Rect, rename: &RenamePaneView
     let input_line = if rename.value.is_empty() {
         Line::from(Span::styled(
             "blank restores number",
+            Style::default().fg(Color::DarkGray),
+        ))
+    } else {
+        Line::from(rename.value.clone())
+    };
+    frame.render_widget(
+        Paragraph::new(input_line).block(input_block).style(
+            Style::default()
+                .fg(Color::Rgb(230, 237, 243))
+                .bg(Color::Rgb(11, 15, 20)),
+        ),
+        chunks[1],
+    );
+
+    let help = Line::from(vec![
+        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::raw(" save  "),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" cancel  "),
+        Span::styled("Ctrl+u", Style::default().fg(Color::Yellow)),
+        Span::raw(" clear"),
+    ]);
+    frame.render_widget(
+        Paragraph::new(help).style(Style::default().fg(Color::Gray)),
+        chunks[2],
+    );
+
+    if input_inner.width > 0 && input_inner.height > 0 {
+        let cursor = rename.cursor.min(rename.value.chars().count()) as u16;
+        let x = input_inner
+            .x
+            .saturating_add(cursor.min(input_inner.width.saturating_sub(1)));
+        frame.set_cursor_position((x, input_inner.y));
+    }
+}
+
+fn render_rename_tab(frame: &mut Frame<'_>, area: Rect, rename: &RenameTabView) {
+    let modal = centered_rect(area, 62, 28);
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Rename Tab ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    let header = Line::from(vec![
+        Span::styled(
+            "Current tab",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(rename.title.clone(), Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(header).style(Style::default().fg(Color::Rgb(230, 237, 243))),
+        chunks[0],
+    );
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Title ");
+    let input_inner = input_block.inner(chunks[1]);
+    let input_line = if rename.value.is_empty() {
+        Line::from(Span::styled(
+            "tab title required",
             Style::default().fg(Color::DarkGray),
         ))
     } else {

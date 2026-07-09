@@ -66,6 +66,7 @@ Its niche is Windows-native, PTY-backed, agent-first terminal grids. Traditional
 
 - Real PTY-backed panes through Windows ConPTY via `portable-pty`.
 - Up to 100 panes in one terminal process.
+- Multiple tabbed grids in one terminal process.
 - Configurable default terminal profile: Git Bash, PowerShell, cmd, agents, or custom.
 - Pane-contained drag selection that copies selected terminal text without crossing into sibling panes.
 - Sleeping panes stay visually hidden until hovered, then wake without crossing input into other panes.
@@ -261,12 +262,15 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+Up / Alt+Down | Focus pane above / below in the column, wrapping at column edges |
 | Alt+Shift+Up / Alt+Shift+Down | Remove / add a row when safe |
 | Alt+Shift+Left / Alt+Shift+Right | Remove / add a column when safe |
+| Alt+n | Open the startup picker and launch a new tab |
+| Alt+t | Switch to the next tab |
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+c | Focus or unfocus the command bar |
 | Alt+p | Open settings for the focused pane; use Reload past history to refresh its visible conversation snapshot |
 | Alt+r | Rename the focused pane |
-| Alt+t | Restart exited focused pane; when multiple panes are selected, restart exited selected panes |
+| Alt+Shift+r | Rename the current tab |
+| Alt+Shift+t | Restart exited focused pane; when multiple panes are selected, restart exited selected panes |
 | Alt+z | Put the focused pane to sleep; when multiple panes are selected, sleep the selected panes |
 | Alt+g | Group selected panes under a hidden manager; with no selection, open the focused group's manager prompt |
 | Alt+u | Dissolve the focused pane's manager group |
@@ -280,9 +284,8 @@ conversation history snapshot. Press `Esc`, `q`, or `Alt+p` to close it, or
 `Alt+o` to switch to overall settings.
 
 When the focused pane has exited, GridBash shows a recovery dialog. Press `Enter`,
-`r`, or `t` to restart it, or press `z` to put it to sleep. `Alt+t` still restarts
-exited target panes directly when your terminal reports Alt shortcuts as modified
-key events.
+`r`, or `t` to restart it, or press `z` to put it to sleep. `Alt+Shift+t` restarts
+exited target panes directly.
 
 Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane. When the one-line command bar is focused, typing stays in that bar; Enter runs the command from the cwd shown in the prompt and keeps output hidden until expanded.
 
