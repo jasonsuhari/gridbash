@@ -194,9 +194,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         ),
         Span::raw(" "),
         Span::styled(
-            "LIVE",
+            if app.voice_listening() { "MIC" } else { "LIVE" },
             Style::default()
-                .fg(palette.focus())
+                .fg(if app.voice_listening() {
+                    palette.accent()
+                } else {
+                    palette.focus()
+                })
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" | "),
@@ -215,7 +219,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(
-            " | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+e output | Alt+p panes | Alt+P pane | Alt+x swap | Alt+z sleep | Alt+q quit",
+            " | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+v voice | Alt+e output | Alt+p panes | Alt+P pane | Alt+x swap | Alt+z sleep | Alt+q quit",
         ),
     ]);
     frame.render_widget(
