@@ -10,8 +10,8 @@ use vt100::Cell;
 
 use crate::{
     app::{
-        App, GridPalette, PaneSelection, PreviousPaneView, PreviousPanesView, RenamePaneView,
-        SettingsRow,
+        App, ExitedPaneRecoveryView, GridPalette, PaneSelection, PreviousPaneView,
+        PreviousPanesView, RenamePaneView, SettingsRow,
     },
     image_preview::ImagePreview,
 };
@@ -50,10 +50,20 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let rename_view = app.rename_pane_view();
     let previous_panes_view = app.previous_panes_view();
     let image_overlay = app.image_overlay_view();
+    let exited_recovery = if app.settings_open()
+        || previous_panes_view.is_some()
+        || rename_view.is_some()
+        || image_overlay.is_some()
+    {
+        None
+    } else {
+        app.exited_recovery_view()
+    };
     let modal_open = app.settings_open()
         || previous_panes_view.is_some()
         || rename_view.is_some()
-        || image_overlay.is_some();
+        || image_overlay.is_some()
+        || exited_recovery.is_some();
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -170,6 +180,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
     if let Some(image) = image_overlay {
         render_image_overlay(frame, area, image);
+    }
+    if let Some(recovery) = exited_recovery.as_ref() {
+        render_exited_recovery(frame, area, recovery, palette);
     }
 
     DrawState {
@@ -592,6 +605,70 @@ fn render_rename_pane(frame: &mut Frame<'_>, area: Rect, rename: &RenamePaneView
     }
 }
 
+fn render_exited_recovery(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    recovery: &ExitedPaneRecoveryView,
+    palette: &GridPalette,
+) {
+    let modal = exited_recovery_modal_rect(area);
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.exited())
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(Style::default().fg(SETTINGS_TEXT).bg(APP_BG))
+        .title(format!(" Pane {} Exited ", recovery.pane_index + 1));
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let target = if recovery.target_count == 1 {
+        format!(
+            "Pane {} ({}) is no longer running.",
+            recovery.pane_index + 1,
+            recovery.pane_label
+        )
+    } else {
+        format!("{} panes are no longer running.", recovery.target_count)
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                truncate_text(&target, inner.width.saturating_sub(2) as usize),
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            command_key("Enter"),
+            Span::styled(" restart  ", Style::default().fg(Color::Gray)),
+            command_key("r/t"),
+            Span::styled(" restart  ", Style::default().fg(Color::Gray)),
+            command_key("z"),
+            Span::styled(" sleep", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
+            command_key("Alt+arrows"),
+            Span::styled(" focus another pane", Style::default().fg(Color::Gray)),
+        ]),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(SETTINGS_TEXT).bg(APP_BG)),
+        inner,
+    );
+}
+
 fn render_image_overlay(frame: &mut Frame<'_>, area: Rect, image: &ImagePreview) {
     let modal = image_modal_rect(area, image);
     frame.render_widget(Clear, modal);
@@ -979,6 +1056,18 @@ fn settings_modal_rect(area: Rect, row_count: usize) -> Rect {
         .saturating_sub(2)
         .min(desired_height)
         .max(area.height.min(1));
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn exited_recovery_modal_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(4).min(62).max(area.width.min(1));
+    let height = area.height.saturating_sub(2).min(9).max(area.height.min(1));
 
     Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
