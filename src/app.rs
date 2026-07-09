@@ -62,8 +62,11 @@ pub struct App {
     image_overlay: Option<ImagePreview>,
     settings: SettingsState,
     rename: RenamePaneState,
+    previous_panes: PreviousPanesState,
     status: String,
     next_pane_id: usize,
+    previous_panes_button: Option<Rect>,
+    previous_pane_rows: Vec<(usize, Rect)>,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
     usage_tx: std_mpsc::Sender<UsageEvent>,
@@ -353,6 +356,60 @@ pub struct RenamePaneView {
     pub cursor: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreviousPanesView {
+    pub cursor: usize,
+    pub panes: Vec<PreviousPaneView>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreviousPaneView {
+    pub index: usize,
+    pub label: String,
+    pub folder: String,
+    pub worktree: Option<String>,
+    pub summary: String,
+    pub focused: bool,
+    pub selected: bool,
+    pub sleeping: bool,
+    pub exited: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PreviousPanesState {
+    open: bool,
+    cursor: usize,
+}
+
+impl PreviousPanesState {
+    fn begin(&mut self, focus: usize, pane_count: usize) {
+        self.open = true;
+        self.cursor = focus.min(pane_count.saturating_sub(1));
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+    }
+
+    fn move_cursor(&mut self, delta: isize, pane_count: usize) {
+        if pane_count == 0 {
+            self.cursor = 0;
+            return;
+        }
+
+        self.cursor = (self.cursor as isize + delta).clamp(0, pane_count as isize - 1) as usize;
+    }
+
+    fn move_to_start(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_to_end(&mut self, pane_count: usize) {
+        self.cursor = pane_count.saturating_sub(1);
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ExitedPaneRecoveryView {
     pub pane_index: usize,
     pub pane_label: String,
@@ -672,8 +729,11 @@ impl App {
             image_overlay: None,
             settings: SettingsState::default(),
             rename: RenamePaneState::default(),
+            previous_panes: PreviousPanesState::default(),
             status,
             next_pane_id: 0,
+            previous_panes_button: None,
+            previous_pane_rows: Vec::new(),
             event_tx,
             event_rx,
             usage_tx,
@@ -799,6 +859,8 @@ impl App {
                     let draw_state = ui::draw(frame, self);
                     self.grid_area = draw_state.grid_area;
                     self.rects = draw_state.pane_rects;
+                    self.previous_panes_button = draw_state.previous_panes_button;
+                    self.previous_pane_rows = draw_state.previous_pane_rows;
                 })?;
                 self.sync_pane_sizes();
                 needs_render = false;
@@ -819,7 +881,11 @@ impl App {
                         self.rename.insert_text(&text);
                         needs_render = true;
                     }
-                    Event::Paste(text) if !self.settings.open => {
+                    Event::Paste(text)
+                        if !self.settings.open
+                            && !self.previous_panes.open
+                            && self.image_overlay.is_none() =>
+                    {
                         self.route_input(text.as_bytes())?;
                     }
                     Event::Mouse(mouse)
@@ -1080,6 +1146,11 @@ impl App {
 
         let selection_cleared = self.clear_text_selection();
 
+        if self.previous_panes.open {
+            let outcome = self.handle_previous_panes_key(key);
+            return Ok(render_if_selection_cleared(outcome, selection_cleared));
+        }
+
         if self.settings.open {
             let outcome = self.handle_settings_key(key)?;
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
@@ -1209,6 +1280,10 @@ impl App {
                 self.status = "settings open".into();
                 Ok(Some(false))
             }
+            'p' => {
+                self.open_previous_panes();
+                Ok(Some(false))
+            }
             'r' => {
                 self.begin_rename();
                 Ok(Some(false))
@@ -1244,6 +1319,84 @@ impl App {
             .and_then(|name| name.clone());
         self.rename.begin(pane_index, current_name.as_deref());
         self.status = format!("renaming pane {}", pane_index + 1);
+    }
+
+    fn open_previous_panes(&mut self) {
+        if self.panes.is_empty() {
+            self.status = "no panes to list".into();
+            return;
+        }
+
+        self.previous_panes.begin(self.focus, self.panes.len());
+        self.status = "previous panes open".into();
+    }
+
+    fn close_previous_panes(&mut self) {
+        self.previous_panes.close();
+        self.status = "previous panes closed".into();
+    }
+
+    fn handle_previous_panes_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return KeyOutcome::Quit;
+        }
+        if key.modifiers.contains(KeyModifiers::ALT)
+            && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
+        {
+            self.close_previous_panes();
+            return KeyOutcome::Render;
+        }
+
+        let changed = match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.close_previous_panes();
+                true
+            }
+            KeyCode::Up => {
+                self.previous_panes.move_cursor(-1, self.panes.len());
+                true
+            }
+            KeyCode::Down => {
+                self.previous_panes.move_cursor(1, self.panes.len());
+                true
+            }
+            KeyCode::Home => {
+                self.previous_panes.move_to_start();
+                true
+            }
+            KeyCode::End => {
+                self.previous_panes.move_to_end(self.panes.len());
+                true
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.focus_previous_pane_entry(self.previous_panes.cursor);
+                true
+            }
+            _ => false,
+        };
+
+        if changed {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        }
+    }
+
+    fn focus_previous_pane_entry(&mut self, index: usize) {
+        if index >= self.panes.len() {
+            self.previous_panes.close();
+            self.status = format!("pane {} is no longer available", index + 1);
+            return;
+        }
+
+        self.focus = index;
+        let woke = self.sleeping.remove(&index);
+        self.previous_panes.close();
+        self.status = if woke {
+            format!("woke pane {}", index + 1)
+        } else {
+            format!("focused pane {}", index + 1)
+        };
     }
 
     fn handle_rename_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -1428,6 +1581,26 @@ impl App {
             return Ok(false);
         }
 
+        if self.mouse_enabled
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.previous_panes_button_at(mouse.column, mouse.row)
+        {
+            if self.previous_panes.open {
+                self.close_previous_panes();
+            } else {
+                self.open_previous_panes();
+            }
+            return Ok(true);
+        }
+
+        if self.previous_panes.open {
+            return Ok(if self.mouse_enabled {
+                self.handle_previous_panes_mouse(mouse)
+            } else {
+                false
+            });
+        }
+
         if let Some(index) = pane_at(&self.rects, mouse.column, mouse.row)
             && self.sleeping.remove(&index)
         {
@@ -1482,6 +1655,31 @@ impl App {
         }
 
         Ok(false)
+    }
+
+    fn handle_previous_panes_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return false;
+        }
+
+        let Some(index) = self.previous_pane_row_at(mouse.column, mouse.row) else {
+            return false;
+        };
+
+        self.previous_panes.cursor = index;
+        self.focus_previous_pane_entry(index);
+        true
+    }
+
+    fn previous_panes_button_at(&self, x: u16, y: u16) -> bool {
+        self.previous_panes_button
+            .is_some_and(|rect| rect_contains(rect, x, y))
+    }
+
+    fn previous_pane_row_at(&self, x: u16, y: u16) -> Option<usize> {
+        self.previous_pane_rows
+            .iter()
+            .find_map(|(index, rect)| rect_contains(*rect, x, y).then_some(*index))
     }
 
     fn pane_cell_at(&self, x: u16, y: u16) -> Option<PaneCell> {
@@ -1982,6 +2180,10 @@ impl App {
         self.settings.open
     }
 
+    pub fn previous_panes_open(&self) -> bool {
+        self.previous_panes.open
+    }
+
     pub fn image_overlay_view(&self) -> Option<&ImagePreview> {
         self.image_overlay.as_ref()
     }
@@ -2026,6 +2228,47 @@ impl App {
             pane_label: self.pane_label(self.rename.pane_index),
             value: self.rename.value.clone(),
             cursor: self.rename.cursor,
+        })
+    }
+
+    pub fn previous_panes_view(&self) -> Option<PreviousPanesView> {
+        self.previous_panes.open.then(|| PreviousPanesView {
+            cursor: self
+                .previous_panes
+                .cursor
+                .min(self.panes.len().saturating_sub(1)),
+            panes: self
+                .panes
+                .iter()
+                .enumerate()
+                .map(|(index, pane)| {
+                    let agent_label = self
+                        .launch_plan
+                        .as_ref()
+                        .and_then(|plan| plan.panes.get(index))
+                        .and_then(|pane| pane.agent_label());
+                    let summary = conversation_summary(pane.screen())
+                        .unwrap_or_else(|| "waiting for output".into());
+                    let summary = agent_label
+                        .map(|label| format!("{label} | {summary}"))
+                        .unwrap_or(summary);
+
+                    PreviousPaneView {
+                        index,
+                        label: self.pane_label(index),
+                        folder: self
+                            .pane_folder(index)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| path_label(pane.cwd())),
+                        worktree: self.pane_worktree(index).map(str::to_string),
+                        summary,
+                        focused: self.focus == index,
+                        selected: self.selected.contains(&index),
+                        sleeping: self.sleeping.contains(&index),
+                        exited: pane.exited,
+                    }
+                })
+                .collect(),
         })
     }
 
@@ -2302,6 +2545,27 @@ fn pane_inner_rect(rect: Rect) -> Option<Rect> {
         width,
         height,
     })
+}
+
+fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x
+        && x < rect.x.saturating_add(rect.width)
+        && y >= rect.y
+        && y < rect.y.saturating_add(rect.height)
+}
+
+fn path_label(path: &std::path::Path) -> String {
+    let mut label = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| path.display().to_string());
+
+    if !matches!(label.chars().last(), Some('/') | Some('\\')) {
+        label.push('/');
+    }
+
+    label
 }
 
 fn extract_selection_text(screen: &vt100::Screen, selection: PaneSelection, width: u16) -> String {
@@ -2690,6 +2954,22 @@ mod tests {
             "Quiet border"
         );
         assert_eq!(rows[SettingsState::BASE_ROW_COUNT + 3].value, "magenta");
+    }
+
+    #[test]
+    fn previous_panes_cursor_clamps_to_available_panes() {
+        let mut previous = PreviousPanesState::default();
+        previous.begin(8, 3);
+        assert_eq!(previous.cursor, 2);
+
+        previous.move_cursor(-5, 3);
+        assert_eq!(previous.cursor, 0);
+
+        previous.move_cursor(10, 3);
+        assert_eq!(previous.cursor, 2);
+
+        previous.move_cursor(1, 0);
+        assert_eq!(previous.cursor, 0);
     }
 }
 

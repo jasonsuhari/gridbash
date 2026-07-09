@@ -195,6 +195,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+Shift+Left / Alt+Shift+Right | Remove / add a column when safe |
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
+| Alt+p | Open the previous panes list and focus a pane from its conversation summary |
 | Alt+r | Rename the focused pane |
 | Alt+t | Restart exited focused pane; when multiple panes are selected, restart exited selected panes |
 | Alt+z | Put the focused pane to sleep; when multiple panes are selected, sleep the selected panes |
