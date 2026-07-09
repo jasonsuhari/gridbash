@@ -40,7 +40,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Create release commit and tag
         id: release
@@ -92,10 +92,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-
-      - name: Use latest npm for trusted publishing
-        run: npm install -g npm@latest
+          node-version: 24
 
       - run: cargo fmt --check
 
@@ -152,12 +149,12 @@ jobs:
           if ($env:NODE_AUTH_TOKEN) {
             "//registry.npmjs.org/:_authToken=$env:NODE_AUTH_TOKEN" | Set-Content -Path .npmrc
             Write-Output "Publishing with NPM_TOKEN secret."
+            npm publish --access public --provenance
           } else {
             Remove-Item Env:\NODE_AUTH_TOKEN -ErrorAction SilentlyContinue
             Write-Output "Publishing with npm trusted publishing/OIDC. Configure the package on npmjs.com if this fails with ENEEDAUTH."
+            npm publish --access public
           }
-
-          npm publish --access public --provenance
 
       - name: Create GitHub release
         shell: pwsh
@@ -203,10 +200,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-
-      - name: Use latest npm for trusted publishing
-        run: npm install -g npm@latest
+          node-version: 24
 
       - run: cargo fmt --check
 
@@ -275,12 +269,12 @@ jobs:
           if ($env:NODE_AUTH_TOKEN) {
             "//registry.npmjs.org/:_authToken=$env:NODE_AUTH_TOKEN" | Set-Content -Path .npmrc
             Write-Output "Publishing with NPM_TOKEN secret."
+            npm publish --access public --provenance
           } else {
             Remove-Item Env:\NODE_AUTH_TOKEN -ErrorAction SilentlyContinue
             Write-Output "Publishing with npm trusted publishing/OIDC. Configure the package on npmjs.com if this fails with ENEEDAUTH."
+            npm publish --access public
           }
-
-          npm publish --access public --provenance
 
       - name: Create GitHub release
         shell: pwsh
