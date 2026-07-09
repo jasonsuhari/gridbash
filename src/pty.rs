@@ -25,6 +25,7 @@ const MAX_INPUT_LINE_CHARS: usize = 4096;
 const MAX_OUTPUT_TAIL_CHARS: usize = 40_000;
 const MAX_REPLAY_OUTPUT_CHARS: usize = 18_000;
 const MAX_OSC_SCAN: usize = 4096;
+const PTY_READ_BUFFER_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Clone)]
 pub enum PtyEvent {
@@ -395,7 +396,7 @@ fn spawn_reader(
     mut reader: Box<dyn Read + Send>,
 ) {
     thread::spawn(move || {
-        let mut buffer = [0_u8; 8192];
+        let mut buffer = [0_u8; PTY_READ_BUFFER_BYTES];
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {

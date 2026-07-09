@@ -51,6 +51,7 @@ pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
 const WORKER_RELAY_IDLE: Duration = Duration::from_millis(900);
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const WORKER_RELAY_MAX_BYTES: usize = 6000;
 const MAX_PANE_NAME_CHARS: usize = 32;
 const MAX_TAB_TITLE_CHARS: usize = 40;
@@ -116,6 +117,7 @@ pub struct App {
     profile_usage: BTreeMap<String, String>,
     api_spend_label: Option<String>,
     last_activity_decay: Instant,
+    last_exit_poll: Instant,
 }
 
 struct AppInit {
@@ -1614,6 +1616,7 @@ impl App {
             profile_usage: BTreeMap::new(),
             api_spend_label: None,
             last_activity_decay: Instant::now(),
+            last_exit_poll: Instant::now(),
         }
     }
 
@@ -1672,6 +1675,7 @@ impl App {
         self.sleeping.clear();
         self.next_pane_id = 0;
         self.pane_idle.clear();
+        self.last_exit_poll = Instant::now();
         self.follow_up = None;
         self.groups.clear();
         self.next_group_id = 0;
@@ -1965,6 +1969,8 @@ impl App {
     fn drain_pty_events(&mut self) -> bool {
         let mut changed = false;
         let mut dispatches = Vec::new();
+        let mut pending_output = BTreeMap::<(PaneId, u64), Vec<u8>>::new();
+        let mut exited = Vec::new();
 
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
@@ -1973,70 +1979,83 @@ impl App {
                     generation,
                     bytes,
                 } => {
-                    if let Some(index) = self.visible_pane_index(pane, generation) {
-                        let target = &mut self.panes[index];
-                        target.process_output(&bytes);
-                        self.capture_worker_output(index, &bytes);
-                        self.mark_pane_touched(index);
-                        changed = true;
-                    } else if self.process_manager_output(pane, generation, &bytes, &mut dispatches)
-                    {
-                        changed = true;
-                    } else if self.process_inactive_output(pane, generation, &bytes) {
-                        changed = true;
-                    }
+                    pending_output
+                        .entry((pane, generation))
+                        .or_default()
+                        .extend(bytes);
                 }
                 PtyEvent::Exited { pane, generation } => {
-                    if let Some(index) = self.visible_pane_index(pane, generation) {
-                        let target = &mut self.panes[index];
-                        if !target.exited {
-                            target.exited = true;
-                            changed = true;
-                        }
-                        if self
-                            .follow_up
-                            .is_some_and(|prompt| prompt.pane_index == index)
-                        {
-                            self.follow_up = None;
-                        }
-                    } else if self.process_manager_exit(pane, generation) {
-                        changed = true;
-                    } else if self.process_inactive_exit(pane, generation) {
-                        changed = true;
-                    }
+                    exited.push((pane, generation));
                 }
             }
         }
 
-        for (index, pane) in self.panes.iter_mut().enumerate() {
-            if pane.poll_exit() {
+        for ((pane, generation), bytes) in pending_output {
+            if let Some(index) = self.visible_pane_index(pane, generation) {
+                let target = &mut self.panes[index];
+                target.process_output(&bytes);
+                self.capture_worker_output(index, &bytes);
+                self.mark_pane_touched(index);
+                changed = true;
+            } else if self.process_manager_output(pane, generation, &bytes, &mut dispatches) {
+                changed = true;
+            } else if self.process_inactive_output(pane, generation, &bytes) {
+                changed = true;
+            }
+        }
+
+        for (pane, generation) in exited {
+            if let Some(index) = self.visible_pane_index(pane, generation) {
+                let target = &mut self.panes[index];
+                if !target.exited {
+                    target.exited = true;
+                    changed = true;
+                }
                 if self
                     .follow_up
                     .is_some_and(|prompt| prompt.pane_index == index)
                 {
                     self.follow_up = None;
                 }
+            } else if self.process_manager_exit(pane, generation) {
+                changed = true;
+            } else if self.process_inactive_exit(pane, generation) {
                 changed = true;
             }
         }
-        for group in &mut self.groups {
-            let exited_now = group.manager.poll_exit();
-            if exited_now {
-                group.status = "manager exited".into();
+
+        if self.last_exit_poll.elapsed() >= EXIT_POLL_INTERVAL {
+            for (index, pane) in self.panes.iter_mut().enumerate() {
+                if pane.poll_exit() {
+                    if self
+                        .follow_up
+                        .is_some_and(|prompt| prompt.pane_index == index)
+                    {
+                        self.follow_up = None;
+                    }
+                    changed = true;
+                }
             }
-            changed |= exited_now;
-        }
-        for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
-            for pane in &mut tab.panes {
-                changed |= pane.poll_exit();
-            }
-            for group in &mut tab.groups {
+            for group in &mut self.groups {
                 let exited_now = group.manager.poll_exit();
                 if exited_now {
                     group.status = "manager exited".into();
                 }
                 changed |= exited_now;
             }
+            for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
+                for pane in &mut tab.panes {
+                    changed |= pane.poll_exit();
+                }
+                for group in &mut tab.groups {
+                    let exited_now = group.manager.poll_exit();
+                    if exited_now {
+                        group.status = "manager exited".into();
+                    }
+                    changed |= exited_now;
+                }
+            }
+            self.last_exit_poll = Instant::now();
         }
 
         changed |= self.dispatch_manager_commands(dispatches);
