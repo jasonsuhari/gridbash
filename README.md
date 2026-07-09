@@ -268,6 +268,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+c | Focus or unfocus the command bar |
 | Alt+p | Open settings for the focused pane; use Reload past history to refresh its visible conversation snapshot |
+| Alt+Shift+p | Open the previous panes list |
 | Alt+r | Rename the focused pane |
 | Alt+Shift+r | Rename the current tab |
 | Alt+Shift+t | Restart exited focused pane; when multiple panes are selected, restart exited selected panes |

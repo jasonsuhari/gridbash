@@ -10,6 +10,7 @@ Release target: unreleased
 ## What Changed
 
 - `Alt+p` now opens settings inside the focused pane instead of drawing a global picker modal.
+- The previous panes selector remains available from its button and `Alt+Shift+p`.
 - Added a `Reload past history` action that refreshes the pane's visible conversation snapshot.
 - Kept `Alt+o` dedicated to overall GridBash settings, including from the pane settings view.
 

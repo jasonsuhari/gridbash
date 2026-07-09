@@ -1458,10 +1458,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
             .into()
     } else {
-        "Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        "Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
             .into()
     }
 }
@@ -2711,11 +2711,11 @@ impl App {
                 Ok(Some(false))
             }
             'p' if modifiers.contains(KeyModifiers::SHIFT) => {
-                self.toggle_pane_settings();
+                self.open_previous_panes();
                 Ok(Some(false))
             }
             'p' => {
-                self.open_previous_panes();
+                self.toggle_pane_settings();
                 Ok(Some(false))
             }
             'r' if modifiers.contains(KeyModifiers::SHIFT) => {
