@@ -631,7 +631,7 @@ impl App {
             (None, None)
         };
         let base_status = if mouse_enabled {
-            "Drag copies | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+t restart | Alt+x swap | Alt+z sleep"
+            "Drag copies | Right-click toggles pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+t restart | Alt+x swap | Alt+z sleep"
         } else {
             "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+t restart | Alt+x swap | Alt+z sleep"
         };
@@ -1161,8 +1161,7 @@ impl App {
         match lower {
             'q' => Ok(Some(true)),
             's' => {
-                toggle_selection(&mut self.selected, self.focus);
-                self.status = format!("selected {} panes", self.selected.len());
+                self.toggle_pane_selection(self.focus);
                 Ok(Some(false))
             }
             'a' => {
@@ -1409,6 +1408,14 @@ impl App {
         }
 
         match mouse.kind {
+            MouseEventKind::Down(MouseButton::Right) => {
+                if let Some(index) = pane_at(&self.rects, mouse.column, mouse.row) {
+                    self.focus = index;
+                    self.clear_text_selection();
+                    self.toggle_pane_selection(index);
+                    return Ok(true);
+                }
+            }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some(cell) = self.pane_cell_at(mouse.column, mouse.row) {
                     self.focus = cell.pane;
@@ -1553,6 +1560,21 @@ impl App {
 
     fn clear_text_selection(&mut self) -> bool {
         self.text_selection.take().is_some()
+    }
+
+    fn toggle_pane_selection(&mut self, index: usize) {
+        if index >= self.panes.len() {
+            self.status = "no pane to select".into();
+            return;
+        }
+
+        let selected = toggle_selection(&mut self.selected, index);
+        let action = if selected { "selected" } else { "deselected" };
+        self.status = format!(
+            "{action} pane {}; {} selected",
+            index + 1,
+            self.selected.len()
+        );
     }
 
     fn adjust_grid(&mut self, axis: GridAxis, delta: isize) -> Result<()> {
@@ -2071,9 +2093,12 @@ fn resolved_current_dir() -> Result<std::path::PathBuf> {
     Ok(current.canonicalize().unwrap_or(current))
 }
 
-fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) {
-    if !selected.insert(index) {
-        selected.remove(&index);
+fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) -> bool {
+    if selected.remove(&index) {
+        false
+    } else {
+        selected.insert(index);
+        true
     }
 }
 
@@ -2425,6 +2450,22 @@ mod tests {
         assert_eq!(swapped_index(0, 0, 2), 2);
         assert_eq!(swapped_index(2, 0, 2), 0);
         assert_eq!(swapped_index(4, 0, 2), 4);
+    }
+
+    #[test]
+    fn toggle_selection_deselects_one_pane_without_clearing_others() {
+        let mut panes = selected(&[0, 1, 2]);
+
+        assert!(!toggle_selection(&mut panes, 1));
+        assert_eq!(panes, selected(&[0, 2]));
+    }
+
+    #[test]
+    fn toggle_selection_adds_unselected_pane() {
+        let mut panes = selected(&[0, 2]);
+
+        assert!(toggle_selection(&mut panes, 1));
+        assert_eq!(panes, selected(&[0, 1, 2]));
     }
 
     #[test]
