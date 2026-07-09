@@ -33,6 +33,7 @@ pub struct DrawState {
     pub previous_panes_button: Option<Rect>,
     pub previous_pane_rows: Vec<(usize, Rect)>,
     pub pane_settings_button: Option<Rect>,
+    pub pane_settings_rename_button: Option<Rect>,
     pub pane_settings_reload_button: Option<Rect>,
 }
 
@@ -95,6 +96,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || prompt_view.is_some()
         || image_overlay.is_some()
         || exited_recovery.is_some();
+    let mut pane_settings_rename_button = None;
     let mut pane_settings_reload_button = None;
     render_tabs(frame, tab_area, &app.tab_labels(), palette);
 
@@ -147,7 +149,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
         if let Some(view) = app.pane_settings_view(index) {
-            pane_settings_reload_button = render_pane_settings(frame, inner, &view, palette);
+            let buttons = render_pane_settings(frame, inner, &view, palette);
+            pane_settings_rename_button = buttons.rename;
+            pane_settings_reload_button = buttons.reload;
         } else if sleeping {
             render_sleeping_screen(frame, inner);
         } else {
@@ -251,6 +255,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         previous_panes_button,
         previous_pane_rows,
         pane_settings_button,
+        pane_settings_rename_button,
         pane_settings_reload_button,
     }
 }
@@ -676,16 +681,25 @@ fn render_pane_settings(
     area: Rect,
     view: &PaneSettingsView,
     palette: &GridPalette,
-) -> Option<Rect> {
+) -> PaneSettingsButtons {
     if area.width == 0 || area.height == 0 {
-        return None;
+        return PaneSettingsButtons::default();
     }
 
     frame.render_widget(Clear, area);
     let lines = pane_settings_lines(view, area.width, palette);
     frame.render_widget(Paragraph::new(lines).style(settings_panel_style()), area);
 
-    pane_settings_reload_rect(area)
+    PaneSettingsButtons {
+        rename: pane_settings_rename_rect(area),
+        reload: pane_settings_reload_rect(area),
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PaneSettingsButtons {
+    rename: Option<Rect>,
+    reload: Option<Rect>,
 }
 
 fn pane_settings_state(view: &PaneSettingsView) -> (&'static str, Color) {
@@ -723,6 +737,7 @@ fn pane_settings_lines(
                 .bg(SETTINGS_BG)
                 .add_modifier(Modifier::BOLD),
         )));
+        lines.push(pane_settings_rename_line(width, palette));
         lines.push(pane_settings_reload_line(width, palette));
         lines.push(pane_settings_command_bar(width));
         return lines;
@@ -765,6 +780,7 @@ fn pane_settings_lines(
         ),
     ]));
     lines.push(Line::from(""));
+    lines.push(pane_settings_rename_line(width, palette));
     lines.push(pane_settings_reload_line(width, palette));
     lines.push(Line::from(""));
     lines.push(pane_settings_command_bar(width));
@@ -772,8 +788,15 @@ fn pane_settings_lines(
     lines
 }
 
+fn pane_settings_rename_line(width: u16, palette: &GridPalette) -> Line<'static> {
+    pane_settings_action_line("[ Rename pane ]", width, palette.selected())
+}
+
 fn pane_settings_reload_line(width: u16, palette: &GridPalette) -> Line<'static> {
-    let label = "[ Reload past history ]";
+    pane_settings_action_line("[ Reload past history ]", width, palette.focus())
+}
+
+fn pane_settings_action_line(label: &str, width: u16, background: Color) -> Line<'static> {
     let text = if width as usize <= label.len() + 4 {
         fixed_width(label, width as usize)
     } else {
@@ -786,7 +809,7 @@ fn pane_settings_reload_line(width: u16, palette: &GridPalette) -> Line<'static>
         text,
         Style::default()
             .fg(Color::Black)
-            .bg(palette.focus())
+            .bg(background)
             .add_modifier(Modifier::BOLD),
     ))
 }
@@ -795,7 +818,9 @@ fn pane_settings_command_bar(width: u16) -> Line<'static> {
     if width < 50 {
         return Line::from(vec![
             Span::raw("  "),
-            command_key("Enter"),
+            command_key("N"),
+            Span::styled(" rename  ", Style::default().fg(Color::Gray)),
+            command_key("R"),
             Span::styled(" reload  ", Style::default().fg(Color::Gray)),
             command_key("Esc"),
             Span::styled(" close", Style::default().fg(Color::Gray)),
@@ -804,7 +829,9 @@ fn pane_settings_command_bar(width: u16) -> Line<'static> {
 
     Line::from(vec![
         Span::raw("  "),
-        command_key("Enter/Space"),
+        command_key("N"),
+        Span::styled(" rename  ", Style::default().fg(Color::Gray)),
+        command_key("R/Enter"),
         Span::styled(" reload  ", Style::default().fg(Color::Gray)),
         command_key("Alt+o"),
         Span::styled(" global settings  ", Style::default().fg(Color::Gray)),
@@ -813,8 +840,15 @@ fn pane_settings_command_bar(width: u16) -> Line<'static> {
     ])
 }
 
+fn pane_settings_rename_rect(area: Rect) -> Option<Rect> {
+    pane_settings_action_rect(area, if area.width < 36 { 1 } else { 6 })
+}
+
 fn pane_settings_reload_rect(area: Rect) -> Option<Rect> {
-    let row = if area.width < 36 { 1 } else { 6 };
+    pane_settings_action_rect(area, if area.width < 36 { 2 } else { 7 })
+}
+
+fn pane_settings_action_rect(area: Rect, row: u16) -> Option<Rect> {
     if area.width == 0 || area.height <= row {
         return None;
     }
@@ -2523,15 +2557,24 @@ mod tests {
     }
 
     #[test]
-    fn pane_settings_reload_button_uses_expected_row() {
+    fn pane_settings_action_buttons_use_expected_rows() {
         assert_eq!(
-            pane_settings_reload_rect(Rect::new(5, 10, 40, 12)),
+            pane_settings_rename_rect(Rect::new(5, 10, 40, 12)),
             Some(Rect::new(5, 16, 40, 1))
         );
         assert_eq!(
-            pane_settings_reload_rect(Rect::new(5, 10, 20, 4)),
+            pane_settings_reload_rect(Rect::new(5, 10, 40, 12)),
+            Some(Rect::new(5, 17, 40, 1))
+        );
+        assert_eq!(
+            pane_settings_rename_rect(Rect::new(5, 10, 20, 4)),
             Some(Rect::new(5, 11, 20, 1))
         );
+        assert_eq!(
+            pane_settings_reload_rect(Rect::new(5, 10, 20, 4)),
+            Some(Rect::new(5, 12, 20, 1))
+        );
+        assert_eq!(pane_settings_rename_rect(Rect::new(5, 10, 40, 6)), None);
         assert_eq!(pane_settings_reload_rect(Rect::new(5, 10, 40, 6)), None);
     }
 
