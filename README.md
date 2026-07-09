@@ -300,7 +300,7 @@ language pack matching the desired dictation language must be installed.
 
 Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
 
-Settings includes a General tab for local runtime display controls and an Auth tab for GridBash-wide Claude/Codex auth defaults.
+Settings includes a General tab for local runtime display controls and an Auth tab for GridBash-wide Claude/Codex auth defaults and launch policy. Pane Settings lets each Claude or Codex pane select its own compatible auth account; applying a different account restarts only that pane.
 
 Pane titles add a small quiet-output marker after roughly three seconds without output. The marker means a pane produced output and then went idle; it does not mean the process exited or completed its task.
 
@@ -311,10 +311,14 @@ The settings screen includes sample controls plus live color controls for the ac
 GridBash can launch Claude and Codex with isolated auth/config directories. It discovers profiles from:
 
 ```text
-GRIDBASH_AUTH_HOME > CLAUDE_PROFILES_HOME > [auth].home > %USERPROFILE%\.claude-profiles
+GRIDBASH_AUTH_HOME > [auth].home > CLAUDE_PROFILES_HOME (legacy) > %USERPROFILE%\.gridbash-auth
 ```
 
 Claude profiles launch with `CLAUDE_CONFIG_DIR=<profile-dir>`. Codex profiles launch with `CODEX_HOME=<profile-dir>`.
+
+The default home changed from `%USERPROFILE%\.claude-profiles` to `%USERPROFILE%\.gridbash-auth`. Existing profiles are not moved automatically. Move them to the new directory, set `[auth].home` to the old directory, or keep using the legacy `CLAUDE_PROFILES_HOME` override.
+
+Auth assignment is manual by default. In manual mode, new panes use the configured default for their agent kind and keep any per-pane selection. When auto-cycle is enabled, new compatible panes are assigned round-robin across ready auth profiles of the matching kind. Changing the policy does not restart panes that are already running.
 
 Auth settings controls:
 
@@ -323,10 +327,13 @@ Auth settings controls:
 | Tab | Switch Settings tabs |
 | Up / Down | Move through auth profiles |
 | d | Set selected profile as the GridBash-wide default for its kind |
+| c | Toggle manual assignment / auto-cycle for new panes |
 | n | Create a profile directory |
 | l | Open the selected profile's login command |
 | r | Refresh local account and usage status |
 | Esc / q | Close settings |
+
+For a Claude or Codex pane, open Pane Settings with `Alt+P`, use Left/Right to choose a compatible auth profile, and press Enter to apply it and restart that pane. Press `r` there to refresh the pane's history snapshot.
 
 Usage status is best-effort. GridBash reads local auth metadata, masks account emails, and uses short-timeout `curl.exe` requests only while the Auth settings view is refreshed.
 
@@ -354,7 +361,8 @@ profile = "powershell"
 manager_profile = "claude-1"
 
 [auth]
-home = "C:\\Users\\Jason\\.claude-profiles"
+home = "C:\\Users\\Jason\\.gridbash-auth"
+auto_cycle = false
 usage_status = true
 
 [auth.defaults]

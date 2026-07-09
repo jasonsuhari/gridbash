@@ -162,7 +162,8 @@ mod tests {
         let config: Config = toml::from_str(
             r#"
             [auth]
-            home = "C:\\Users\\Jason\\.claude-profiles"
+            home = "C:\\Users\\Jason\\.gridbash-auth"
+            auto_cycle = true
             usage_status = true
 
             [auth.defaults]
@@ -174,7 +175,15 @@ mod tests {
 
         assert_eq!(config.auth.defaults.claude.as_deref(), Some("claude-1"));
         assert_eq!(config.auth.defaults.codex.as_deref(), Some("codex-2"));
+        assert!(config.auth.auto_cycle);
         assert_eq!(config.auth.usage_status, Some(true));
+    }
+
+    #[test]
+    fn auth_auto_cycle_defaults_to_manual() {
+        let config: Config = toml::from_str("[auth]\n").expect("parse config");
+
+        assert!(!config.auth.auto_cycle);
     }
 
     #[test]

@@ -10,7 +10,8 @@ prompts = [
 ]
 
 [auth]
-home = "C:\\Users\\Jason\\.claude-profiles"
+home = "C:\\Users\\Jason\\.gridbash-auth"
+auto_cycle = false
 usage_status = true
 
 [auth.defaults]
