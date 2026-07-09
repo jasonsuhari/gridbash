@@ -9,7 +9,7 @@ use std::path::Path;
 use vt100::Cell;
 
 use crate::{
-    app::{App, GridPalette, PaneSelection, RenamePaneView, SettingsRow},
+    app::{App, GridPalette, PaneSelection, RenamePaneView, RenameTabView, SettingsRow, TabLabel},
     image_preview::ImagePreview,
 };
 
@@ -33,16 +33,27 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
         .split(area);
 
-    let grid_area = chunks[0];
-    let status_area = chunks[1];
+    let tab_area = chunks[0];
+    let grid_area = chunks[1];
+    let status_area = chunks[2];
     let rects = app.pane_rects(grid_area);
     let palette = app.palette();
     let rename_view = app.rename_pane_view();
+    let tab_rename_view = app.rename_tab_view();
     let image_overlay = app.image_overlay_view();
-    let modal_open = app.settings_open() || rename_view.is_some() || image_overlay.is_some();
+    let modal_open = app.settings_open()
+        || rename_view.is_some()
+        || tab_rename_view.is_some()
+        || image_overlay.is_some();
+
+    render_tabs(frame, tab_area, &app.tab_labels());
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -133,7 +144,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(" | Alt+t restart | Alt+x swap | Alt+z sleep | Alt+q quit"),
+        Span::raw(" | Alt+t tab | Alt+Shift+t restart | Alt+x swap | Alt+z sleep | Alt+q quit"),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
@@ -145,6 +156,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
     if let Some(rename) = rename_view.as_ref() {
         render_rename_pane(frame, area, rename);
+    }
+    if let Some(rename) = tab_rename_view.as_ref() {
+        render_rename_tab(frame, area, rename);
     }
     if let Some(image) = image_overlay {
         render_image_overlay(frame, area, image);
@@ -171,6 +185,62 @@ fn pane_title(
     } else {
         format!(" {label} | {folder}{usage}{badge} ")
     }
+}
+
+fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel]) {
+    let mut spans = vec![Span::styled(
+        " GridBash ",
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    spans.push(Span::raw(" "));
+    for (index, tab) in tabs.iter().enumerate() {
+        let marker = if tab.exited {
+            "!"
+        } else if tab.activity && !tab.active {
+            "*"
+        } else {
+            ""
+        };
+        let label = format!(
+            " {}:{}{} ",
+            index + 1,
+            truncate_text(&tab.title, 18),
+            marker
+        );
+        let style = if tab.active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else if tab.exited {
+            Style::default().fg(Color::Red)
+        } else if tab.activity {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        spans.push(Span::styled(label, style));
+    }
+
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled("Alt+t", Style::default().fg(Color::Yellow)));
+    spans.push(Span::raw(" next  "));
+    spans.push(Span::styled("Alt+n", Style::default().fg(Color::Yellow)));
+    spans.push(Span::raw(" new  "));
+    spans.push(Span::styled(
+        "Alt+Shift+r",
+        Style::default().fg(Color::Yellow),
+    ));
+    spans.push(Span::raw(" rename tab"));
+
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(APP_BG)),
+        area,
+    );
 }
 
 #[derive(Debug, PartialEq)]
@@ -345,6 +415,86 @@ fn render_rename_pane(frame: &mut Frame<'_>, area: Rect, rename: &RenamePaneView
     }
 }
 
+fn render_rename_tab(frame: &mut Frame<'_>, area: Rect, rename: &RenameTabView) {
+    let modal = centered_rect(area, 62, 28);
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" Rename Tab ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    let header = Line::from(vec![
+        Span::styled(
+            "Current tab",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(rename.title.clone(), Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(header).style(Style::default().fg(Color::Rgb(230, 237, 243))),
+        chunks[0],
+    );
+
+    let input_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" Title ");
+    let input_inner = input_block.inner(chunks[1]);
+    let input_line = if rename.value.is_empty() {
+        Line::from(Span::styled(
+            "tab title required",
+            Style::default().fg(Color::DarkGray),
+        ))
+    } else {
+        Line::from(rename.value.clone())
+    };
+    frame.render_widget(
+        Paragraph::new(input_line).block(input_block).style(
+            Style::default()
+                .fg(Color::Rgb(230, 237, 243))
+                .bg(Color::Rgb(11, 15, 20)),
+        ),
+        chunks[1],
+    );
+
+    let help = Line::from(vec![
+        Span::styled("Enter", Style::default().fg(Color::Yellow)),
+        Span::raw(" save  "),
+        Span::styled("Esc", Style::default().fg(Color::Yellow)),
+        Span::raw(" cancel  "),
+        Span::styled("Ctrl+u", Style::default().fg(Color::Yellow)),
+        Span::raw(" clear"),
+    ]);
+    frame.render_widget(
+        Paragraph::new(help).style(Style::default().fg(Color::Gray)),
+        chunks[2],
+    );
+
+    if input_inner.width > 0 && input_inner.height > 0 {
+        let cursor = rename.cursor.min(rename.value.chars().count()) as u16;
+        let x = input_inner
+            .x
+            .saturating_add(cursor.min(input_inner.width.saturating_sub(1)));
+        frame.set_cursor_position((x, input_inner.y));
+    }
+}
+
 fn render_image_overlay(frame: &mut Frame<'_>, area: Rect, image: &ImagePreview) {
     let modal = image_modal_rect(area, image);
     frame.render_widget(Clear, modal);
@@ -415,7 +565,7 @@ fn image_row(row: &[crate::image_preview::ImageCell], max_columns: usize) -> Lin
         .take(max_columns)
         .map(|cell| {
             Span::styled(
-                "▀",
+                "\u{2580}",
                 Style::default()
                     .fg(rgb(cell.upper))
                     .bg(rgb(cell.lower))
