@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GridBash by Jason Suhari | CLI Agent Terminal Grid</title>
+    <meta name="description" content="GridBash by Jason Suhari is a Windows-native terminal grid for running Codex, Claude, Gemini, Aider, Git Bash, PowerShell, and custom CLI agents side by side.">
+    <meta name="keywords" content="GridBash, Jason Suhari, jasonsuhari gridbash, CLI agent terminal grid, AI coding agent multiplexer, Windows terminal multiplexer, Codex terminal grid, Claude terminal grid, Gemini CLI terminal grid, ConPTY terminal grid">
+    <meta name="author" content="Jason Suhari">
+    <meta name="robots" content="index, follow, max-image-preview:large">
+    <link rel="canonical" href="https://jasonsuhari.github.io/gridbash/">
+    <link rel="me" href="https://github.com/jasonsuhari">
+    <link rel="preload" as="image" href="assets/gridbash-openvid-demo-poster.png">
+
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="GridBash">
+    <meta property="og:title" content="GridBash by Jason Suhari | CLI Agent Terminal Grid">
+    <meta property="og:description" content="Run Codex, Claude, Gemini, Aider, Git Bash, PowerShell, and custom CLI agents side by side in one Windows-native terminal grid.">
+    <meta property="og:url" content="https://jasonsuhari.github.io/gridbash/">
+    <meta property="og:image" content="https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-social-preview.png">
+    <meta property="og:image:width" content="1280">
+    <meta property="og:image:height" content="640">
+
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="GridBash by Jason Suhari | CLI Agent Terminal Grid">
+    <meta name="twitter:description" content="A Windows-native terminal grid for running CLI coding agents side by side.">
+    <meta name="twitter:image" content="https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-social-preview.png">
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "GridBash",
+        "alternateName": "GridBash by Jason Suhari",
+        "description": "GridBash is a Windows-native terminal grid for running Codex, Claude, Gemini, Aider, Git Bash, PowerShell, and custom CLI agents side by side.",
+        "url": "https://jasonsuhari.github.io/gridbash/",
+        "codeRepository": "https://github.com/jasonsuhari/gridbash",
+        "downloadUrl": "https://www.npmjs.com/package/gridbash",
+        "image": "https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-social-preview.png",
+        "applicationCategory": "DeveloperApplication",
+        "applicationSubCategory": "Terminal multiplexer",
+        "operatingSystem": "Windows x64",
+        "softwareVersion": "0.1.5",
+        "programmingLanguage": "Rust",
+        "license": "https://github.com/jasonsuhari/gridbash/blob/main/LICENSE",
+        "author": {
+          "@type": "Person",
+          "name": "Jason Suhari",
+          "url": "https://github.com/jasonsuhari"
+        },
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "sameAs": [
+          "https://github.com/jasonsuhari/gridbash",
+          "https://www.npmjs.com/package/gridbash"
+        ]
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "What is GridBash by Jason Suhari?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "GridBash by Jason Suhari is a Windows-native terminal grid for running CLI coding agents and shells side by side."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Which CLI agents does GridBash support?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "GridBash includes launch profiles for Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, Git Bash, PowerShell, cmd, and custom commands."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How do I install GridBash?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Install the Windows x64 npm package with npm install -g gridbash, then run gridbash from a terminal."
+            }
+          }
+        ]
+      }
+    </script>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #11120f;
+        --panel: #191b17;
+        --panel-strong: #22251f;
+        --text: #f7f3e8;
+        --muted: #b9b5a8;
+        --line: rgba(247, 243, 232, 0.16);
+        --accent: #9be56f;
+        --accent-strong: #c9ff93;
+        --code: #0b0c0a;
+        --shadow: rgba(0, 0, 0, 0.35);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        background:
+          linear-gradient(180deg, rgba(155, 229, 111, 0.08), transparent 420px),
+          var(--bg);
+        color: var(--text);
+        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        line-height: 1.5;
+      }
+
+      a {
+        color: inherit;
+        text-decoration-color: rgba(155, 229, 111, 0.65);
+        text-underline-offset: 0.18em;
+      }
+
+      a:hover {
+        text-decoration-color: var(--accent);
+      }
+
+      .shell {
+        width: min(1160px, calc(100% - 32px));
+        margin: 0 auto;
+      }
+
+      .nav {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        min-height: 68px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        min-width: 0;
+        font-weight: 700;
+        letter-spacing: 0;
+      }
+
+      .mark {
+        width: 34px;
+        height: 34px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--accent);
+        font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+        font-weight: 800;
+      }
+
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        color: var(--muted);
+        font-size: 0.95rem;
+        white-space: nowrap;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 0.95fr) minmax(420px, 1.05fr);
+        gap: 48px;
+        align-items: center;
+        padding: 60px 0 46px;
+      }
+
+      .eyebrow {
+        margin: 0 0 14px;
+        color: var(--accent);
+        font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+        font-size: 0.82rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        max-width: 780px;
+        margin: 0;
+        font-size: clamp(2.8rem, 7vw, 5.9rem);
+        line-height: 0.94;
+        letter-spacing: 0;
+      }
+
+      .lead {
+        max-width: 620px;
+        margin: 22px 0 0;
+        color: var(--muted);
+        font-size: 1.12rem;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 28px;
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        padding: 0 18px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--panel);
+        color: var(--text);
+        font-weight: 700;
+        text-decoration: none;
+      }
+
+      .button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #11120f;
+      }
+
+      .button:active {
+        transform: translateY(1px);
+      }
+
+      .hero-media {
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--panel);
+        box-shadow: 0 30px 80px var(--shadow);
+      }
+
+      .hero-media img {
+        display: block;
+        width: 100%;
+        height: auto;
+      }
+
+      .command {
+        margin-top: 22px;
+        padding: 16px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: var(--code);
+        color: var(--accent-strong);
+        font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+        font-size: 0.94rem;
+        overflow-x: auto;
+        white-space: nowrap;
+      }
+
+      .strip {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--line);
+      }
+
+      .metric {
+        min-height: 118px;
+        padding: 22px;
+        background: var(--panel);
+      }
+
+      .metric strong {
+        display: block;
+        margin-bottom: 6px;
+        color: var(--accent-strong);
+        font-size: 1.55rem;
+      }
+
+      .metric span {
+        color: var(--muted);
+      }
+
+      section {
+        padding: 58px 0;
+      }
+
+      .section-head {
+        display: grid;
+        grid-template-columns: 0.8fr 1.2fr;
+        gap: 32px;
+        align-items: start;
+        margin-bottom: 28px;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: clamp(2rem, 4vw, 3.4rem);
+        line-height: 1;
+        letter-spacing: 0;
+      }
+
+      .section-head p,
+      .plain p,
+      .faq p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 1.04rem;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+      }
+
+      .tile {
+        min-height: 178px;
+        padding: 22px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--panel);
+      }
+
+      .tile.wide {
+        grid-column: span 2;
+        background: var(--panel-strong);
+      }
+
+      .tile h3,
+      .faq h3 {
+        margin: 0 0 10px;
+        font-size: 1.18rem;
+      }
+
+      .tile p {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .plain {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 40px;
+        align-items: start;
+      }
+
+      .list {
+        display: grid;
+        gap: 10px;
+        margin: 18px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .list li {
+        padding: 12px 0;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+      }
+
+      .faq {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+      }
+
+      footer {
+        padding: 34px 0 46px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+      }
+
+      footer .shell {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+      }
+
+      @media (max-width: 900px) {
+        .hero,
+        .section-head,
+        .plain {
+          grid-template-columns: 1fr;
+        }
+
+        .hero {
+          gap: 28px;
+          padding-top: 42px;
+        }
+
+        .hero-media {
+          order: -1;
+        }
+
+        .strip,
+        .grid,
+        .faq {
+          grid-template-columns: 1fr;
+        }
+
+        .tile.wide {
+          grid-column: auto;
+        }
+
+        .nav {
+          align-items: flex-start;
+          flex-direction: column;
+          justify-content: center;
+          padding: 14px 0;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .shell {
+          width: min(100% - 22px, 1160px);
+        }
+
+        .nav-links {
+          flex-wrap: wrap;
+          gap: 10px 14px;
+        }
+
+        h1 {
+          font-size: clamp(2.5rem, 18vw, 4rem);
+        }
+
+        .actions {
+          flex-direction: column;
+        }
+
+        .button {
+          width: 100%;
+        }
+
+        footer .shell {
+          flex-direction: column;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+
+        .button:active {
+          transform: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="shell nav">
+      <a class="brand" href="https://jasonsuhari.github.io/gridbash/" aria-label="GridBash home">
+        <span class="mark">GB</span>
+        <span>GridBash by Jason Suhari</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="https://github.com/jasonsuhari/gridbash">GitHub</a>
+        <a href="https://www.npmjs.com/package/gridbash">npm</a>
+        <a href="#install">Install</a>
+        <a href="#faq">FAQ</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="shell hero" aria-labelledby="hero-title">
+        <div>
+          <p class="eyebrow">Windows-native CLI agent terminal grid</p>
+          <h1 id="hero-title">Run every CLI coding agent side by side.</h1>
+          <p class="lead">GridBash runs Codex, Claude, Gemini, Aider, shells, and custom commands in one fast PTY-backed grid.</p>
+          <div class="actions">
+            <a class="button primary" href="https://github.com/jasonsuhari/gridbash">Open GitHub repo</a>
+            <a class="button" href="https://www.npmjs.com/package/gridbash">View npm package</a>
+          </div>
+          <div id="install" class="command">npm install -g gridbash</div>
+        </div>
+        <a class="hero-media" href="https://github.com/jasonsuhari/gridbash/blob/main/docs/assets/gridbash-openvid-demo.mp4" aria-label="Watch the GridBash demo video">
+          <img src="assets/gridbash-openvid-demo-poster.png" width="1920" height="1080" alt="GridBash terminal grid showing multiple CLI agents and shells running side by side">
+        </a>
+      </section>
+
+      <div class="shell strip" aria-label="GridBash feature summary">
+        <div class="metric">
+          <strong>100</strong>
+          <span>PTY-backed panes in one terminal process.</span>
+        </div>
+        <div class="metric">
+          <strong>ConPTY</strong>
+          <span>Windows-native terminal IO through portable-pty.</span>
+        </div>
+        <div class="metric">
+          <strong>Agents</strong>
+          <span>Built-in profiles for Codex, Claude, Gemini, Aider, and more.</span>
+        </div>
+        <div class="metric">
+          <strong>Worktrees</strong>
+          <span>Optional isolated checkouts for parallel agent work.</span>
+        </div>
+      </div>
+
+      <section class="shell" aria-labelledby="why-title">
+        <div class="section-head">
+          <h2 id="why-title">A terminal multiplexer for AI coding agents.</h2>
+          <p>GridBash keeps agent sessions visible, lets you target prompts to selected panes, and avoids the window sprawl that comes with modern CLI-agent workflows.</p>
+        </div>
+        <div class="grid">
+          <article class="tile wide">
+            <h3>Selected-pane input</h3>
+            <p>Type into one pane, a chosen subset, or the whole grid without sending prompts where they do not belong.</p>
+          </article>
+          <article class="tile">
+            <h3>Real terminal panes</h3>
+            <p>Every pane is backed by a real Windows PTY, not a fake log viewer.</p>
+          </article>
+          <article class="tile">
+            <h3>Agent profiles</h3>
+            <p>Launch Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, Git Bash, PowerShell, cmd, or custom commands.</p>
+          </article>
+          <article class="tile wide">
+            <h3>Safer parallel work</h3>
+            <p>Use `--worktrees` to open every pane in a repo-local git worktree, so agents can explore fixes in isolated checkouts.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="shell plain" aria-labelledby="search-title">
+        <div>
+          <p class="eyebrow">Searchable project facts</p>
+          <h2 id="search-title">GridBash is open source developer tooling by Jason Suhari.</h2>
+        </div>
+        <div>
+          <p>The canonical GitHub repository is `github.com/jasonsuhari/gridbash`. The package name is `gridbash` on npm. The project is MIT licensed and built in Rust with Ratatui, Crossterm, portable-pty, and Windows ConPTY.</p>
+          <ul class="list">
+            <li>Primary query: jasonsuhari gridbash.</li>
+            <li>Use case query: CLI agent terminal grid for Windows.</li>
+            <li>Category query: AI coding agent multiplexer.</li>
+            <li>Install query: npm install gridbash.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="faq" class="shell" aria-labelledby="faq-title">
+        <div class="section-head">
+          <h2 id="faq-title">FAQ</h2>
+          <p>Short answers for search engines and developers evaluating GridBash.</p>
+        </div>
+        <div class="faq">
+          <article class="tile">
+            <h3>What is GridBash by Jason Suhari?</h3>
+            <p>GridBash is a Windows-native terminal grid for running CLI coding agents and shells side by side.</p>
+          </article>
+          <article class="tile">
+            <h3>Is GridBash Windows-only?</h3>
+            <p>Yes. The current package targets Windows x64 and uses Windows ConPTY for terminal panes.</p>
+          </article>
+          <article class="tile">
+            <h3>How do I install GridBash?</h3>
+            <p>Run `npm install -g gridbash`, then start it with `gridbash` or launch a grid such as `gridbash 2x3 --profile codex`.</p>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="shell">
+        <span>GridBash by Jason Suhari</span>
+        <span><a href="https://github.com/jasonsuhari/gridbash">github.com/jasonsuhari/gridbash</a></span>
+      </div>
+    </footer>
+  </body>
+</html>

@@ -2,9 +2,12 @@
 name = "gridbash"
 version = "0.1.5"
 edition = "2024"
-description = "A fast, beautiful terminal grid for running many CLI agents."
+description = "Windows-native terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side."
 license = "MIT"
 repository = "https://github.com/jasonsuhari/gridbash"
+homepage = "https://jasonsuhari.github.io/gridbash/"
+keywords = ["terminal", "tui", "agents", "windows", "conpty"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1.0"
