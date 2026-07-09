@@ -4,7 +4,7 @@ use std::{
     process::Command,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 
 use crate::{
     auth::AgentKind,
@@ -121,13 +121,6 @@ impl LaunchSelection {
                 ))
             })
             .collect()
-    }
-}
-
-impl LaunchFolder {
-    pub fn from_path(path: PathBuf) -> Self {
-        let name = folder_display_name(&path);
-        Self { name, path }
     }
 }
 
@@ -294,18 +287,6 @@ fn vibe_pane_spec_for_worktree(
         auth_kind: None,
         auth_dir: None,
     }
-}
-
-pub fn launch_selection_from(
-    folders: Vec<PathBuf>,
-    agents: Vec<String>,
-) -> Result<LaunchSelection> {
-    let selection = LaunchSelection::new(
-        folders.into_iter().map(LaunchFolder::from_path).collect(),
-        agents,
-    );
-    selection.validate().context("invalid launch selection")?;
-    Ok(selection)
 }
 
 fn command_basename(command: &str) -> Option<String> {
