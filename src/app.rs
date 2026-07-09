@@ -2137,45 +2137,37 @@ impl App {
     }
 
     fn focus_next(&mut self) {
-        if self.panes.is_empty() {
-            return;
-        }
-
-        for offset in 1..=self.panes.len() {
-            let candidate = (self.focus + offset) % self.panes.len();
-            if !self.sleeping.contains(&candidate) {
-                self.focus = candidate;
-                return;
-            }
+        if let Some(candidate) = wrapped_row_focus_target(
+            self.focus,
+            self.panes.len(),
+            self.layout.size().columns,
+            1,
+            &self.sleeping,
+        ) {
+            self.focus = candidate;
         }
     }
 
     fn focus_previous(&mut self) {
-        if self.panes.is_empty() {
-            return;
-        }
-
-        for offset in 1..=self.panes.len() {
-            let candidate = (self.focus + self.panes.len() - offset) % self.panes.len();
-            if !self.sleeping.contains(&candidate) {
-                self.focus = candidate;
-                return;
-            }
+        if let Some(candidate) = wrapped_row_focus_target(
+            self.focus,
+            self.panes.len(),
+            self.layout.size().columns,
+            -1,
+            &self.sleeping,
+        ) {
+            self.focus = candidate;
         }
     }
 
     fn focus_in_grid(&mut self, row_delta: isize) {
-        if self.panes.is_empty() {
-            return;
-        }
-
-        let columns = self.layout.size().columns;
-        let candidate = if row_delta.is_negative() {
-            self.focus.saturating_sub(columns)
-        } else {
-            self.focus.saturating_add(columns)
-        };
-        if candidate < self.panes.len() && !self.sleeping.contains(&candidate) {
+        if let Some(candidate) = wrapped_column_focus_target(
+            self.focus,
+            self.panes.len(),
+            self.layout.size().columns,
+            row_delta,
+            &self.sleeping,
+        ) {
             self.focus = candidate;
         }
     }
@@ -2496,6 +2488,75 @@ fn swapped_index(index: usize, first: usize, second: usize) -> usize {
     } else {
         index
     }
+}
+
+fn wrapped_row_focus_target(
+    focus: usize,
+    pane_count: usize,
+    columns: usize,
+    column_delta: isize,
+    sleeping: &BTreeSet<usize>,
+) -> Option<usize> {
+    if pane_count == 0 || columns == 0 {
+        return None;
+    }
+
+    let focus = focus.min(pane_count - 1);
+    let row_start = (focus / columns) * columns;
+    let row_end = row_start.saturating_add(columns).min(pane_count);
+    let row_len = row_end.saturating_sub(row_start);
+    if row_len == 0 {
+        return None;
+    }
+
+    let position = focus - row_start;
+    let moving_right = !column_delta.is_negative();
+    for offset in 1..=row_len {
+        let next_position = if moving_right {
+            (position + offset) % row_len
+        } else {
+            (position + row_len - offset) % row_len
+        };
+        let candidate = row_start + next_position;
+        if !sleeping.contains(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn wrapped_column_focus_target(
+    focus: usize,
+    pane_count: usize,
+    columns: usize,
+    row_delta: isize,
+    sleeping: &BTreeSet<usize>,
+) -> Option<usize> {
+    if pane_count == 0 || columns == 0 {
+        return None;
+    }
+
+    let focus = focus.min(pane_count - 1);
+    let column = focus % columns;
+    let column_indices = (column..pane_count).step_by(columns).collect::<Vec<_>>();
+    let position = column_indices.iter().position(|index| *index == focus)?;
+    let column_len = column_indices.len();
+    let moving_down = !row_delta.is_negative();
+
+    for offset in 1..=column_len {
+        let next_position = if moving_down {
+            (position + offset) % column_len
+        } else {
+            (position + column_len - offset) % column_len
+        };
+        let candidate = column_indices[next_position];
+        if !sleeping.contains(&candidate) {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 fn input_targets_for(focus: usize, selected: &BTreeSet<usize>, pane_count: usize) -> Vec<usize> {
@@ -2986,6 +3047,42 @@ mod tests {
         assert_eq!(swapped_index(0, 0, 2), 2);
         assert_eq!(swapped_index(2, 0, 2), 0);
         assert_eq!(swapped_index(4, 0, 2), 4);
+    }
+
+    #[test]
+    fn horizontal_focus_wraps_within_the_current_row() {
+        let sleeping = selected(&[]);
+
+        assert_eq!(wrapped_row_focus_target(2, 6, 3, 1, &sleeping), Some(0));
+        assert_eq!(wrapped_row_focus_target(3, 6, 3, -1, &sleeping), Some(5));
+        assert_eq!(wrapped_row_focus_target(1, 6, 3, 1, &sleeping), Some(2));
+        assert_eq!(wrapped_row_focus_target(1, 6, 3, -1, &sleeping), Some(0));
+    }
+
+    #[test]
+    fn vertical_focus_wraps_within_the_current_column() {
+        let sleeping = selected(&[]);
+
+        assert_eq!(wrapped_column_focus_target(3, 6, 3, 1, &sleeping), Some(0));
+        assert_eq!(wrapped_column_focus_target(0, 6, 3, -1, &sleeping), Some(3));
+        assert_eq!(wrapped_column_focus_target(1, 6, 3, 1, &sleeping), Some(4));
+        assert_eq!(wrapped_column_focus_target(4, 6, 3, -1, &sleeping), Some(1));
+    }
+
+    #[test]
+    fn wrapped_focus_skips_sleeping_panes() {
+        assert_eq!(
+            wrapped_row_focus_target(0, 4, 4, 1, &selected(&[1, 2])),
+            Some(3)
+        );
+        assert_eq!(
+            wrapped_column_focus_target(0, 6, 2, 1, &selected(&[2])),
+            Some(4)
+        );
+        assert_eq!(
+            wrapped_row_focus_target(0, 3, 3, 1, &selected(&[0, 1, 2])),
+            None
+        );
     }
 
     #[test]
