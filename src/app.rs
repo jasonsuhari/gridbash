@@ -18,7 +18,7 @@ use crossterm::{
 };
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, style::Color};
 use tokio::sync::mpsc;
-use vt100::Screen;
+use vt100::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 
 use crate::{
     cli::{Cli, GridMode},
@@ -1581,6 +1581,10 @@ impl App {
                 | MouseEventKind::Down(_)
                 | MouseEventKind::Up(_)
                 | MouseEventKind::Drag(_)
+                | MouseEventKind::ScrollDown
+                | MouseEventKind::ScrollLeft
+                | MouseEventKind::ScrollRight
+                | MouseEventKind::ScrollUp
         ) {
             return Ok(false);
         }
@@ -1615,6 +1619,10 @@ impl App {
 
         if !self.mouse_enabled {
             return Ok(false);
+        }
+
+        if is_mouse_scroll(mouse.kind) {
+            return self.forward_mouse_scroll(mouse);
         }
 
         match mouse.kind {
@@ -1659,6 +1667,38 @@ impl App {
         }
 
         Ok(false)
+    }
+
+    fn forward_mouse_scroll(&mut self, mouse: MouseEvent) -> Result<bool> {
+        let Some(index) = pane_at(&self.rects, mouse.column, mouse.row) else {
+            return Ok(false);
+        };
+        let Some(point) = self.clamped_pane_cell(index, mouse.column, mouse.row) else {
+            return Ok(false);
+        };
+        let Some(pane) = self.panes.get(index) else {
+            return Ok(false);
+        };
+
+        let bytes = mouse_scroll_bytes(mouse, point, pane.screen());
+        let exited = pane.exited;
+        let changed = self.focus != index || self.clear_text_selection();
+        self.focus = index;
+        if changed {
+            self.status = format!("focused pane {}", index + 1);
+        }
+
+        if exited {
+            return Ok(changed);
+        }
+
+        if let Some(bytes) = bytes
+            && let Some(pane) = self.panes.get(index)
+        {
+            pane.write(&bytes)?;
+        }
+
+        Ok(changed)
     }
 
     fn handle_previous_panes_mouse(&mut self, mouse: MouseEvent) -> bool {
@@ -2765,12 +2805,149 @@ fn function_key_sequence(number: u8) -> Option<&'static [u8]> {
     }
 }
 
+fn is_mouse_scroll(kind: MouseEventKind) -> bool {
+    matches!(
+        kind,
+        MouseEventKind::ScrollDown
+            | MouseEventKind::ScrollLeft
+            | MouseEventKind::ScrollRight
+            | MouseEventKind::ScrollUp
+    )
+}
+
+fn mouse_scroll_bytes(mouse: MouseEvent, point: CellPoint, screen: &Screen) -> Option<Vec<u8>> {
+    if screen.mouse_protocol_mode() == MouseProtocolMode::None {
+        return None;
+    }
+
+    let button = mouse_scroll_button(mouse.kind)?;
+    let button = button.saturating_add(mouse_modifier_bits(mouse.modifiers));
+    let column = point.column.saturating_add(1);
+    let row = point.row.saturating_add(1);
+
+    match screen.mouse_protocol_encoding() {
+        MouseProtocolEncoding::Sgr => Some(format!("\x1b[<{button};{column};{row}M").into_bytes()),
+        MouseProtocolEncoding::Default => default_mouse_bytes(button, column, row),
+        MouseProtocolEncoding::Utf8 => utf8_mouse_bytes(button, column, row),
+    }
+}
+
+fn mouse_scroll_button(kind: MouseEventKind) -> Option<u8> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(64),
+        MouseEventKind::ScrollDown => Some(65),
+        MouseEventKind::ScrollLeft => Some(66),
+        MouseEventKind::ScrollRight => Some(67),
+        _ => None,
+    }
+}
+
+fn mouse_modifier_bits(modifiers: KeyModifiers) -> u8 {
+    let mut bits = 0;
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        bits += 4;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        bits += 8;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        bits += 16;
+    }
+    bits
+}
+
+fn default_mouse_bytes(button: u8, column: u16, row: u16) -> Option<Vec<u8>> {
+    let values = [
+        u16::from(button).saturating_add(32),
+        column.saturating_add(32),
+        row.saturating_add(32),
+    ];
+    if values.iter().any(|value| *value > u8::MAX as u16) {
+        return None;
+    }
+
+    let mut bytes = b"\x1b[M".to_vec();
+    bytes.extend(values.map(|value| value as u8));
+    Some(bytes)
+}
+
+fn utf8_mouse_bytes(button: u8, column: u16, row: u16) -> Option<Vec<u8>> {
+    let mut bytes = b"\x1b[M".to_vec();
+    for value in [
+        u16::from(button).saturating_add(32),
+        column.saturating_add(32),
+        row.saturating_add(32),
+    ] {
+        let ch = char::from_u32(u32::from(value))?;
+        let mut buffer = [0; 4];
+        bytes.extend_from_slice(ch.encode_utf8(&mut buffer).as_bytes());
+    }
+    Some(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vt100::Parser;
 
     fn selected(indices: &[usize]) -> BTreeSet<usize> {
         indices.iter().copied().collect()
+    }
+
+    fn mouse_event(kind: MouseEventKind, modifiers: KeyModifiers) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 0,
+            row: 0,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn mouse_scroll_bytes_skip_plain_shells() {
+        let parser = Parser::new(24, 80, 100);
+
+        assert_eq!(
+            mouse_scroll_bytes(
+                mouse_event(MouseEventKind::ScrollUp, KeyModifiers::NONE),
+                CellPoint { row: 0, column: 0 },
+                parser.screen()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn mouse_scroll_bytes_use_sgr_mouse_encoding() {
+        let mut parser = Parser::new(24, 80, 100);
+        parser.process(b"\x1b[?1000h\x1b[?1006h");
+
+        assert_eq!(
+            mouse_scroll_bytes(
+                mouse_event(
+                    MouseEventKind::ScrollDown,
+                    KeyModifiers::SHIFT | KeyModifiers::CONTROL
+                ),
+                CellPoint { row: 2, column: 3 },
+                parser.screen()
+            ),
+            Some(b"\x1b[<85;4;3M".to_vec())
+        );
+    }
+
+    #[test]
+    fn mouse_scroll_bytes_use_default_mouse_encoding() {
+        let mut parser = Parser::new(24, 80, 100);
+        parser.process(b"\x1b[?1000h");
+
+        assert_eq!(
+            mouse_scroll_bytes(
+                mouse_event(MouseEventKind::ScrollUp, KeyModifiers::NONE),
+                CellPoint { row: 0, column: 0 },
+                parser.screen()
+            ),
+            Some(vec![0x1b, b'[', b'M', 96, 33, 33])
+        );
     }
 
     #[test]
