@@ -4,7 +4,7 @@ use std::{
     process::Command,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
 
 use crate::{
     auth::AgentKind,
@@ -12,18 +12,6 @@ use crate::{
     profiles::{AGENT_PROFILE_NAMES, LaunchCommand, Profile},
     worktrees::{ManagedWorktreeOptions, ensure_pane_worktrees},
 };
-
-#[derive(Debug, Clone)]
-pub struct LaunchSelection {
-    pub folders: Vec<LaunchFolder>,
-    pub agents: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct LaunchFolder {
-    pub name: String,
-    pub path: PathBuf,
-}
 
 #[derive(Debug, Clone)]
 pub struct LaunchPlan {
@@ -42,93 +30,6 @@ pub struct PaneLaunchSpec {
     pub auth_name: Option<String>,
     pub auth_kind: Option<AgentKind>,
     pub auth_dir: Option<PathBuf>,
-}
-
-impl LaunchSelection {
-    pub fn new(folders: Vec<LaunchFolder>, agents: Vec<String>) -> Self {
-        Self { folders, agents }
-    }
-
-    pub fn validate(&self) -> Result<()> {
-        if self.folders.is_empty() {
-            return Err(anyhow!("launch needs at least one folder"));
-        }
-        if self.agents.is_empty() {
-            return Err(anyhow!("launch needs at least one agent"));
-        }
-        for folder in &self.folders {
-            if !folder.path.is_dir() {
-                return Err(anyhow!("folder does not exist: {}", folder.path.display()));
-            }
-        }
-        Ok(())
-    }
-
-    pub fn launch_plan(&self, worktrees: Option<&ManagedWorktreeOptions>) -> Result<LaunchPlan> {
-        self.validate()?;
-        let panes = if let Some(options) = worktrees {
-            self.managed_worktree_panes(options)?
-        } else {
-            self.legacy_panes()
-        };
-        let grid = GridSize::from_count(panes.len());
-        Ok(LaunchPlan { panes, grid })
-    }
-
-    fn legacy_panes(&self) -> Vec<PaneLaunchSpec> {
-        self.agents
-            .iter()
-            .enumerate()
-            .map(|(index, agent)| {
-                let folder = &self.folders[index % self.folders.len()];
-                vibe_pane_spec(agent, folder)
-            })
-            .collect()
-    }
-
-    fn managed_worktree_panes(
-        &self,
-        options: &ManagedWorktreeOptions,
-    ) -> Result<Vec<PaneLaunchSpec>> {
-        let mut counts = vec![0usize; self.folders.len()];
-        for index in 0..self.agents.len() {
-            counts[index % self.folders.len()] += 1;
-        }
-
-        let worktrees_by_folder = self
-            .folders
-            .iter()
-            .zip(counts)
-            .map(|(folder, count)| ensure_pane_worktrees(&folder.path, count, options))
-            .collect::<Result<Vec<_>>>()?;
-        let mut next_by_folder = vec![0usize; self.folders.len()];
-
-        self.agents
-            .iter()
-            .enumerate()
-            .map(|(index, agent)| {
-                let folder_index = index % self.folders.len();
-                let worktree_index = next_by_folder[folder_index];
-                next_by_folder[folder_index] += 1;
-                let worktree = worktrees_by_folder[folder_index]
-                    .get(worktree_index)
-                    .ok_or_else(|| anyhow!("managed worktree missing for pane {}", index + 1))?;
-                Ok(vibe_pane_spec_for_worktree(
-                    agent,
-                    worktree.cwd.clone(),
-                    worktree.folder_name.clone(),
-                    worktree.branch_name.clone(),
-                ))
-            })
-            .collect()
-    }
-}
-
-impl LaunchFolder {
-    pub fn from_path(path: PathBuf) -> Self {
-        let name = folder_display_name(&path);
-        Self { name, path }
-    }
 }
 
 impl LaunchPlan {
@@ -263,51 +164,6 @@ fn run_git(path: &Path, args: &[&str]) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn vibe_pane_spec(agent: &str, folder: &LaunchFolder) -> PaneLaunchSpec {
-    vibe_pane_spec_for_worktree(
-        agent,
-        folder.path.clone(),
-        folder.name.clone(),
-        git_worktree_name(&folder.path).unwrap_or_default(),
-    )
-}
-
-fn vibe_pane_spec_for_worktree(
-    agent: &str,
-    cwd: PathBuf,
-    folder_name: String,
-    worktree_name: String,
-) -> PaneLaunchSpec {
-    PaneLaunchSpec {
-        profile_name: agent.to_string(),
-        command: Profile {
-            command: "vibe".into(),
-            args: vec!["run".into(), agent.into(), "--".into()],
-            title: Some(agent.into()),
-            agent_kind: None,
-        },
-        env: BTreeMap::new(),
-        cwd,
-        folder_name,
-        worktree_name: (!worktree_name.is_empty()).then_some(worktree_name),
-        auth_name: None,
-        auth_kind: None,
-        auth_dir: None,
-    }
-}
-
-pub fn launch_selection_from(
-    folders: Vec<PathBuf>,
-    agents: Vec<String>,
-) -> Result<LaunchSelection> {
-    let selection = LaunchSelection::new(
-        folders.into_iter().map(LaunchFolder::from_path).collect(),
-        agents,
-    );
-    selection.validate().context("invalid launch selection")?;
-    Ok(selection)
-}
-
 fn command_basename(command: &str) -> Option<String> {
     let path = Path::new(command);
     let file_name = path
@@ -354,47 +210,6 @@ mod tests {
     use std::env;
 
     use super::*;
-
-    #[test]
-    fn assigns_agents_round_robin_across_folders() {
-        let cwd = env::current_dir().expect("cwd");
-        let other = cwd.parent().unwrap_or(&cwd).to_path_buf();
-        let selection = LaunchSelection::new(
-            vec![
-                LaunchFolder {
-                    name: "one".into(),
-                    path: cwd,
-                },
-                LaunchFolder {
-                    name: "two".into(),
-                    path: other,
-                },
-            ],
-            vec!["claude-1".into(), "claude-2".into(), "codex-2".into()],
-        );
-
-        let plan = selection.launch_plan(None).expect("launch plan");
-        assert_eq!(plan.panes[0].folder_name, "one");
-        assert_eq!(plan.panes[1].folder_name, "two");
-        assert_eq!(plan.panes[2].folder_name, "one");
-        assert_eq!(plan.grid.count(), 4);
-    }
-
-    #[test]
-    fn builds_vibe_run_command_for_agent() {
-        let cwd = env::current_dir().expect("cwd");
-        let selection = LaunchSelection::new(
-            vec![LaunchFolder {
-                name: "repo".into(),
-                path: cwd,
-            }],
-            vec!["claude-1".into()],
-        );
-
-        let plan = selection.launch_plan(None).expect("launch plan");
-        assert_eq!(plan.panes[0].command.command, "vibe");
-        assert_eq!(plan.panes[0].command.args, vec!["run", "claude-1", "--"]);
-    }
 
     #[test]
     fn detects_vibe_agent_panes() {
