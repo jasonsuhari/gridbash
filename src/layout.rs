@@ -1,6 +1,6 @@
 use ratatui::layout::Rect;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PaneId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

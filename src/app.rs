@@ -16,7 +16,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, style::Color};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, style::Color, text::Line};
 use tokio::sync::mpsc;
 use vt100::Screen;
 
@@ -38,6 +38,7 @@ use crate::{
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const MAX_PANE_NAME_CHARS: usize = 32;
 const MAX_TAB_TITLE_CHARS: usize = 40;
 const CONVERSATION_SUMMARY_MAX_CHARS: usize = 120;
@@ -68,6 +69,7 @@ pub struct App {
     profile_usage: BTreeMap<String, String>,
     api_spend_label: Option<String>,
     last_activity_decay: Instant,
+    last_exit_poll: Instant,
 }
 
 struct GridTab {
@@ -75,6 +77,10 @@ struct GridTab {
     launch_plan: LaunchPlan,
     layout: GridLayout,
     panes: Vec<PtyPane>,
+    pane_index_by_id: BTreeMap<PaneId, usize>,
+    pane_render_caches: Vec<ui::PaneRenderCache>,
+    pane_screen_dirty: Vec<bool>,
+    pane_conversation_summaries: Vec<Option<String>>,
     focus: usize,
     selected: BTreeSet<usize>,
     pane_names: Vec<Option<String>>,
@@ -90,6 +96,10 @@ impl GridTab {
             layout: GridLayout::new(launch_plan.grid),
             launch_plan,
             panes: Vec::new(),
+            pane_index_by_id: BTreeMap::new(),
+            pane_render_caches: Vec::new(),
+            pane_screen_dirty: Vec::new(),
+            pane_conversation_summaries: Vec::new(),
             focus: 0,
             selected: BTreeSet::new(),
             pane_names: Vec::new(),
@@ -97,6 +107,87 @@ impl GridTab {
             sleeping: BTreeSet::new(),
             rects: Vec::new(),
         }
+    }
+
+    fn push_pane(&mut self, pane: PtyPane) {
+        let pane_index = self.panes.len();
+        let pane_id = pane.id();
+        self.panes.push(pane);
+        self.pane_index_by_id.insert(pane_id, pane_index);
+        self.pane_render_caches.push(ui::PaneRenderCache::default());
+        self.pane_screen_dirty.push(true);
+        self.pane_conversation_summaries.push(None);
+    }
+
+    fn replace_pane(&mut self, index: usize, pane: PtyPane) {
+        self.panes[index] = pane;
+        self.sleeping.remove(&index);
+        if let Some(cache) = self.pane_render_caches.get_mut(index) {
+            *cache = ui::PaneRenderCache::default();
+        }
+        self.mark_pane_screen_dirty(index);
+        if let Some(summary) = self.pane_conversation_summaries.get_mut(index) {
+            *summary = None;
+        }
+        self.rebuild_pane_index();
+    }
+
+    fn truncate_panes(&mut self, target_count: usize) {
+        self.panes.truncate(target_count);
+        self.pane_names.truncate(target_count);
+        self.pane_render_caches.truncate(target_count);
+        self.pane_screen_dirty.truncate(target_count);
+        self.pane_conversation_summaries.truncate(target_count);
+        self.rebuild_pane_index();
+    }
+
+    fn pane_index_for_event(&self, id: PaneId, generation: u64) -> Option<usize> {
+        let index = *self.pane_index_by_id.get(&id)?;
+        let pane = self.panes.get(index)?;
+        (pane.id() == id && pane.generation() == generation).then_some(index)
+    }
+
+    fn rebuild_pane_index(&mut self) {
+        self.pane_index_by_id.clear();
+        for (index, pane) in self.panes.iter().enumerate() {
+            self.pane_index_by_id.insert(pane.id(), index);
+        }
+    }
+
+    fn mark_pane_screen_dirty(&mut self, index: usize) {
+        if let Some(dirty) = self.pane_screen_dirty.get_mut(index) {
+            *dirty = true;
+        }
+    }
+
+    fn refresh_conversation_summary(&mut self, index: usize) {
+        let Some(summary) = self.pane_conversation_summaries.get_mut(index) else {
+            return;
+        };
+        *summary = self
+            .panes
+            .get(index)
+            .and_then(|pane| conversation_summary(pane.screen()));
+    }
+
+    fn pane_screen_lines(
+        &mut self,
+        index: usize,
+        width: u16,
+        height: u16,
+        selection: Option<PaneSelection>,
+    ) -> Vec<Line<'static>> {
+        let Some(pane) = self.panes.get(index) else {
+            return Vec::new();
+        };
+        let Some(cache) = self.pane_render_caches.get_mut(index) else {
+            return ui::screen_lines(pane.screen(), width, height, selection);
+        };
+        let Some(dirty) = self.pane_screen_dirty.get_mut(index) else {
+            return ui::screen_lines(pane.screen(), width, height, selection);
+        };
+
+        ui::cached_screen_lines(cache, dirty, pane.screen(), width, height, selection)
     }
 }
 
@@ -776,6 +867,7 @@ impl App {
             profile_usage: BTreeMap::new(),
             api_spend_label: None,
             last_activity_decay: Instant::now(),
+            last_exit_poll: Instant::now(),
         })
     }
 
@@ -809,7 +901,7 @@ impl App {
         let pane_specs = tab.launch_plan.panes.clone();
 
         for (pane_index, spec) in pane_specs.iter().enumerate() {
-            tab.panes.push(self.spawn_pane_spec(spec, pane_index)?);
+            tab.push_pane(self.spawn_pane_spec(spec, pane_index)?);
         }
         tab.pane_names = vec![None; tab.panes.len()];
         self.start_usage_monitor(&tab.launch_plan);
@@ -895,8 +987,7 @@ impl App {
                         tab.rects = draw_state.pane_rects;
                     }
                 })?;
-                self.sync_pane_sizes();
-                needs_render = false;
+                needs_render = self.sync_pane_sizes();
             }
             self.sync_mouse_capture(terminal, &mut mouse_capture_enabled)?;
 
@@ -956,6 +1047,8 @@ impl App {
 
     fn drain_pty_events(&mut self) -> bool {
         let mut changed = false;
+        let mut pending_output = BTreeMap::<(PaneId, u64), Vec<u8>>::new();
+        let mut exited = Vec::new();
 
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
@@ -964,26 +1057,51 @@ impl App {
                     generation,
                     bytes,
                 } => {
-                    if let Some(target) = self.find_pane_mut(pane, generation) {
-                        target.process_output(&bytes);
-                        changed = true;
-                    }
+                    pending_output
+                        .entry((pane, generation))
+                        .or_default()
+                        .extend(bytes);
                 }
-                PtyEvent::Exited { pane, generation } => {
-                    if let Some(target) = self.find_pane_mut(pane, generation)
-                        && !target.exited
-                    {
-                        target.exited = true;
-                        changed = true;
-                    }
-                }
+                PtyEvent::Exited { pane, generation } => exited.push((pane, generation)),
             }
         }
 
-        for tab in &mut self.tabs {
-            for pane in &mut tab.panes {
-                changed |= pane.poll_exit();
+        for ((pane_id, generation), bytes) in pending_output {
+            let Some((tab_index, pane_index)) = self.pane_location_for_event(pane_id, generation)
+            else {
+                continue;
+            };
+
+            let tab = &mut self.tabs[tab_index];
+            tab.panes[pane_index].process_output(&bytes);
+            tab.mark_pane_screen_dirty(pane_index);
+            tab.refresh_conversation_summary(pane_index);
+            changed = true;
+        }
+
+        for (pane_id, generation) in exited {
+            let Some((tab_index, pane_index)) = self.pane_location_for_event(pane_id, generation)
+            else {
+                continue;
+            };
+
+            let pane = &mut self.tabs[tab_index].panes[pane_index];
+            if !pane.exited {
+                pane.exited = true;
+                changed = true;
             }
+        }
+
+        if self.last_exit_poll.elapsed() >= EXIT_POLL_INTERVAL {
+            for tab in &mut self.tabs {
+                for index in 0..tab.panes.len() {
+                    if tab.panes[index].poll_exit() {
+                        tab.mark_pane_screen_dirty(index);
+                        changed = true;
+                    }
+                }
+            }
+            self.last_exit_poll = Instant::now();
         }
 
         changed
@@ -1603,6 +1721,10 @@ impl App {
         if first < tab.launch_plan.panes.len() && second < tab.launch_plan.panes.len() {
             tab.launch_plan.panes.swap(first, second);
         }
+        tab.pane_render_caches.swap(first, second);
+        tab.pane_screen_dirty.swap(first, second);
+        tab.pane_conversation_summaries.swap(first, second);
+        tab.rebuild_pane_index();
         swap_set_indices(&mut tab.sleeping, first, second);
         tab.focus = swapped_index(tab.focus, first, second);
         self.status = format!("swapped panes {} and {}", first + 1, second + 1);
@@ -1977,6 +2099,7 @@ impl App {
 
         tab.panes.truncate(target_count);
         tab.launch_plan.panes.truncate(target_count);
+        tab.truncate_panes(target_count);
         tab.selected = tab
             .selected
             .iter()
@@ -1986,7 +2109,6 @@ impl App {
         if tab.focus >= target_count {
             tab.focus = target_count.saturating_sub(1);
         }
-        tab.pane_names.truncate(target_count);
         tab.sleeping = tab
             .sleeping
             .iter()
@@ -2128,13 +2250,12 @@ impl App {
             };
 
             if let Some(tab) = self.active_tab_mut() {
-                tab.panes[index] = pane;
-                tab.sleeping.remove(&index);
+                tab.replace_pane(index, pane);
             }
             restarted += 1;
         }
 
-        self.sync_pane_sizes();
+        let _ = self.sync_pane_sizes();
         self.status = if restart.running > 0 {
             format!(
                 "restarted {restarted} {}; skipped {} running {}",
@@ -2311,13 +2432,17 @@ impl App {
     }
 
     pub fn pane_conversation_footer(&self, index: usize, max_chars: usize) -> Option<String> {
-        let label = self
-            .active_tab()
-            .and_then(|tab| tab.launch_plan.panes.get(index))
+        let tab = self.active_tab()?;
+        let label = tab
+            .launch_plan
+            .panes
+            .get(index)
             .and_then(|pane| pane.agent_label())?;
-        let pane = self.panes().get(index)?;
-        let summary = conversation_summary(pane.screen())
-            .unwrap_or_else(|| "waiting for conversation".into());
+        let summary = tab
+            .pane_conversation_summaries
+            .get(index)
+            .and_then(|summary| summary.as_deref())
+            .unwrap_or("waiting for conversation");
         Some(truncate_chars(&format!("{label} | {summary}"), max_chars))
     }
 
@@ -2340,27 +2465,77 @@ impl App {
         (!parts.is_empty()).then(|| parts.join(" | "))
     }
 
-    pub fn sync_pane_sizes(&mut self) {
+    pub fn pane_count(&self) -> usize {
+        self.panes().len()
+    }
+
+    pub fn pane_active(&self, index: usize) -> bool {
+        self.panes().get(index).is_some_and(|pane| pane.active)
+    }
+
+    pub fn pane_exited(&self, index: usize) -> bool {
+        self.panes().get(index).is_some_and(|pane| pane.exited)
+    }
+
+    pub fn pane_output_quiet(&self, index: usize) -> bool {
+        self.panes()
+            .get(index)
+            .is_some_and(|pane| pane.output_quiet())
+    }
+
+    pub fn pane_cwd(&self, index: usize) -> Option<&std::path::Path> {
+        self.panes().get(index).map(|pane| pane.cwd())
+    }
+
+    pub fn pane_screen(&self, index: usize) -> Option<&Screen> {
+        self.panes().get(index).map(|pane| pane.screen())
+    }
+
+    pub fn pane_screen_lines(
+        &mut self,
+        index: usize,
+        width: u16,
+        height: u16,
+        selection: Option<PaneSelection>,
+    ) -> Vec<Line<'static>> {
+        self.active_tab_mut()
+            .map(|tab| tab.pane_screen_lines(index, width, height, selection))
+            .unwrap_or_default()
+    }
+
+    pub fn sync_pane_sizes(&mut self) -> bool {
+        let mut changed = false;
         let mut resize_error = None;
         let Some(tab) = self.active_tab_mut() else {
-            return;
+            return false;
         };
 
-        for (index, rect) in tab.rects.iter().enumerate() {
+        for index in 0..tab.rects.len() {
+            let rect = tab.rects[index];
             let Some(pane) = tab.panes.get_mut(index) else {
                 continue;
             };
 
             let rows = rect.height.saturating_sub(2).max(1);
             let cols = rect.width.saturating_sub(2).max(1);
-            if let Err(error) = pane.resize(rows, cols) {
-                resize_error = Some(format!("resize failed: {error:#}"));
+            match pane.resize(rows, cols) {
+                Ok(true) => {
+                    tab.mark_pane_screen_dirty(index);
+                    tab.refresh_conversation_summary(index);
+                    changed = true;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    resize_error = Some(format!("resize failed: {error:#}"));
+                }
             }
         }
 
         if let Some(status) = resize_error {
             self.status = status;
         }
+
+        changed
     }
 
     fn sync_initial_pane_sizes(&mut self, terminal: &Tui) -> Result<()> {
@@ -2401,11 +2576,14 @@ impl App {
             .or_else(|| tab.panes.first().map(|pane| pane.cwd().to_path_buf()))
     }
 
-    fn find_pane_mut(&mut self, id: PaneId, generation: u64) -> Option<&mut PtyPane> {
+    fn pane_location_for_event(&self, id: PaneId, generation: u64) -> Option<(usize, usize)> {
         self.tabs
-            .iter_mut()
-            .flat_map(|tab| tab.panes.iter_mut())
-            .find(|pane| pane.id() == id && pane.generation() == generation)
+            .iter()
+            .enumerate()
+            .find_map(|(tab_index, tab)| {
+                tab.pane_index_for_event(id, generation)
+                    .map(|pane_index| (tab_index, pane_index))
+            })
     }
 }
 
