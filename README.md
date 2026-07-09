@@ -202,6 +202,11 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+o | Open settings |
 | Alt+q | Quit |
 
+When the focused pane has exited, GridBash shows a recovery dialog. Press `Enter`,
+`r`, or `t` to restart it, or press `z` to put it to sleep. `Alt+t` still restarts
+exited target panes directly when your terminal reports Alt shortcuts as modified
+key events.
+
 Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane.
 
 Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
