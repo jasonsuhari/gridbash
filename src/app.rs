@@ -109,6 +109,7 @@ pub struct App {
     previous_panes_button: Option<Rect>,
     previous_pane_rows: Vec<(usize, Rect)>,
     pane_settings_button: Option<Rect>,
+    pane_settings_rename_button: Option<Rect>,
     pane_settings_reload_button: Option<Rect>,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
@@ -1608,6 +1609,7 @@ impl App {
             previous_panes_button: None,
             previous_pane_rows: Vec::new(),
             pane_settings_button: None,
+            pane_settings_rename_button: None,
             pane_settings_reload_button: None,
             event_tx,
             event_rx,
@@ -1874,6 +1876,7 @@ impl App {
                     self.previous_panes_button = draw_state.previous_panes_button;
                     self.previous_pane_rows = draw_state.previous_pane_rows;
                     self.pane_settings_button = draw_state.pane_settings_button;
+                    self.pane_settings_rename_button = draw_state.pane_settings_rename_button;
                     self.pane_settings_reload_button = draw_state.pane_settings_reload_button;
                 })?;
                 self.sync_pane_sizes();
@@ -2952,6 +2955,15 @@ impl App {
         }
 
         let pane_index = self.focus.min(self.panes.len() - 1);
+        self.begin_rename_for(pane_index);
+    }
+
+    fn begin_rename_for(&mut self, pane_index: usize) {
+        if pane_index >= self.panes.len() {
+            self.status = format!("pane {} is no longer available", pane_index + 1);
+            return;
+        }
+
         let current_name = self
             .pane_names
             .get(pane_index)
@@ -3004,6 +3016,10 @@ impl App {
             self.pane_settings.close();
             self.settings.open = true;
             self.status = "settings open".into();
+            return KeyOutcome::Render;
+        }
+        if pane_settings_rename_requested(&key) {
+            self.begin_rename_for(self.pane_settings.pane_index);
             return KeyOutcome::Render;
         }
 
@@ -3795,6 +3811,10 @@ impl App {
             self.reload_pane_history();
             return true;
         }
+        if self.pane_settings_rename_button_at(mouse.column, mouse.row) {
+            self.begin_rename_for(self.pane_settings.pane_index);
+            return true;
+        }
 
         false
     }
@@ -3817,6 +3837,11 @@ impl App {
 
     fn pane_settings_reload_button_at(&self, x: u16, y: u16) -> bool {
         self.pane_settings_reload_button
+            .is_some_and(|rect| rect_contains(rect, x, y))
+    }
+
+    fn pane_settings_rename_button_at(&self, x: u16, y: u16) -> bool {
+        self.pane_settings_rename_button
             .is_some_and(|rect| rect_contains(rect, x, y))
     }
 
@@ -5754,6 +5779,12 @@ fn render_if_selection_cleared(outcome: KeyOutcome, selection_cleared: bool) -> 
     }
 }
 
+fn pane_settings_rename_requested(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('n') | KeyCode::Char('N'))
+        || (key.modifiers.contains(KeyModifiers::ALT)
+            && matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R')))
+}
+
 fn pane_inner_rect(rect: Rect) -> Option<Rect> {
     let width = rect.width.checked_sub(2)?;
     let height = rect.height.checked_sub(2)?;
@@ -6347,6 +6378,22 @@ mod tests {
 
         rename.delete();
         assert_eq!(rename.value, "ab");
+    }
+
+    #[test]
+    fn pane_settings_rename_keys_do_not_replace_plain_reload_key() {
+        assert!(pane_settings_rename_requested(&KeyEvent::new(
+            KeyCode::Char('n'),
+            KeyModifiers::NONE,
+        )));
+        assert!(pane_settings_rename_requested(&KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::ALT,
+        )));
+        assert!(!pane_settings_rename_requested(&KeyEvent::new(
+            KeyCode::Char('r'),
+            KeyModifiers::NONE,
+        )));
     }
 
     #[test]
