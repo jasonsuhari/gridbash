@@ -1,8 +1,9 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
+    ffi::OsString,
     io::{self, Stdout, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::mpsc as std_mpsc,
     thread,
@@ -56,6 +57,7 @@ const TODO_INPUT_LIMIT: usize = 240;
 const MIN_TODO_IDLE_SECONDS: u64 = 15;
 const MAX_TODO_IDLE_SECONDS: u64 = 600;
 const TODO_IDLE_STEP_SECONDS: u64 = 15;
+const COMMAND_OUTPUT_MAX_LINES: usize = 2000;
 const ACTIVITY_DECAY_INTERVAL: Duration = Duration::from_millis(250);
 const OUTPUT_QUIET_AFTER: Duration = Duration::from_secs(3);
 
@@ -79,6 +81,9 @@ pub struct App {
     prompt: Option<PromptState>,
     rects: Vec<Rect>,
     mouse_enabled: bool,
+    command_line: CommandLineState,
+    command_tx: mpsc::UnboundedSender<CommandRunEvent>,
+    command_rx: mpsc::UnboundedReceiver<CommandRunEvent>,
     control_handle: Option<ControlHandle>,
     control_rx: Option<std_mpsc::Receiver<ControlEnvelope>>,
     image_overlay: Option<ImagePreview>,
@@ -114,6 +119,7 @@ struct AppInit {
     launch_plan: Option<LaunchPlan>,
     grid: GridSize,
     mouse_enabled: bool,
+    command_cwd: PathBuf,
     control_handle: Option<ControlHandle>,
     control_rx: Option<std_mpsc::Receiver<ControlEnvelope>>,
     settings: SettingsState,
@@ -722,6 +728,143 @@ struct SettingsState {
     palette: GridPalette,
 }
 
+#[derive(Debug, Clone)]
+struct CommandLineState {
+    focused: bool,
+    cwd: PathBuf,
+    input: String,
+    cursor: usize,
+    output_lines: Vec<String>,
+    output_expanded: bool,
+    running: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CommandRunEvent {
+    command: String,
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+    error: Option<String>,
+}
+
+impl CommandLineState {
+    fn new(cwd: PathBuf) -> Self {
+        Self {
+            focused: false,
+            cwd,
+            input: String::new(),
+            cursor: 0,
+            output_lines: Vec::new(),
+            output_expanded: false,
+            running: false,
+        }
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        for ch in text.chars() {
+            if matches!(ch, '\r' | '\n') {
+                self.insert_char(' ');
+            } else if !ch.is_control() {
+                self.insert_char(ch);
+            }
+        }
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        self.input.insert(self.cursor, ch);
+        self.cursor += ch.len_utf8();
+    }
+
+    fn backspace(&mut self) -> bool {
+        let Some(previous) = previous_char_boundary(&self.input, self.cursor) else {
+            return false;
+        };
+        self.input.replace_range(previous..self.cursor, "");
+        self.cursor = previous;
+        true
+    }
+
+    fn delete(&mut self) -> bool {
+        if self.cursor >= self.input.len() {
+            return false;
+        }
+        let next = next_char_boundary(&self.input, self.cursor);
+        self.input.replace_range(self.cursor..next, "");
+        true
+    }
+
+    fn move_left(&mut self) -> bool {
+        let Some(previous) = previous_char_boundary(&self.input, self.cursor) else {
+            return false;
+        };
+        self.cursor = previous;
+        true
+    }
+
+    fn move_right(&mut self) -> bool {
+        if self.cursor >= self.input.len() {
+            return false;
+        }
+        self.cursor = next_char_boundary(&self.input, self.cursor);
+        true
+    }
+
+    fn move_home(&mut self) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        self.cursor = 0;
+        true
+    }
+
+    fn move_end(&mut self) -> bool {
+        if self.cursor == self.input.len() {
+            return false;
+        }
+        self.cursor = self.input.len();
+        true
+    }
+
+    fn clear_input(&mut self) -> bool {
+        if self.input.is_empty() {
+            return false;
+        }
+        self.input.clear();
+        self.cursor = 0;
+        true
+    }
+
+    fn take_submission(&mut self) -> Option<String> {
+        let command = self.input.trim().to_string();
+        self.input.clear();
+        self.cursor = 0;
+        (!command.is_empty()).then_some(command)
+    }
+
+    fn cursor_chars(&self) -> usize {
+        self.input[..self.cursor].chars().count()
+    }
+
+    fn push_output_line(&mut self, line: impl Into<String>) {
+        self.output_lines.push(line.into());
+        if self.output_lines.len() > COMMAND_OUTPUT_MAX_LINES {
+            let excess = self.output_lines.len() - COMMAND_OUTPUT_MAX_LINES;
+            self.output_lines.drain(0..excess);
+        }
+    }
+
+    fn push_output_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
+        for line in text.replace("\r\n", "\n").replace('\r', "\n").lines() {
+            self.push_output_line(line.to_string());
+        }
+    }
+}
+
 impl Default for SettingsState {
     fn default() -> Self {
         Self {
@@ -1197,16 +1340,17 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+c command | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
             .into()
     } else {
-        "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        "Alt+arrows move | Alt+Shift+arrows resize | Alt+s select | Alt+c command | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
             .into()
     }
 }
 
 impl App {
     pub fn new(cli: Cli, config: Config) -> Result<Self> {
+        let startup_cwd = resolved_current_dir()?;
         let worktrees = cli
             .worktrees
             .then(|| ManagedWorktreeOptions::new(cli.worktree_prefix.clone()))
@@ -1253,6 +1397,7 @@ impl App {
             launch_plan,
             grid,
             mouse_enabled,
+            command_cwd: startup_cwd,
             control_handle,
             control_rx,
             settings,
@@ -1271,6 +1416,11 @@ impl App {
         let recorder = SessionRecorder::continue_record(record);
         let manager_profile_name = config.defaults.manager_profile.clone();
         let settings = SettingsState::from_config(&config);
+        let command_cwd = launch_plan
+            .panes
+            .first()
+            .map(|pane| pane.cwd.clone())
+            .unwrap_or(resolved_current_dir()?);
 
         Ok(Self::from_parts(AppInit {
             config,
@@ -1280,6 +1430,7 @@ impl App {
             launch_plan: Some(launch_plan),
             grid,
             mouse_enabled,
+            command_cwd,
             control_handle: None,
             control_rx: None,
             settings,
@@ -1292,6 +1443,7 @@ impl App {
     fn from_parts(init: AppInit) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (usage_tx, usage_rx) = std_mpsc::channel();
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
 
         Self {
             config: init.config,
@@ -1313,6 +1465,9 @@ impl App {
             prompt: None,
             rects: Vec::new(),
             mouse_enabled: init.mouse_enabled,
+            command_line: CommandLineState::new(init.command_cwd),
+            command_tx,
+            command_rx,
             control_handle: init.control_handle,
             control_rx: init.control_rx,
             image_overlay: None,
@@ -1472,6 +1627,7 @@ impl App {
             needs_render |= self.drain_pty_events();
             needs_render |= self.drain_usage_events();
             needs_render |= self.drain_auth_refresh();
+            needs_render |= self.drain_command_events();
             needs_render |= self.drain_control_events();
             needs_render |= self.decay_activity();
             needs_render |= self.update_follow_up_prompt();
@@ -1531,7 +1687,12 @@ impl App {
                             && self.follow_up.is_none()
                             && self.prompt.is_none() =>
                     {
-                        self.route_input(text.as_bytes())?;
+                        if self.command_line.focused {
+                            self.command_line.insert_text(&text);
+                            needs_render = true;
+                        } else {
+                            self.route_input(text.as_bytes())?;
+                        }
                     }
                     Event::Mouse(mouse)
                         if (self.mouse_enabled || !self.sleeping.is_empty())
@@ -1814,6 +1975,44 @@ impl App {
         changed
     }
 
+    fn drain_command_events(&mut self) -> bool {
+        let mut changed = false;
+
+        while let Ok(event) = self.command_rx.try_recv() {
+            self.command_line.running = false;
+
+            if let Some(error) = event.error {
+                self.command_line
+                    .push_output_line(format!("error: {error}"));
+                self.status = format!("command failed: {error}");
+                changed = true;
+                continue;
+            }
+
+            self.command_line.push_output_text(&event.stdout);
+            if !event.stderr.is_empty() {
+                self.command_line.push_output_text(&event.stderr);
+            }
+
+            match event.exit_code {
+                Some(0) => {
+                    self.status = format!("command done: {}", event.command);
+                }
+                Some(code) => {
+                    self.command_line.push_output_line(format!("[exit {code}]"));
+                    self.status = format!("command exited {code}: {}", event.command);
+                }
+                None => {
+                    self.command_line.push_output_line("[terminated]");
+                    self.status = format!("command terminated: {}", event.command);
+                }
+            }
+            changed = true;
+        }
+
+        changed
+    }
+
     fn drain_control_events(&mut self) -> bool {
         let mut changed = false;
 
@@ -2007,6 +2206,14 @@ impl App {
             });
         }
 
+        if self.command_line.focused {
+            return Ok(if self.handle_command_key(key)? {
+                KeyOutcome::Render
+            } else {
+                KeyOutcome::Continue
+            });
+        }
+
         if self.exited_recovery_view().is_some()
             && let Some(outcome) = self.handle_exited_recovery_key(key)
         {
@@ -2065,22 +2272,22 @@ impl App {
             }
             KeyCode::Left => {
                 self.focus_previous();
-                self.status = format!("focused pane {}", self.focus + 1);
+                self.status = self.focus_status();
                 Ok(Some(false))
             }
             KeyCode::Right => {
                 self.focus_next();
-                self.status = format!("focused pane {}", self.focus + 1);
+                self.status = self.focus_status();
                 Ok(Some(false))
             }
             KeyCode::Up => {
                 self.focus_in_grid(-1);
-                self.status = format!("focused pane {}", self.focus + 1);
+                self.status = self.focus_status();
                 Ok(Some(false))
             }
             KeyCode::Down => {
                 self.focus_in_grid(1);
-                self.status = format!("focused pane {}", self.focus + 1);
+                self.status = self.focus_status();
                 Ok(Some(false))
             }
             _ => Ok(None),
@@ -2092,7 +2299,11 @@ impl App {
         match lower {
             'q' => Ok(Some(true)),
             's' => {
-                self.toggle_pane_selection(self.focus);
+                if self.command_line.focused {
+                    self.status = "command line focused".into();
+                } else {
+                    self.toggle_pane_selection(self.focus);
+                }
                 Ok(Some(false))
             }
             'a' => {
@@ -2114,6 +2325,20 @@ impl App {
             }
             'x' => {
                 self.swap_selected_tiles();
+                Ok(Some(false))
+            }
+            'c' => {
+                self.command_line.focused = !self.command_line.focused;
+                self.status = self.focus_status();
+                Ok(Some(false))
+            }
+            'e' => {
+                self.command_line.output_expanded = !self.command_line.output_expanded;
+                self.status = if self.command_line.output_expanded {
+                    "command output expanded".into()
+                } else {
+                    "command output hidden".into()
+                };
                 Ok(Some(false))
             }
             'g' => {
@@ -3492,6 +3717,102 @@ impl App {
         }
     }
 
+    fn handle_command_key(&mut self, key: KeyEvent) -> Result<bool> {
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            return Ok(false);
+        }
+
+        let changed = match key.code {
+            KeyCode::Enter => {
+                self.submit_command_line()?;
+                true
+            }
+            KeyCode::Backspace => self.command_line.backspace(),
+            KeyCode::Delete => self.command_line.delete(),
+            KeyCode::Left => self.command_line.move_left(),
+            KeyCode::Right => self.command_line.move_right(),
+            KeyCode::Home => self.command_line.move_home(),
+            KeyCode::End => self.command_line.move_end(),
+            KeyCode::Esc => self.command_line.clear_input(),
+            KeyCode::Char(ch) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                match ch.to_ascii_lowercase() {
+                    'a' => self.command_line.move_home(),
+                    'e' => self.command_line.move_end(),
+                    'u' => self.command_line.clear_input(),
+                    _ => false,
+                }
+            }
+            KeyCode::Char(ch) => {
+                self.command_line.insert_char(ch);
+                true
+            }
+            _ => false,
+        };
+
+        Ok(changed)
+    }
+
+    fn submit_command_line(&mut self) -> Result<()> {
+        if self.command_line.running {
+            self.status = "command still running".into();
+            return Ok(());
+        }
+
+        let Some(command) = self.command_line.take_submission() else {
+            return Ok(());
+        };
+
+        self.command_line.push_output_line(format!("> {command}"));
+        if self.handle_builtin_command(&command) {
+            return Ok(());
+        }
+
+        self.command_line.running = true;
+        self.status = format!("running: {command}");
+        spawn_hidden_command(
+            command,
+            self.command_line.cwd.clone(),
+            self.command_tx.clone(),
+        );
+        Ok(())
+    }
+
+    fn handle_builtin_command(&mut self, command: &str) -> bool {
+        if let Some(target) = parse_cd_target(command) {
+            match resolve_cd_target(&self.command_line.cwd, target.as_deref()) {
+                Ok(Some(cwd)) => {
+                    self.command_line.cwd = cwd;
+                    self.status = format!("cwd: {}", self.command_line.cwd.display());
+                }
+                Ok(None) => {
+                    self.command_line
+                        .push_output_line(self.command_line.cwd.display().to_string());
+                    self.status = format!("cwd: {}", self.command_line.cwd.display());
+                }
+                Err(error) => {
+                    self.command_line.push_output_line(format!("cd: {error:#}"));
+                    self.status = format!("cd failed: {error:#}");
+                }
+            }
+            return true;
+        }
+
+        match command.trim().to_ascii_lowercase().as_str() {
+            "pwd" => {
+                self.command_line
+                    .push_output_line(self.command_line.cwd.display().to_string());
+                self.status = format!("cwd: {}", self.command_line.cwd.display());
+                true
+            }
+            "clear" | "cls" => {
+                self.command_line.output_lines.clear();
+                self.status = "command output cleared".into();
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn apply_settings_change(&mut self, change: SettingsChange) {
         if change.save_todos() {
             self.save_todo_settings();
@@ -3791,6 +4112,16 @@ impl App {
     }
 
     fn focus_next(&mut self) {
+        if self.command_line.focused {
+            if let Some(candidate) =
+                (0..self.panes.len()).find(|index| !self.sleeping.contains(index))
+            {
+                self.command_line.focused = false;
+                self.focus = candidate;
+            }
+            return;
+        }
+
         if let Some(candidate) = wrapped_row_focus_target(
             self.focus,
             self.panes.len(),
@@ -3803,6 +4134,17 @@ impl App {
     }
 
     fn focus_previous(&mut self) {
+        if self.command_line.focused {
+            if let Some(candidate) = (0..self.panes.len())
+                .rev()
+                .find(|index| !self.sleeping.contains(index))
+            {
+                self.command_line.focused = false;
+                self.focus = candidate;
+            }
+            return;
+        }
+
         if let Some(candidate) = wrapped_row_focus_target(
             self.focus,
             self.panes.len(),
@@ -3815,6 +4157,18 @@ impl App {
     }
 
     fn focus_in_grid(&mut self, row_delta: isize) {
+        if self.command_line.focused {
+            if row_delta.is_negative()
+                && let Some(candidate) = (0..self.panes.len())
+                    .rev()
+                    .find(|index| !self.sleeping.contains(index))
+            {
+                self.command_line.focused = false;
+                self.focus = candidate;
+            }
+            return;
+        }
+
         if let Some(candidate) = wrapped_column_focus_target(
             self.focus,
             self.panes.len(),
@@ -3823,6 +4177,14 @@ impl App {
             &self.sleeping,
         ) {
             self.focus = candidate;
+        }
+    }
+
+    fn focus_status(&self) -> String {
+        if self.command_line.focused {
+            "focused command line".into()
+        } else {
+            format!("focused pane {}", self.focus + 1)
         }
     }
 
@@ -3844,8 +4206,8 @@ impl App {
         &self.panes
     }
 
-    pub fn focus(&self) -> usize {
-        self.focus
+    pub fn focused_pane(&self) -> Option<usize> {
+        (!self.command_line.focused).then_some(self.focus)
     }
 
     pub fn selected(&self) -> &BTreeSet<usize> {
@@ -4063,6 +4425,44 @@ impl App {
         })
     }
 
+    pub fn command_focused(&self) -> bool {
+        self.command_line.focused
+    }
+
+    pub fn command_cwd(&self) -> &Path {
+        &self.command_line.cwd
+    }
+
+    pub fn command_input(&self) -> &str {
+        &self.command_line.input
+    }
+
+    pub fn command_cursor_chars(&self) -> usize {
+        self.command_line.cursor_chars()
+    }
+
+    pub fn command_output_expanded(&self) -> bool {
+        self.command_line.output_expanded
+    }
+
+    pub fn command_output_lines(&self) -> &[String] {
+        &self.command_line.output_lines
+    }
+
+    pub fn command_running(&self) -> bool {
+        self.command_line.running
+    }
+
+    pub fn input_scope_label(&self) -> &'static str {
+        if self.command_line.focused {
+            "command line"
+        } else if self.selected.len() > 1 {
+            "selected panes"
+        } else {
+            "focused pane"
+        }
+    }
+
     pub fn pane_folder(&self, index: usize) -> Option<&str> {
         self.launch_plan
             .as_ref()
@@ -4154,7 +4554,7 @@ impl App {
 
     fn sync_initial_pane_sizes(&mut self, terminal: &Tui) -> Result<()> {
         let size = terminal.size().context("failed to read terminal size")?;
-        self.grid_area = Rect::new(0, 0, size.width, size.height.saturating_sub(1));
+        self.grid_area = Rect::new(0, 0, size.width, size.height.saturating_sub(2));
         self.rects = self.pane_rects(self.grid_area);
         self.sync_pane_sizes();
         Ok(())
@@ -4474,6 +4874,155 @@ fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) -> bool {
         selected.insert(index);
         true
     }
+}
+
+fn spawn_hidden_command(
+    command: String,
+    cwd: PathBuf,
+    event_tx: mpsc::UnboundedSender<CommandRunEvent>,
+) {
+    thread::spawn(move || {
+        let event = match run_shell_command(&command, &cwd) {
+            Ok(output) => CommandRunEvent {
+                command,
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                exit_code: output.status.code(),
+                error: None,
+            },
+            Err(error) => CommandRunEvent {
+                command,
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                error: Some(format!("{error:#}")),
+            },
+        };
+        let _ = event_tx.send(event);
+    });
+}
+
+fn run_shell_command(command: &str, cwd: &Path) -> io::Result<std::process::Output> {
+    let mut shell = if cfg!(windows) {
+        let mut shell =
+            Command::new(env::var_os("COMSPEC").unwrap_or_else(|| OsString::from("cmd.exe")));
+        shell.arg("/C").arg(command);
+        shell
+    } else {
+        let mut shell = Command::new(env::var_os("SHELL").unwrap_or_else(|| OsString::from("sh")));
+        shell.arg("-c").arg(command);
+        shell
+    };
+
+    shell.current_dir(cwd).output()
+}
+
+fn parse_cd_target(command: &str) -> Option<Option<String>> {
+    let trimmed = command.trim();
+    let lower = trimmed.to_ascii_lowercase();
+
+    if matches!(lower.as_str(), "cd" | "chdir") {
+        return Some(None);
+    }
+    if lower == "cd.." {
+        return Some(Some("..".into()));
+    }
+    if lower.starts_with("cd ") {
+        return Some(Some(normalize_cd_target(&trimmed[2..])));
+    }
+    if lower.starts_with("chdir ") {
+        return Some(Some(normalize_cd_target(&trimmed[5..])));
+    }
+
+    None
+}
+
+fn normalize_cd_target(raw: &str) -> String {
+    let mut value = raw.trim();
+    if value
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("/d "))
+    {
+        value = value[3..].trim();
+    }
+    trim_matching_quotes(value).to_string()
+}
+
+fn trim_matching_quotes(value: &str) -> &str {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if matches!(
+            (bytes[0], bytes[value.len() - 1]),
+            (b'"', b'"') | (b'\'', b'\'')
+        ) {
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+
+fn resolve_cd_target(current: &Path, target: Option<&str>) -> Result<Option<PathBuf>> {
+    let Some(target) = target.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let path = if target == "~" {
+        home_dir().ok_or_else(|| anyhow!("home directory is not available"))?
+    } else if let Some(rest) = target
+        .strip_prefix("~/")
+        .or_else(|| target.strip_prefix("~\\"))
+    {
+        home_dir()
+            .ok_or_else(|| anyhow!("home directory is not available"))?
+            .join(rest)
+    } else {
+        let path = PathBuf::from(target);
+        if path.is_absolute() {
+            path
+        } else {
+            current.join(path)
+        }
+    };
+
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("directory not found: {}", path.display()))?;
+    if !canonical.is_dir() {
+        return Err(anyhow!("not a directory: {}", canonical.display()));
+    }
+    Ok(Some(canonical))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    env::var_os("USERPROFILE")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let drive = env::var_os("HOMEDRIVE")?;
+            let path = env::var_os("HOMEPATH")?;
+            let mut home = PathBuf::from(drive);
+            home.push(path);
+            Some(home)
+        })
+        .or_else(|| env::var_os("HOME").map(PathBuf::from))
+}
+
+fn previous_char_boundary(value: &str, cursor: usize) -> Option<usize> {
+    if cursor == 0 {
+        return None;
+    }
+    value[..cursor]
+        .char_indices()
+        .last()
+        .map(|(index, _)| index)
+}
+
+fn next_char_boundary(value: &str, cursor: usize) -> usize {
+    value[cursor..]
+        .char_indices()
+        .nth(1)
+        .map(|(offset, _)| cursor + offset)
+        .unwrap_or(value.len())
 }
 
 fn selected_swap_pair(selected: &BTreeSet<usize>) -> SwapSelection {
@@ -5300,6 +5849,30 @@ mod tests {
         assert_eq!(plan.panes[0].auth_name.as_deref(), Some("codex-2"));
         assert_eq!(plan.panes[0].auth_kind, Some(AgentKind::Codex));
         assert_eq!(plan.panes[0].auth_dir.as_deref(), Some(codex_dir.as_path()));
+    }
+
+    #[test]
+    fn command_line_edits_at_cursor() {
+        let mut command = CommandLineState::new(PathBuf::from("C:\\repo"));
+        command.insert_text("abc");
+        assert!(command.move_left());
+        command.insert_char('X');
+
+        assert_eq!(command.input, "abXc");
+        assert_eq!(command.cursor_chars(), 3);
+        assert!(command.backspace());
+        assert_eq!(command.input, "abc");
+    }
+
+    #[test]
+    fn parses_cd_commands_without_treating_other_commands_as_cd() {
+        assert_eq!(parse_cd_target("cd"), Some(None));
+        assert_eq!(parse_cd_target("cd.."), Some(Some("..".into())));
+        assert_eq!(
+            parse_cd_target("cd /d \"C:\\Users\\Jason\""),
+            Some(Some("C:\\Users\\Jason".into()))
+        );
+        assert_eq!(parse_cd_target("cargo test"), None);
     }
 
     #[test]
