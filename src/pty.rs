@@ -187,6 +187,17 @@ impl PtyPane {
         self.parser.screen()
     }
 
+    pub fn scroll_view(&mut self, rows: isize) -> bool {
+        scroll_screen(self.parser.screen_mut(), rows)
+    }
+
+    pub fn reset_view(&mut self) -> bool {
+        let screen = self.parser.screen_mut();
+        let changed = screen.scrollback() > 0;
+        screen.set_scrollback(0);
+        changed
+    }
+
     pub fn process_output(&mut self, bytes: &[u8]) {
         self.update_cwd_from_osc7(bytes);
         self.parser.process(bytes);
@@ -340,6 +351,17 @@ impl PtyPane {
         self.output_tail.push_str(&plain);
         trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
     }
+}
+
+fn scroll_screen(screen: &mut Screen, rows: isize) -> bool {
+    let before = screen.scrollback();
+    let next = if rows.is_negative() {
+        before.saturating_sub(rows.unsigned_abs())
+    } else {
+        before.saturating_add(rows as usize)
+    };
+    screen.set_scrollback(next);
+    screen.scrollback() != before
 }
 
 impl Drop for PtyPane {
@@ -871,6 +893,24 @@ mod tests {
 
         activity.record_output(start + quiet_after + Duration::from_secs(2));
         assert!(!activity.is_quiet());
+    }
+
+    #[test]
+    fn scroll_screen_moves_through_scrollback_and_back_to_live_output() {
+        let mut parser = Parser::new(3, 20, 100);
+        let mut other_parser = Parser::new(3, 20, 100);
+        parser.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        other_parser.process(b"alpha\r\nbeta\r\ngamma\r\ndelta");
+
+        assert_eq!(parser.screen().scrollback(), 0);
+        assert!(scroll_screen(parser.screen_mut(), 3));
+        assert!(parser.screen().scrollback() > 0);
+        assert!(parser.screen().contents().contains("one"));
+        assert_eq!(other_parser.screen().scrollback(), 0);
+
+        assert!(scroll_screen(parser.screen_mut(), -3));
+        assert_eq!(parser.screen().scrollback(), 0);
+        assert!(parser.screen().contents().contains("five"));
     }
 
     #[test]

@@ -64,6 +64,7 @@ const TODO_IDLE_STEP_SECONDS: u64 = 15;
 const COMMAND_OUTPUT_MAX_LINES: usize = 2000;
 const ACTIVITY_DECAY_INTERVAL: Duration = Duration::from_millis(250);
 const OUTPUT_QUIET_AFTER: Duration = Duration::from_secs(3);
+const PANE_SCROLL_ROWS: isize = 3;
 
 pub struct App {
     config: Config,
@@ -3954,20 +3955,35 @@ impl App {
 
         let bytes = mouse_scroll_bytes(mouse, point, pane.screen());
         let exited = pane.exited;
-        let changed = self.focus != index || self.clear_text_selection();
+        let mut changed = self.focus != index || self.clear_text_selection();
         self.focus = index;
-        if changed {
-            self.status = format!("focused pane {}", index + 1);
-        }
-
-        if exited {
-            return Ok(changed);
-        }
 
         if let Some(bytes) = bytes
+            && !exited
             && let Some(pane) = self.panes.get(index)
         {
             pane.write(&bytes)?;
+            if changed {
+                self.status = format!("focused pane {}", index + 1);
+            }
+            return Ok(changed);
+        }
+
+        if let Some(rows) = pane_scroll_rows(mouse.kind)
+            && let Some(pane) = self.panes.get_mut(index)
+        {
+            changed |= pane.scroll_view(rows);
+            self.status = if pane.screen().scrollback() == 0 {
+                format!("pane {} at live output", index + 1)
+            } else {
+                format!(
+                    "pane {} scrollback: {} rows",
+                    index + 1,
+                    pane.screen().scrollback()
+                )
+            };
+        } else if changed {
+            self.status = format!("focused pane {}", index + 1);
         }
 
         Ok(changed)
@@ -4716,6 +4732,7 @@ impl App {
 
     fn route_input_to_targets(&mut self, bytes: &[u8], targets: Vec<usize>) -> Result<bool> {
         let mut skipped_exited = 0;
+        let mut changed = false;
 
         for index in targets {
             let pane = self
@@ -4726,6 +4743,7 @@ impl App {
                 skipped_exited += 1;
                 continue;
             }
+            changed |= pane.reset_view();
             pane.record_input(bytes);
             pane.write(bytes)
                 .with_context(|| format!("failed to route input to pane {}", index + 1))?;
@@ -4744,7 +4762,7 @@ impl App {
             return Ok(true);
         }
 
-        Ok(false)
+        Ok(changed)
     }
 
     fn input_targets(&self) -> Vec<usize> {
@@ -6363,6 +6381,14 @@ fn is_mouse_scroll(kind: MouseEventKind) -> bool {
     )
 }
 
+fn pane_scroll_rows(kind: MouseEventKind) -> Option<isize> {
+    match kind {
+        MouseEventKind::ScrollUp => Some(PANE_SCROLL_ROWS),
+        MouseEventKind::ScrollDown => Some(-PANE_SCROLL_ROWS),
+        _ => None,
+    }
+}
+
 fn mouse_scroll_bytes(mouse: MouseEvent, point: CellPoint, screen: &Screen) -> Option<Vec<u8>> {
     if screen.mouse_protocol_mode() == MouseProtocolMode::None {
         return None;
@@ -6491,6 +6517,19 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn plain_pane_scroll_uses_vertical_wheel_steps() {
+        assert_eq!(
+            pane_scroll_rows(MouseEventKind::ScrollUp),
+            Some(PANE_SCROLL_ROWS)
+        );
+        assert_eq!(
+            pane_scroll_rows(MouseEventKind::ScrollDown),
+            Some(-PANE_SCROLL_ROWS)
+        );
+        assert_eq!(pane_scroll_rows(MouseEventKind::ScrollLeft), None);
     }
 
     #[test]
