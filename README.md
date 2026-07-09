@@ -38,6 +38,12 @@ Watch the OpenVid-style demo: [`docs/assets/gridbash-openvid-demo.mp4`](docs/ass
 
 The source scene and OpenVid recreation recipe are in [`docs/demo/openvid-gridbash-demo.md`](docs/demo/openvid-gridbash-demo.md).
 
+## Demo
+
+Watch the OpenVid-style demo: [`docs/assets/gridbash-openvid-demo.mp4`](docs/assets/gridbash-openvid-demo.mp4).
+
+The source scene and OpenVid recreation recipe are in [`docs/demo/openvid-gridbash-demo.md`](docs/demo/openvid-gridbash-demo.md).
+
 ## Install With npm
 
 From this repo:
