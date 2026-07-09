@@ -26,6 +26,8 @@ pub struct Config {
 pub struct Defaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manager_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,7 +103,7 @@ impl Config {
 
 impl Defaults {
     fn is_empty(&self) -> bool {
-        self.profile.is_none()
+        self.profile.is_none() && self.manager_profile.is_none()
     }
 }
 
@@ -173,6 +175,19 @@ mod tests {
         assert_eq!(config.auth.defaults.claude.as_deref(), Some("claude-1"));
         assert_eq!(config.auth.defaults.codex.as_deref(), Some("codex-2"));
         assert_eq!(config.auth.usage_status, Some(true));
+    }
+
+    #[test]
+    fn parses_manager_profile_default() {
+        let config: Config = toml::from_str(
+            r#"
+            [defaults]
+            manager_profile = "claude-1"
+            "#,
+        )
+        .expect("parse config");
+
+        assert_eq!(config.defaults.manager_profile.as_deref(), Some("claude-1"));
     }
 
     #[test]

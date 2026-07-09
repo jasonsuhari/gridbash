@@ -1,5 +1,6 @@
 [defaults]
 profile = "git-bash"
+manager_profile = "claude-1"
 
 [todos]
 idle_seconds = 90

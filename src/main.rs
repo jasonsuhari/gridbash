@@ -7,6 +7,7 @@ mod control;
 mod image_preview;
 mod layout;
 mod onboarding;
+mod orchestrator;
 mod profiles;
 mod pty;
 mod setup;

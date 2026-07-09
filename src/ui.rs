@@ -10,9 +10,9 @@ use vt100::Cell;
 
 use crate::{
     app::{
-        App, ExitedPaneRecoveryView, FollowUpDialog, GridPalette, PaneSelection, PreviousPaneView,
-        PreviousPanesView, RenamePaneView, SettingsGroup, SettingsRow, SettingsTab,
-        SettingsValueKind,
+        App, ExitedPaneRecoveryView, FollowUpDialog, GridPalette, PaneGroupView, PaneSelection,
+        PreviousPaneView, PreviousPanesView, PromptView, RenamePaneView, SettingsGroup,
+        SettingsRow, SettingsTab, SettingsValueKind,
     },
     auth::{AgentKind, AuthProfile},
     image_preview::ImagePreview,
@@ -52,11 +52,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let rename_view = app.rename_pane_view();
     let previous_panes_view = app.previous_panes_view();
     let follow_up_dialog = app.follow_up_dialog();
+    let prompt_view = app.prompt_view();
     let image_overlay = app.image_overlay_view();
     let exited_recovery = if app.settings_open()
         || previous_panes_view.is_some()
         || rename_view.is_some()
         || follow_up_dialog.is_some()
+        || prompt_view.is_some()
         || image_overlay.is_some()
     {
         None
@@ -67,6 +69,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || previous_panes_view.is_some()
         || rename_view.is_some()
         || follow_up_dialog.is_some()
+        || prompt_view.is_some()
         || image_overlay.is_some()
         || exited_recovery.is_some();
 
@@ -78,13 +81,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         let focused = app.focus() == index;
         let selected = app.selected().contains(&index);
         let sleeping = app.pane_sleeping(index);
+        let group = app.pane_group(index);
         let quiet = app.activity_badges_enabled() && pane.output_quiet();
         let chrome = pane_chrome(
             selected,
             focused,
-            pane.active,
             pane.exited,
             sleeping,
+            group.map(|group| group.color.rgb),
             quiet,
             palette,
         );
@@ -121,6 +125,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             render_sleeping_screen(frame, inner);
         } else {
             render_screen(frame, inner, pane.screen(), app.selection_for_pane(index));
+        }
+        if let Some(group) = group {
+            render_group_badge(frame, rect, group);
         }
 
         if focused && !sleeping && !modal_open {
@@ -167,7 +174,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(" | Alt+p panes | Alt+t restart | Alt+x swap | Alt+z sleep | Alt+q quit"),
+        Span::raw(
+            " | Alt+p panes | Alt+t restart | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+q quit",
+        ),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
@@ -186,6 +195,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     };
     if let Some(rename) = rename_view.as_ref() {
         render_rename_pane(frame, area, rename);
+    }
+    if let Some(prompt) = prompt_view.as_ref() {
+        render_manager_prompt(frame, area, prompt);
     }
     if let Some(image) = image_overlay {
         render_image_overlay(frame, area, image);
@@ -230,6 +242,72 @@ fn pane_title(
     format!(" {}{} ", parts.join(" | "), badge)
 }
 
+fn render_group_badge(frame: &mut Frame<'_>, rect: Rect, group: PaneGroupView) {
+    let label = format!(" G{} ", group.label);
+    let width = label.len() as u16;
+    if rect.width <= width.saturating_add(2) {
+        return;
+    }
+
+    let area = Rect {
+        x: rect.x + rect.width - width - 1,
+        y: rect.y,
+        width,
+        height: 1,
+    };
+    frame.render_widget(
+        Paragraph::new(label).style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(rgb_color(group.color.rgb))
+                .add_modifier(Modifier::BOLD),
+        ),
+        area,
+    );
+}
+
+fn render_manager_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PromptView) {
+    let width = area.width.saturating_sub(4).max(24);
+    let prompt_area = Rect {
+        x: area.x.saturating_add(2),
+        y: area.y.saturating_add(area.height.saturating_sub(5)),
+        width: width.min(area.width),
+        height: 3,
+    };
+    frame.render_widget(Clear, prompt_area);
+
+    let input = if prompt.input.is_empty() {
+        Span::styled(
+            "type instruction, Enter sends, Esc cancels",
+            Style::default().fg(Color::DarkGray),
+        )
+    } else {
+        Span::raw(prompt.input.as_str())
+    };
+    let line = Line::from(vec![
+        Span::styled(
+            format!(" G{} ", prompt.label),
+            Style::default()
+                .fg(Color::Black)
+                .bg(rgb_color(prompt.color.rgb))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        input,
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(rgb_color(prompt.color.rgb)))
+        .title(" Manager ");
+    frame.render_widget(
+        Paragraph::new(line)
+            .block(block)
+            .style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
+        prompt_area,
+    );
+}
+
 #[derive(Debug, PartialEq)]
 struct PaneChrome {
     border_style: Style,
@@ -240,9 +318,9 @@ struct PaneChrome {
 fn pane_chrome(
     selected: bool,
     focused: bool,
-    _active: bool,
     exited: bool,
     sleeping: bool,
+    group_color: Option<(u8, u8, u8)>,
     quiet: bool,
     palette: &GridPalette,
 ) -> PaneChrome {
@@ -258,6 +336,10 @@ fn pane_chrome(
             .add_modifier(Modifier::BOLD)
     } else if exited {
         Style::default().fg(palette.exited())
+    } else if let Some(group_color) = group_color {
+        Style::default()
+            .fg(rgb_color(group_color))
+            .add_modifier(Modifier::BOLD)
     } else if quiet {
         Style::default()
             .fg(palette.quiet())
@@ -1777,6 +1859,10 @@ fn selection_style(style: Style, selection: Option<PaneSelection>, row: u16, col
     }
 }
 
+fn rgb_color((red, green, blue): (u8, u8, u8)) -> Color {
+    Color::Rgb(red, green, blue)
+}
+
 fn vt_color(color: vt100::Color, default: Color) -> Color {
     match color {
         vt100::Color::Default => default,
@@ -1841,13 +1927,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn output_activity_does_not_change_idle_pane_chrome() {
+    fn idle_pane_has_no_state_badges() {
         let palette = GridPalette::default();
+        let chrome = pane_chrome(false, false, false, false, None, false, &palette);
 
-        assert_eq!(
-            pane_chrome(false, false, false, false, false, false, &palette),
-            pane_chrome(false, false, true, false, false, false, &palette)
-        );
+        assert_eq!(chrome.badge, "");
+        assert_eq!(chrome.quiet_marker, "");
     }
 
     #[test]
@@ -1855,11 +1940,11 @@ mod tests {
         let palette = GridPalette::default();
 
         assert_eq!(
-            pane_chrome(true, false, true, false, false, true, &palette).badge,
+            pane_chrome(true, false, false, false, None, true, &palette).badge,
             " selected"
         );
         assert_eq!(
-            pane_chrome(true, false, true, true, false, true, &palette).badge,
+            pane_chrome(true, false, true, false, None, true, &palette).badge,
             " exited"
         );
     }
@@ -1869,7 +1954,7 @@ mod tests {
         let palette = GridPalette::default();
 
         assert_eq!(
-            pane_chrome(false, false, true, false, true, true, &palette).badge,
+            pane_chrome(false, false, false, true, None, true, &palette).badge,
             " asleep"
         );
     }
@@ -1950,10 +2035,37 @@ mod tests {
     #[test]
     fn quiet_output_marks_idle_pane_without_active_chrome() {
         let palette = GridPalette::default();
-        let quiet = pane_chrome(false, false, false, false, false, true, &palette);
-        let active_quiet = pane_chrome(false, false, true, false, false, true, &palette);
+        let quiet = pane_chrome(false, false, false, false, None, true, &palette);
 
         assert_eq!(quiet.quiet_marker, QUIET_MARKER);
-        assert_eq!(quiet.border_style, active_quiet.border_style);
+        assert_eq!(
+            quiet.border_style,
+            Style::default()
+                .fg(palette.quiet())
+                .add_modifier(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn grouped_quiet_pane_keeps_group_border_and_marker() {
+        let palette = GridPalette::default();
+        let group_color = (82, 166, 255);
+        let chrome = pane_chrome(
+            false,
+            false,
+            false,
+            false,
+            Some(group_color),
+            true,
+            &palette,
+        );
+
+        assert_eq!(chrome.quiet_marker, QUIET_MARKER);
+        assert_eq!(
+            chrome.border_style,
+            Style::default()
+                .fg(rgb_color(group_color))
+                .add_modifier(Modifier::BOLD)
+        );
     }
 }
