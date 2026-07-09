@@ -9,7 +9,10 @@ use std::path::Path;
 use vt100::Cell;
 
 use crate::{
-    app::{App, GridPalette, PaneSelection, RenamePaneView, SettingsRow},
+    app::{
+        App, GridPalette, PaneSelection, PreviousPaneView, PreviousPanesView, RenamePaneView,
+        SettingsRow,
+    },
     image_preview::ImagePreview,
 };
 
@@ -25,9 +28,13 @@ const SETTINGS_TEXT: Color = Color::Rgb(230, 237, 243);
 pub struct DrawState {
     pub grid_area: Rect,
     pub pane_rects: Vec<Rect>,
+    pub previous_panes_button: Option<Rect>,
+    pub previous_pane_rows: Vec<(usize, Rect)>,
 }
 
 const QUIET_MARKER: &str = " *";
+const STATUS_BRAND: &str = " GridBash ";
+const PREVIOUS_PANES_BUTTON: &str = " Panes ";
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
@@ -41,8 +48,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let rects = app.pane_rects(grid_area);
     let palette = app.palette();
     let rename_view = app.rename_pane_view();
+    let previous_panes_view = app.previous_panes_view();
     let image_overlay = app.image_overlay_view();
-    let modal_open = app.settings_open() || rename_view.is_some() || image_overlay.is_some();
+    let modal_open = app.settings_open()
+        || previous_panes_view.is_some()
+        || rename_view.is_some()
+        || image_overlay.is_some();
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -105,13 +116,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     } else {
         "focused pane"
     };
+    let previous_panes_button = previous_panes_button_rect(status_area);
     let status = Line::from(vec![
         Span::styled(
-            " GridBash ",
+            STATUS_BRAND,
             Style::default()
                 .fg(Color::Black)
                 .bg(palette.accent())
                 .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            PREVIOUS_PANES_BUTTON,
+            previous_panes_button_style(app.previous_panes_open(), palette),
         ),
         Span::raw(" "),
         Span::styled(
@@ -133,7 +150,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(" | Alt+t restart | Alt+x swap | Alt+z sleep | Alt+q quit"),
+        Span::raw(" | Alt+p panes | Alt+t restart | Alt+x swap | Alt+z sleep | Alt+q quit"),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
@@ -143,6 +160,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     if app.settings_open() {
         render_settings(frame, area, &app.settings_rows(), palette);
     }
+    let previous_pane_rows = if let Some(view) = previous_panes_view.as_ref() {
+        render_previous_panes(frame, area, view, palette)
+    } else {
+        Vec::new()
+    };
     if let Some(rename) = rename_view.as_ref() {
         render_rename_pane(frame, area, rename);
     }
@@ -153,6 +175,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     DrawState {
         grid_area,
         pane_rects: rects,
+        previous_panes_button,
+        previous_pane_rows,
     }
 }
 
@@ -229,6 +253,229 @@ fn pane_chrome(
         badge,
         quiet_marker,
     }
+}
+
+fn previous_panes_button_rect(status_area: Rect) -> Option<Rect> {
+    let offset = STATUS_BRAND.len() as u16 + 1;
+    let width = PREVIOUS_PANES_BUTTON.len() as u16;
+    if status_area.height == 0 || status_area.width < offset.saturating_add(width) {
+        return None;
+    }
+
+    Some(Rect {
+        x: status_area.x.saturating_add(offset),
+        y: status_area.y,
+        width,
+        height: 1,
+    })
+}
+
+fn previous_panes_button_style(open: bool, palette: &GridPalette) -> Style {
+    if open {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Black)
+            .bg(palette.focus())
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
+fn render_previous_panes(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &PreviousPanesView,
+    palette: &GridPalette,
+) -> Vec<(usize, Rect)> {
+    let modal = previous_panes_modal_rect(area, view.panes.len());
+    let shadow = settings_shadow_rect(area, modal);
+    let mut row_hits = Vec::new();
+
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" Previous Panes ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    if inner.width == 0 || inner.height == 0 {
+        return row_hits;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let header = Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            format!("{} panes", view.panes.len()),
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  current session", Style::default().fg(Color::Gray)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(vec![header, Line::from("")]).style(settings_panel_style()),
+        chunks[0],
+    );
+
+    let list_area = chunks[1];
+    let visible =
+        visible_previous_pane_range(view.panes.len(), view.cursor, list_area.height as usize);
+    let mut rows = Vec::new();
+
+    for (row_offset, index) in visible.enumerate() {
+        let Some(pane) = view.panes.get(index) else {
+            continue;
+        };
+        let row_area = Rect {
+            x: list_area.x,
+            y: list_area.y.saturating_add(row_offset as u16),
+            width: list_area.width,
+            height: 1,
+        };
+        row_hits.push((index, row_area));
+        rows.push(previous_pane_line(
+            pane,
+            view.cursor == index,
+            list_area.width,
+        ));
+    }
+
+    frame.render_widget(
+        Paragraph::new(rows).style(settings_panel_style()),
+        list_area,
+    );
+    frame.render_widget(
+        Paragraph::new(previous_panes_command_bar(chunks[2].width)).style(settings_panel_style()),
+        chunks[2],
+    );
+
+    row_hits
+}
+
+fn previous_pane_line(pane: &PreviousPaneView, active: bool, width: u16) -> Line<'static> {
+    let (state, state_color) = previous_pane_state(pane);
+    let label_width = if width < 62 { 10 } else { 16 };
+    let location_width = if width < 62 { 14 } else { 24 };
+    let marker = if active { ">" } else { " " };
+    let location = pane
+        .worktree
+        .as_ref()
+        .map(|worktree| format!("{} | {worktree}", pane.folder))
+        .unwrap_or_else(|| pane.folder.clone());
+    let text = format!(
+        "{marker} {:>2} {:<label_width$} {:<8} {:<location_width$} {}",
+        pane.index + 1,
+        truncate_text(&pane.label, label_width),
+        state,
+        truncate_text(&location, location_width),
+        pane.summary,
+    );
+    let bg = active.then_some(SETTINGS_ROW_ACTIVE);
+    let fg = if active { SETTINGS_TEXT } else { state_color };
+
+    Line::from(Span::styled(
+        fixed_width(&text, width as usize),
+        row_style(fg, bg, active || pane.focused),
+    ))
+}
+
+fn previous_pane_state(pane: &PreviousPaneView) -> (&'static str, Color) {
+    if pane.exited {
+        ("exited", Color::Red)
+    } else if pane.sleeping {
+        ("asleep", Color::DarkGray)
+    } else if pane.focused {
+        ("focus", Color::Yellow)
+    } else if pane.selected {
+        ("selected", Color::Cyan)
+    } else {
+        ("live", SETTINGS_TEXT)
+    }
+}
+
+fn previous_panes_command_bar(width: u16) -> Line<'static> {
+    if width < 44 {
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Enter"),
+            Span::styled(" focus  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" close", Style::default().fg(Color::Gray)),
+        ]);
+    }
+
+    Line::from(vec![
+        Span::raw("  "),
+        command_key("Up/Down"),
+        Span::styled(" move  ", Style::default().fg(Color::Gray)),
+        command_key("Enter"),
+        Span::styled(" focus  ", Style::default().fg(Color::Gray)),
+        command_key("Esc"),
+        Span::styled(" close", Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn previous_panes_modal_rect(area: Rect, pane_count: usize) -> Rect {
+    let width = area.width.saturating_sub(4).min(96).max(area.width.min(1));
+    let desired_height = (pane_count as u16).saturating_add(6).clamp(8, 24);
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(desired_height)
+        .max(area.height.min(1));
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn visible_previous_pane_range(
+    pane_count: usize,
+    cursor: usize,
+    capacity: usize,
+) -> std::ops::Range<usize> {
+    if pane_count == 0 || capacity == 0 {
+        return 0..0;
+    }
+
+    let capacity = capacity.min(pane_count);
+    let cursor = cursor.min(pane_count - 1);
+    let mut start = cursor.saturating_sub(capacity / 2);
+    if start + capacity > pane_count {
+        start = pane_count - capacity;
+    }
+
+    start..start + capacity
 }
 
 fn render_settings(frame: &mut Frame<'_>, area: Rect, rows: &[SettingsRow], palette: &GridPalette) {
@@ -771,7 +1018,7 @@ fn fixed_width(text: &str, width: usize) -> String {
 }
 
 fn truncate_text(text: &str, width: usize) -> String {
-    if text.len() <= width {
+    if text.chars().count() <= width {
         return text.to_string();
     }
     if width == 0 {
@@ -781,7 +1028,7 @@ fn truncate_text(text: &str, width: usize) -> String {
         return ".".repeat(width);
     }
 
-    format!("{}...", &text[..width - 3])
+    format!("{}...", text.chars().take(width - 3).collect::<String>())
 }
 
 fn folder_label(cwd: &Path) -> String {
@@ -1066,6 +1313,24 @@ mod tests {
         assert_eq!(
             pane_title("api", QUIET_MARKER, "gridbash/", None, None, ""),
             " api * | gridbash/ "
+        );
+    }
+
+    #[test]
+    fn previous_pane_range_keeps_cursor_visible() {
+        assert_eq!(visible_previous_pane_range(10, 0, 4), 0..4);
+        assert_eq!(visible_previous_pane_range(10, 5, 4), 3..7);
+        assert_eq!(visible_previous_pane_range(10, 9, 4), 6..10);
+        assert_eq!(visible_previous_pane_range(3, 8, 10), 0..3);
+        assert_eq!(visible_previous_pane_range(3, 1, 0), 0..0);
+    }
+
+    #[test]
+    fn truncates_non_ascii_text_without_slicing_inside_a_character() {
+        assert_eq!(truncate_text("alpha beta", 8), "alpha...");
+        assert_eq!(
+            truncate_text("codex says 東京 ready", 15),
+            "codex says 東..."
         );
     }
 
