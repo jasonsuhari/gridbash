@@ -119,8 +119,15 @@ jobs:
           $parsed = $text | ConvertFrom-Json
           if ($parsed -is [array]) {
             $pack = $parsed[0].filename
-          } else {
+          } elseif ($parsed.filename) {
             $pack = $parsed.filename
+          } else {
+            foreach ($property in $parsed.PSObject.Properties) {
+              if ($property.Value.filename) {
+                $pack = $property.Value.filename
+                break
+              }
+            }
           }
 
           if (-not $pack) {
@@ -223,8 +230,15 @@ jobs:
           $parsed = $text | ConvertFrom-Json
           if ($parsed -is [array]) {
             $pack = $parsed[0].filename
-          } else {
+          } elseif ($parsed.filename) {
             $pack = $parsed.filename
+          } else {
+            foreach ($property in $parsed.PSObject.Properties) {
+              if ($property.Value.filename) {
+                $pack = $property.Value.filename
+                break
+              }
+            }
           }
 
           if (-not $pack) {
