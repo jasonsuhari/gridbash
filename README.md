@@ -240,13 +240,17 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+Shift+Left / Alt+Shift+Right | Remove / add a column when safe |
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
-| Alt+p | Open the previous panes list and focus a pane from its conversation summary |
+| Alt+p | Open settings for the focused pane; use Reload past history to refresh its visible conversation snapshot |
 | Alt+r | Rename the focused pane |
 | Alt+t | Restart exited focused pane; when multiple panes are selected, restart exited selected panes |
 | Alt+z | Put the focused pane to sleep; when multiple panes are selected, sleep the selected panes |
 | Hover sleeping pane | Wake the pane and make its terminal contents visible again |
 | Alt+o | Open settings |
 | Alt+q | Quit |
+
+In focused-pane settings, press `Enter`, `Space`, or `r` to reload the visible
+conversation history snapshot. Press `Esc`, `q`, or `Alt+p` to close it, or
+`Alt+o` to switch to overall settings.
 
 When the focused pane has exited, GridBash shows a recovery dialog. Press `Enter`,
 `r`, or `t` to restart it, or press `z` to put it to sleep. `Alt+t` still restarts
