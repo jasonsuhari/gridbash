@@ -44,6 +44,7 @@ use crate::{
     ui,
     usage::{self, UsageEvent, UsageTarget},
     vibe,
+    voice::{VoiceInput, VoiceOutcome},
     worktrees::ManagedWorktreeOptions,
 };
 
@@ -90,6 +91,8 @@ pub struct App {
     command_line: CommandLineState,
     command_tx: mpsc::UnboundedSender<CommandRunEvent>,
     command_rx: mpsc::UnboundedReceiver<CommandRunEvent>,
+    voice: VoiceInput,
+    voice_destination: Option<VoiceDestination>,
     control_handle: Option<ControlHandle>,
     control_rx: Option<std_mpsc::Receiver<ControlEnvelope>>,
     image_overlay: Option<ImagePreview>,
@@ -169,6 +172,12 @@ enum KeyOutcome {
     Render,
     AuthLogin(AuthProfile),
     Quit,
+}
+
+#[derive(Debug, Clone)]
+enum VoiceDestination {
+    CommandLine,
+    Panes { tab: usize, panes: Vec<PaneId> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1459,10 +1468,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
             .into()
     } else {
-        "Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        "Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
             .into()
     }
 }
@@ -1590,6 +1599,8 @@ impl App {
             command_line: CommandLineState::new(init.command_cwd),
             command_tx,
             command_rx,
+            voice: VoiceInput::new(),
+            voice_destination: None,
             control_handle: init.control_handle,
             control_rx: init.control_rx,
             image_overlay: None,
@@ -1863,6 +1874,7 @@ impl App {
             needs_render |= self.drain_usage_events();
             needs_render |= self.drain_auth_refresh();
             needs_render |= self.drain_command_events();
+            needs_render |= self.drain_voice_events()?;
             needs_render |= self.drain_control_events();
             needs_render |= self.decay_activity();
             needs_render |= self.update_follow_up_prompt();
@@ -2339,6 +2351,58 @@ impl App {
         changed
     }
 
+    fn drain_voice_events(&mut self) -> Result<bool> {
+        let Some(outcome) = self.voice.poll() else {
+            return Ok(false);
+        };
+        let destination = self.voice_destination.take();
+
+        match outcome {
+            VoiceOutcome::Transcript(transcript) => match destination {
+                Some(VoiceDestination::CommandLine) => {
+                    let chars = transcript.chars().count();
+                    self.command_line.insert_text(&transcript);
+                    self.status = format!("voice inserted {chars} chars into command line");
+                }
+                Some(VoiceDestination::Panes { tab, panes }) if tab == self.active_tab => {
+                    let targets = panes
+                        .iter()
+                        .filter_map(|pane_id| {
+                            self.panes.iter().position(|pane| pane.id() == *pane_id)
+                        })
+                        .collect::<Vec<_>>();
+                    if targets.is_empty() {
+                        self.status = "voice target is no longer available".into();
+                    } else {
+                        let pane_count = targets.len();
+                        let status_changed =
+                            self.route_input_to_targets(transcript.as_bytes(), targets)?;
+                        if !status_changed {
+                            self.status = format!(
+                                "voice inserted into {pane_count} {}",
+                                pane_word(pane_count)
+                            );
+                        }
+                    }
+                }
+                Some(VoiceDestination::Panes { .. }) => {
+                    self.status = "voice result discarded after tab changed".into();
+                }
+                None => {
+                    self.status = "voice result had no input target".into();
+                }
+            },
+            VoiceOutcome::NoSpeech => {
+                self.status = "voice heard no speech; press Alt+v to try again".into();
+            }
+            VoiceOutcome::Error(error) => {
+                self.status = format!("voice unavailable: {error}");
+            }
+        }
+
+        Ok(true)
+    }
+
     fn drain_control_events(&mut self) -> bool {
         let mut changed = false;
 
@@ -2682,6 +2746,10 @@ impl App {
             'c' => {
                 self.command_line.focused = !self.command_line.focused;
                 self.status = self.focus_status();
+                Ok(Some(false))
+            }
+            'v' => {
+                self.toggle_voice_input();
                 Ok(Some(false))
             }
             'e' => {
@@ -4487,8 +4555,45 @@ impl App {
         }
     }
 
+    fn toggle_voice_input(&mut self) {
+        if self.voice.cancel() {
+            self.voice_destination = None;
+            self.status = "voice capture canceled".into();
+            return;
+        }
+
+        let destination = if self.command_line.focused {
+            VoiceDestination::CommandLine
+        } else {
+            let panes = self
+                .input_targets()
+                .into_iter()
+                .filter_map(|index| self.panes.get(index).map(PtyPane::id))
+                .collect::<Vec<_>>();
+            if panes.is_empty() {
+                self.status = "no awake panes available for voice input".into();
+                return;
+            }
+            VoiceDestination::Panes {
+                tab: self.active_tab,
+                panes,
+            }
+        };
+
+        self.voice_destination = Some(destination);
+        self.voice.start();
+        self.status = format!(
+            "voice listening for {} (Alt+v cancels; speech is not submitted)",
+            self.input_scope_label()
+        );
+    }
+
     fn route_input(&mut self, bytes: &[u8]) -> Result<bool> {
         let targets = self.input_targets();
+        self.route_input_to_targets(bytes, targets)
+    }
+
+    fn route_input_to_targets(&mut self, bytes: &[u8], targets: Vec<usize>) -> Result<bool> {
         let mut skipped_exited = 0;
 
         for index in targets {
@@ -4991,6 +5096,10 @@ impl App {
 
     pub fn command_running(&self) -> bool {
         self.command_line.running
+    }
+
+    pub fn voice_listening(&self) -> bool {
+        self.voice.is_listening()
     }
 
     pub fn input_scope_label(&self) -> &'static str {

@@ -267,6 +267,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+c | Focus or unfocus the command bar |
+| Alt+v | Listen for one dictated utterance; press again to cancel |
 | Alt+p | Open settings for the focused pane; use Reload past history to refresh its visible conversation snapshot |
 | Alt+Shift+p | Open the previous panes list |
 | Alt+r | Rename the focused pane |
@@ -289,6 +290,13 @@ When the focused pane has exited, GridBash shows a recovery dialog. Press `Enter
 exited target panes directly.
 
 Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane. When the one-line command bar is focused, typing stays in that bar; Enter runs the command from the cwd shown in the prompt and keeps output hidden until expanded.
+
+Voice mode uses the installed Windows speech recognizer and the default microphone.
+Press `Alt+v` to listen for one utterance (up to 15 seconds). The transcript is
+inserted into the command bar or the panes that were targeted when listening
+started. GridBash never presses Enter for dictated text, so you can review or edit
+it before submitting. Press `Alt+v` while listening to cancel. A Windows speech
+language pack matching the desired dictation language must be installed.
 
 Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
 

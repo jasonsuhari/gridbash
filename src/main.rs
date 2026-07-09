@@ -15,6 +15,7 @@ mod setup;
 mod ui;
 mod usage;
 mod vibe;
+mod voice;
 mod worktrees;
 
 use anyhow::Result;
