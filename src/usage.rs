@@ -29,7 +29,7 @@ pub struct UsageTarget {
 #[derive(Debug, Clone, PartialEq)]
 pub enum UsageEvent {
     Profile {
-        profile_name: String,
+        usage_key: String,
         label: Option<String>,
     },
     ApiSpend {
@@ -54,7 +54,7 @@ impl From<AgentKind> for AuthKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct UsageSource {
-    profile_name: String,
+    usage_key: String,
     dir: PathBuf,
     kind: AuthKind,
 }
@@ -74,7 +74,7 @@ pub fn spawn_usage_monitor(targets: Vec<UsageTarget>, tx: Sender<UsageEvent>) {
                 let label = profile_usage_label(source);
                 if tx
                     .send(UsageEvent::Profile {
-                        profile_name: source.profile_name.clone(),
+                        usage_key: source.usage_key.clone(),
                         label,
                     })
                     .is_err()
@@ -106,7 +106,7 @@ fn resolve_usage_sources(targets: &[UsageTarget]) -> Vec<UsageSource> {
     let mut sources = BTreeMap::new();
     for target in targets {
         if let Some(source) = resolve_usage_source(target) {
-            sources.entry(source.profile_name.clone()).or_insert(source);
+            sources.entry(source.usage_key.clone()).or_insert(source);
         }
     }
     sources.into_values().collect()
@@ -117,7 +117,7 @@ fn resolve_usage_source(target: &UsageTarget) -> Option<UsageSource> {
         && dir.is_dir()
     {
         return Some(UsageSource {
-            profile_name: target.profile_name.clone(),
+            usage_key: usage_key(target),
             dir: dir.clone(),
             kind: kind.into(),
         });
@@ -129,7 +129,7 @@ fn resolve_usage_source(target: &UsageTarget) -> Option<UsageSource> {
             .or_else(|| infer_kind(&target.profile_name))
             .unwrap_or(AuthKind::Claude);
         return Some(UsageSource {
-            profile_name: target.profile_name.clone(),
+            usage_key: usage_key(target),
             dir: vibe_dir,
             kind,
         });
@@ -142,10 +142,18 @@ fn resolve_usage_source(target: &UsageTarget) -> Option<UsageSource> {
     };
 
     dir.is_dir().then(|| UsageSource {
-        profile_name: target.profile_name.clone(),
+        usage_key: usage_key(target),
         dir,
         kind: command_kind,
     })
+}
+
+fn usage_key(target: &UsageTarget) -> String {
+    target
+        .auth_dir
+        .as_ref()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_else(|| target.profile_name.clone())
 }
 
 fn profile_kind(dir: &Path) -> Option<AuthKind> {
@@ -524,9 +532,10 @@ struct CostAmount {
 }
 
 fn profiles_home() -> PathBuf {
-    env::var_os("CLAUDE_PROFILES_HOME")
+    env::var_os("GRIDBASH_AUTH_HOME")
         .map(PathBuf::from)
-        .or_else(|| home_dir().map(|home| home.join(".claude-profiles")))
+        .or_else(|| env::var_os("CLAUDE_PROFILES_HOME").map(PathBuf::from))
+        .or_else(|| home_dir().map(|home| home.join(".gridbash-auth")))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -648,5 +657,34 @@ mod tests {
 
         assert_eq!(source.dir, temp);
         assert_eq!(source.kind, AuthKind::Codex);
+        assert_eq!(source.usage_key, temp.display().to_string());
+    }
+
+    #[test]
+    fn keeps_usage_sources_separate_for_different_auth_accounts() {
+        let root = env::temp_dir().join(format!(
+            "gridbash-usage-accounts-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let first = root.join("codex-1");
+        let second = root.join("codex-2");
+        fs::create_dir_all(&first).expect("first auth dir");
+        fs::create_dir(&second).expect("second auth dir");
+        let targets = [first.clone(), second.clone()].map(|auth_dir| UsageTarget {
+            profile_name: "codex".into(),
+            command: "codex".into(),
+            auth_kind: Some(AgentKind::Codex),
+            auth_dir: Some(auth_dir),
+        });
+
+        let sources = resolve_usage_sources(&targets);
+        let _ = fs::remove_dir_all(&root);
+
+        assert_eq!(sources.len(), 2);
+        assert!(sources.iter().any(|source| source.dir == first));
+        assert!(sources.iter().any(|source| source.dir == second));
     }
 }

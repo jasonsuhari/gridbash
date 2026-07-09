@@ -11,6 +11,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    auth::AgentKind,
     cli::ResumeArgs,
     layout::GridSize,
     profiles::Profile,
@@ -53,6 +54,10 @@ pub struct SavedPane {
     pub folder_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_kind: Option<AgentKind>,
     #[serde(default)]
     pub history: SavedPaneHistory,
 }
@@ -97,8 +102,8 @@ impl SavedSession {
                 cwd: pane.cwd.clone(),
                 folder_name: pane.folder_name.clone(),
                 worktree_name: pane.worktree_name.clone(),
-                auth_name: None,
-                auth_kind: None,
+                auth_name: pane.auth_name.clone(),
+                auth_kind: pane.auth_kind,
                 auth_dir: None,
             })
             .collect::<Vec<_>>();
@@ -185,6 +190,8 @@ impl SavedPane {
             cwd: spec.cwd.clone(),
             folder_name: spec.folder_name.clone(),
             worktree_name: spec.worktree_name.clone(),
+            auth_name: spec.auth_name.clone(),
+            auth_kind: spec.auth_kind,
             history,
         }
     }
@@ -452,18 +459,20 @@ mod tests {
             rows: 1,
             columns: 2,
         };
-        let plan = LaunchPlan::legacy(
+        let mut plan = LaunchPlan::legacy(
             "cmd".into(),
             Profile {
                 command: "cmd".into(),
                 args: Vec::new(),
                 title: Some("cmd".into()),
-                agent_kind: None,
+                agent_kind: Some(AgentKind::Codex),
             },
             cwd.clone(),
             2,
             grid,
         );
+        plan.panes[0].auth_name = Some("codex-2".into());
+        plan.panes[0].auth_kind = Some(AgentKind::Codex);
 
         let session = SavedSession::new("test".into(), &plan);
         let restored = session.launch_plan().expect("launch plan");
@@ -472,6 +481,8 @@ mod tests {
         assert_eq!(restored.panes.len(), 2);
         assert_eq!(restored.panes[0].profile_name, "cmd");
         assert_eq!(restored.panes[0].cwd, cwd);
+        assert_eq!(restored.panes[0].auth_name.as_deref(), Some("codex-2"));
+        assert_eq!(restored.panes[0].auth_kind, Some(AgentKind::Codex));
     }
 
     #[test]
@@ -513,6 +524,8 @@ mod tests {
             cwd: PathBuf::from("."),
             folder_name: folder_name.into(),
             worktree_name: None,
+            auth_name: None,
+            auth_kind: None,
             history: SavedPaneHistory::default(),
         }
     }

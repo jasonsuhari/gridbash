@@ -695,8 +695,8 @@ fn render_pane_settings(
     frame.render_widget(Paragraph::new(lines).style(settings_panel_style()), area);
 
     PaneSettingsButtons {
-        rename: pane_settings_rename_rect(area),
-        reload: pane_settings_reload_rect(area),
+        rename: pane_settings_rename_rect(area, view.auth_kind.is_some()),
+        reload: pane_settings_reload_rect(area, view.auth_kind.is_some()),
     }
 }
 
@@ -741,9 +741,23 @@ fn pane_settings_lines(
                 .bg(SETTINGS_BG)
                 .add_modifier(Modifier::BOLD),
         )));
+        if let Some(kind) = view.auth_kind {
+            let auth = view
+                .auth_options
+                .get(view.auth_cursor)
+                .map(|option| option.name.as_str())
+                .unwrap_or("none");
+            lines.push(Line::from(Span::styled(
+                fixed_width(
+                    &format!(" {} auth: {auth}", kind.display_name()),
+                    width as usize,
+                ),
+                Style::default().fg(SETTINGS_TEXT),
+            )));
+        }
         lines.push(pane_settings_rename_line(width, palette));
         lines.push(pane_settings_reload_line(width, palette));
-        lines.push(pane_settings_command_bar(width));
+        lines.push(pane_settings_command_bar(width, view.auth_kind.is_some()));
         return lines;
     }
 
@@ -770,7 +784,49 @@ fn pane_settings_lines(
             Style::default().fg(SETTINGS_MUTED),
         ),
     ]));
-    lines.push(Line::from(""));
+    if let Some(kind) = view.auth_kind {
+        lines.push(settings_section(
+            "AUTH ACCOUNT",
+            "Left/Right selects; Enter applies and restarts",
+            width,
+        ));
+        if let Some(option) = view.auth_options.get(view.auth_cursor) {
+            let account = option.account_label.as_deref().unwrap_or("no account");
+            let current = if option.current { " current" } else { "" };
+            let status = if option.ready {
+                "ready"
+            } else {
+                "login needed"
+            };
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("< ", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    truncate_text(
+                        &format!("{} | {} | {}{}", option.name, account, status, current),
+                        width.saturating_sub(8) as usize,
+                    ),
+                    Style::default()
+                        .fg(kind_color(kind))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" >", Style::default().fg(Color::Yellow)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!(
+                        "No {} auth profiles. Open global Auth settings.",
+                        kind.as_str()
+                    ),
+                    Style::default().fg(SETTINGS_MUTED),
+                ),
+            ]));
+        }
+    } else {
+        lines.push(Line::from(""));
+    }
     lines.push(settings_section(
         "HISTORY",
         "visible conversation snapshot",
@@ -783,11 +839,15 @@ fn pane_settings_lines(
             Style::default().fg(SETTINGS_TEXT),
         ),
     ]));
-    lines.push(Line::from(""));
+    if view.auth_kind.is_none() {
+        lines.push(Line::from(""));
+    }
     lines.push(pane_settings_rename_line(width, palette));
     lines.push(pane_settings_reload_line(width, palette));
-    lines.push(Line::from(""));
-    lines.push(pane_settings_command_bar(width));
+    if view.auth_kind.is_none() {
+        lines.push(Line::from(""));
+    }
+    lines.push(pane_settings_command_bar(width, view.auth_kind.is_some()));
 
     lines
 }
@@ -818,7 +878,31 @@ fn pane_settings_action_line(label: &str, width: u16, background: Color) -> Line
     ))
 }
 
-fn pane_settings_command_bar(width: u16) -> Line<'static> {
+fn pane_settings_command_bar(width: u16, has_auth: bool) -> Line<'static> {
+    if has_auth {
+        if width < 50 {
+            return Line::from(vec![
+                Span::raw("  "),
+                command_key("Left/Right"),
+                Span::styled(" auth  ", Style::default().fg(Color::Gray)),
+                command_key("Enter"),
+                Span::styled(" apply", Style::default().fg(Color::Gray)),
+            ]);
+        }
+
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Left/Right"),
+            Span::styled(" account  ", Style::default().fg(Color::Gray)),
+            command_key("Enter"),
+            Span::styled(" apply + restart  ", Style::default().fg(Color::Gray)),
+            command_key("r"),
+            Span::styled(" history  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" close", Style::default().fg(Color::Gray)),
+        ]);
+    }
+
     if width < 50 {
         return Line::from(vec![
             Span::raw("  "),
@@ -844,12 +928,26 @@ fn pane_settings_command_bar(width: u16) -> Line<'static> {
     ])
 }
 
-fn pane_settings_rename_rect(area: Rect) -> Option<Rect> {
-    pane_settings_action_rect(area, if area.width < 36 { 1 } else { 6 })
+fn pane_settings_rename_rect(area: Rect, has_auth: bool) -> Option<Rect> {
+    let row = if area.width < 36 && has_auth {
+        2
+    } else if area.width < 36 {
+        1
+    } else {
+        6
+    };
+    pane_settings_action_rect(area, row)
 }
 
-fn pane_settings_reload_rect(area: Rect) -> Option<Rect> {
-    pane_settings_action_rect(area, if area.width < 36 { 2 } else { 7 })
+fn pane_settings_reload_rect(area: Rect, has_auth: bool) -> Option<Rect> {
+    let row = if area.width < 36 && has_auth {
+        3
+    } else if area.width < 36 {
+        2
+    } else {
+        7
+    };
+    pane_settings_action_rect(area, row)
 }
 
 fn pane_settings_action_rect(area: Rect, row: u16) -> Option<Rect> {
@@ -1352,7 +1450,7 @@ fn settings_content_row_count(app: &App) -> usize {
     match app.settings_tab() {
         SettingsTab::General => app.settings_rows().len(),
         SettingsTab::Auth => {
-            app.auth_profiles().len().max(1) + usize::from(app.auth_create().is_some()) * 3
+            app.auth_profiles().len().max(1) + usize::from(app.auth_create().is_some()) * 3 + 3
         }
     }
 }
@@ -1636,6 +1734,40 @@ fn auth_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let mut lines = vec![
         settings_tabs(SettingsTab::Auth),
         Line::from(""),
+        settings_section("LAUNCH POLICY", "applies to new compatible panes", width),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("Auth assignment", Style::default().fg(SETTINGS_TEXT)),
+            Span::raw("  "),
+            Span::styled(
+                if app.auth_auto_cycle() {
+                    "[ auto-cycle ]"
+                } else {
+                    "[ manual ]"
+                },
+                if app.auth_auto_cycle() {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(SETTINGS_BORDER)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .bg(SETTINGS_SURFACE)
+                        .add_modifier(Modifier::BOLD)
+                },
+            ),
+            Span::raw("  "),
+            Span::styled(
+                if app.auth_auto_cycle() {
+                    "round-robin across ready accounts"
+                } else {
+                    "pane choices stay explicit"
+                },
+                Style::default().fg(SETTINGS_MUTED),
+            ),
+        ]),
+        Line::from(""),
         settings_section(
             "AUTH PROFILES",
             if app.auth_refreshing() {
@@ -1743,6 +1875,8 @@ fn auth_command_bar(width: u16) -> Line<'static> {
             Span::styled(" move  ", Style::default().fg(Color::Gray)),
             command_key("d"),
             Span::styled(" default  ", Style::default().fg(Color::Gray)),
+            command_key("c"),
+            Span::styled(" cycle  ", Style::default().fg(Color::Gray)),
             command_key("Esc"),
             Span::styled(" close", Style::default().fg(Color::Gray)),
         ]);
@@ -1754,6 +1888,8 @@ fn auth_command_bar(width: u16) -> Line<'static> {
         Span::styled(" move  ", Style::default().fg(Color::Gray)),
         command_key("d"),
         Span::styled(" default  ", Style::default().fg(Color::Gray)),
+        command_key("c"),
+        Span::styled(" cycle  ", Style::default().fg(Color::Gray)),
         command_key("n"),
         Span::styled(" new  ", Style::default().fg(Color::Gray)),
         command_key("l"),
@@ -2563,23 +2699,29 @@ mod tests {
     #[test]
     fn pane_settings_action_buttons_use_expected_rows() {
         assert_eq!(
-            pane_settings_rename_rect(Rect::new(5, 10, 40, 12)),
+            pane_settings_rename_rect(Rect::new(5, 10, 40, 12), false),
             Some(Rect::new(5, 16, 40, 1))
         );
         assert_eq!(
-            pane_settings_reload_rect(Rect::new(5, 10, 40, 12)),
+            pane_settings_reload_rect(Rect::new(5, 10, 40, 12), false),
             Some(Rect::new(5, 17, 40, 1))
         );
         assert_eq!(
-            pane_settings_rename_rect(Rect::new(5, 10, 20, 4)),
-            Some(Rect::new(5, 11, 20, 1))
-        );
-        assert_eq!(
-            pane_settings_reload_rect(Rect::new(5, 10, 20, 4)),
+            pane_settings_rename_rect(Rect::new(5, 10, 20, 5), true),
             Some(Rect::new(5, 12, 20, 1))
         );
-        assert_eq!(pane_settings_rename_rect(Rect::new(5, 10, 40, 6)), None);
-        assert_eq!(pane_settings_reload_rect(Rect::new(5, 10, 40, 6)), None);
+        assert_eq!(
+            pane_settings_reload_rect(Rect::new(5, 10, 20, 5), true),
+            Some(Rect::new(5, 13, 20, 1))
+        );
+        assert_eq!(
+            pane_settings_rename_rect(Rect::new(5, 10, 40, 6), false),
+            None
+        );
+        assert_eq!(
+            pane_settings_reload_rect(Rect::new(5, 10, 40, 6), false),
+            None
+        );
     }
 
     #[test]

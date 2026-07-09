@@ -634,6 +634,17 @@ pub struct PaneSettingsView {
     pub selected: bool,
     pub sleeping: bool,
     pub exited: bool,
+    pub auth_kind: Option<AgentKind>,
+    pub auth_options: Vec<PaneAuthOption>,
+    pub auth_cursor: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaneAuthOption {
+    pub name: String,
+    pub account_label: Option<String>,
+    pub ready: bool,
+    pub current: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -641,13 +652,15 @@ struct PaneSettingsState {
     open: bool,
     pane_index: usize,
     history_summary: Option<String>,
+    auth_cursor: usize,
 }
 
 impl PaneSettingsState {
-    fn open(&mut self, pane_index: usize, history_summary: String) {
+    fn open(&mut self, pane_index: usize, history_summary: String, auth_cursor: usize) {
         self.open = true;
         self.pane_index = pane_index;
         self.history_summary = Some(history_summary);
+        self.auth_cursor = auth_cursor;
     }
 
     fn close(&mut self) {
@@ -2291,16 +2304,13 @@ impl App {
 
         while let Ok(event) = self.usage_rx.try_recv() {
             match event {
-                UsageEvent::Profile {
-                    profile_name,
-                    label,
-                } => match label {
+                UsageEvent::Profile { usage_key, label } => match label {
                     Some(label) => {
-                        changed |= self.profile_usage.get(&profile_name) != Some(&label);
-                        self.profile_usage.insert(profile_name, label);
+                        changed |= self.profile_usage.get(&usage_key) != Some(&label);
+                        self.profile_usage.insert(usage_key, label);
                     }
                     None => {
-                        changed |= self.profile_usage.remove(&profile_name).is_some();
+                        changed |= self.profile_usage.remove(&usage_key).is_some();
                     }
                 },
                 UsageEvent::ApiSpend { label } => {
@@ -2580,7 +2590,7 @@ impl App {
         }
 
         if self.pane_settings.open {
-            let outcome = self.handle_pane_settings_key(key);
+            let outcome = self.handle_pane_settings_key(key)?;
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
         }
 
@@ -3057,8 +3067,27 @@ impl App {
 
         self.previous_panes.close();
         let pane_index = self.focus.min(self.panes.len() - 1);
+        if self.auth_profiles.is_empty() {
+            match auth::discover_profiles(&self.config.auth) {
+                Ok(profiles) => self.auth_profiles = profiles,
+                Err(error) => {
+                    self.status = format!("failed to load auth profiles: {error:#}");
+                }
+            }
+        }
         let history_summary = self.pane_history_summary(pane_index);
-        self.pane_settings.open(pane_index, history_summary);
+        let current_auth = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(pane_index))
+            .and_then(|spec| spec.auth_name.as_deref());
+        let auth_cursor = self
+            .compatible_auth_profiles(pane_index)
+            .iter()
+            .position(|profile| Some(profile.name.as_str()) == current_auth)
+            .unwrap_or(0);
+        self.pane_settings
+            .open(pane_index, history_summary, auth_cursor);
         self.status = format!("pane {} settings open", pane_index + 1);
     }
 
@@ -3068,15 +3097,15 @@ impl App {
         self.status = format!("pane {pane_number} settings closed");
     }
 
-    fn handle_pane_settings_key(&mut self, key: KeyEvent) -> KeyOutcome {
+    fn handle_pane_settings_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
         if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
-            return KeyOutcome::Quit;
+            return Ok(KeyOutcome::Quit);
         }
         if key.modifiers.contains(KeyModifiers::ALT)
             && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
         {
             self.close_pane_settings();
-            return KeyOutcome::Render;
+            return Ok(KeyOutcome::Render);
         }
         if key.modifiers.contains(KeyModifiers::ALT)
             && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
@@ -3084,11 +3113,11 @@ impl App {
             self.pane_settings.close();
             self.settings.open = true;
             self.status = "settings open".into();
-            return KeyOutcome::Render;
+            return Ok(KeyOutcome::Render);
         }
         if pane_settings_rename_requested(&key) {
             self.begin_rename_for(self.pane_settings.pane_index);
-            return KeyOutcome::Render;
+            return Ok(KeyOutcome::Render);
         }
 
         let changed = match key.code {
@@ -3096,7 +3125,23 @@ impl App {
                 self.close_pane_settings();
                 true
             }
-            KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('r') | KeyCode::Char('R') => {
+            KeyCode::Left | KeyCode::Up => {
+                self.move_pane_auth_cursor(-1);
+                true
+            }
+            KeyCode::Right | KeyCode::Down => {
+                self.move_pane_auth_cursor(1);
+                true
+            }
+            KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('a') | KeyCode::Char('A') => {
+                if self.selected_pane_auth_profile().is_some() {
+                    self.apply_selected_pane_auth()?;
+                } else {
+                    self.reload_pane_history();
+                }
+                true
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
                 self.reload_pane_history();
                 true
             }
@@ -3104,10 +3149,78 @@ impl App {
         };
 
         if changed {
-            KeyOutcome::Render
+            Ok(KeyOutcome::Render)
         } else {
-            KeyOutcome::Continue
+            Ok(KeyOutcome::Continue)
         }
+    }
+
+    fn compatible_auth_profiles(&self, pane_index: usize) -> Vec<&AuthProfile> {
+        let kind = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(pane_index))
+            .and_then(|spec| spec.command.agent_kind);
+        self.auth_profiles
+            .iter()
+            .filter(|profile| Some(profile.kind) == kind)
+            .collect()
+    }
+
+    fn move_pane_auth_cursor(&mut self, delta: isize) {
+        let len = self
+            .compatible_auth_profiles(self.pane_settings.pane_index)
+            .len();
+        if len == 0 {
+            self.pane_settings.auth_cursor = 0;
+            return;
+        }
+
+        self.pane_settings.auth_cursor =
+            (self.pane_settings.auth_cursor as isize + delta).rem_euclid(len as isize) as usize;
+    }
+
+    fn selected_pane_auth_profile(&self) -> Option<&AuthProfile> {
+        self.compatible_auth_profiles(self.pane_settings.pane_index)
+            .get(self.pane_settings.auth_cursor)
+            .copied()
+    }
+
+    fn apply_selected_pane_auth(&mut self) -> Result<()> {
+        let pane_index = self.pane_settings.pane_index;
+        let Some(profile) = self.selected_pane_auth_profile().cloned() else {
+            self.status = "no compatible auth profile selected".into();
+            return Ok(());
+        };
+        let auth_env = auth::env_for_profile(&self.config.auth, profile.kind, &profile.name)?;
+        let mut spec = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(pane_index))
+            .cloned()
+            .ok_or_else(|| anyhow!("pane {} has no launch settings", pane_index + 1))?;
+        set_spec_auth(&mut spec, auth_env);
+        let pane = self.spawn_pane_instance(&spec, pane_index)?;
+
+        self.panes[pane_index] = pane;
+        if let Some(plan) = &mut self.launch_plan {
+            plan.panes[pane_index] = spec;
+        }
+        if let Some(idle) = self.pane_idle.get_mut(pane_index) {
+            *idle = PaneIdleState::new(Instant::now());
+        }
+        self.sleeping.remove(&pane_index);
+        self.pane_settings
+            .refresh_history("waiting for output".into());
+        self.start_usage_for_active_tab();
+        self.save_session_snapshot()?;
+        self.status = format!(
+            "pane {} restarted with {} auth {}",
+            pane_index + 1,
+            profile.kind.display_name(),
+            profile.name
+        );
+        Ok(())
     }
 
     fn reload_pane_history(&mut self) {
@@ -3656,6 +3769,10 @@ impl App {
                 self.set_selected_auth_default()?;
                 true
             }
+            KeyCode::Char('c') | KeyCode::Char('C') => {
+                self.toggle_auth_auto_cycle()?;
+                true
+            }
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 self.start_auth_create()?;
                 true
@@ -4121,9 +4238,13 @@ impl App {
 
         let templates = plan.panes.clone();
         while plan.panes.len() < target_count {
-            let spec = templates[plan.panes.len() % templates.len()].clone();
+            let mut spec = templates[plan.panes.len() % templates.len()].clone();
+            if self.config.auth.auto_cycle {
+                clear_spec_auth(&mut spec);
+            }
             plan.panes.push(spec);
         }
+        apply_auth_defaults(plan, &self.config)?;
 
         Ok(plan.panes[self.panes.len()..target_count].to_vec())
     }
@@ -4897,6 +5018,10 @@ impl App {
             .unwrap_or_else(|error| format!("unresolved: {error:#}"))
     }
 
+    pub fn auth_auto_cycle(&self) -> bool {
+        self.config.auth.auto_cycle
+    }
+
     pub fn activity_badges_enabled(&self) -> bool {
         self.settings.activity_badges
     }
@@ -4968,6 +5093,21 @@ impl App {
         }
 
         let pane = self.panes.get(index)?;
+        let spec = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index));
+        let current_auth = spec.and_then(|spec| spec.auth_name.as_deref());
+        let auth_options = self
+            .compatible_auth_profiles(index)
+            .into_iter()
+            .map(|profile| PaneAuthOption {
+                name: profile.name.clone(),
+                account_label: profile.account_label.clone(),
+                ready: profile.ready,
+                current: Some(profile.name.as_str()) == current_auth,
+            })
+            .collect();
         Some(PaneSettingsView {
             index,
             label: self.pane_label(index),
@@ -4985,6 +5125,9 @@ impl App {
             selected: self.selected.contains(&index),
             sleeping: self.sleeping.contains(&index),
             exited: pane.exited,
+            auth_kind: spec.and_then(|spec| spec.command.agent_kind),
+            auth_options,
+            auth_cursor: self.pane_settings.auth_cursor,
         })
     }
 
@@ -5170,12 +5313,17 @@ impl App {
     pub fn pane_usage_label(&self, index: usize) -> Option<String> {
         let mut parts = Vec::new();
 
-        if let Some(profile_name) = self
+        if let Some(usage_key) = self
             .launch_plan
             .as_ref()
             .and_then(|plan| plan.panes.get(index))
-            .map(|pane| pane.profile_name.as_str())
-            && let Some(label) = self.profile_usage.get(profile_name)
+            .map(|pane| {
+                pane.auth_dir
+                    .as_ref()
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_else(|| pane.profile_name.clone())
+            })
+            && let Some(label) = self.profile_usage.get(&usage_key)
         {
             parts.push(label.clone());
         }
@@ -5281,6 +5429,19 @@ impl App {
                     .settings
                     .auth_cursor
                     .min(self.auth_profiles.len().saturating_sub(1));
+                if self.pane_settings.open {
+                    let pane_index = self.pane_settings.pane_index;
+                    let current_auth = self
+                        .launch_plan
+                        .as_ref()
+                        .and_then(|plan| plan.panes.get(pane_index))
+                        .and_then(|spec| spec.auth_name.as_deref());
+                    self.pane_settings.auth_cursor = self
+                        .compatible_auth_profiles(pane_index)
+                        .iter()
+                        .position(|profile| Some(profile.name.as_str()) == current_auth)
+                        .unwrap_or(0);
+                }
                 self.status = format!("loaded {} auth profiles", self.auth_profiles.len());
             }
             Err(error) => self.status = format!("auth refresh failed: {error}"),
@@ -5319,6 +5480,18 @@ impl App {
             profile.name,
             path.display()
         );
+        Ok(())
+    }
+
+    fn toggle_auth_auto_cycle(&mut self) -> Result<()> {
+        self.config.auth.auto_cycle = !self.config.auth.auto_cycle;
+        let path = self.config.save(self.config_path.as_deref())?;
+        let mode = if self.config.auth.auto_cycle {
+            "auto-cycle ready profiles"
+        } else {
+            "manual profile selection"
+        };
+        self.status = format!("auth launch mode: {mode} ({})", path.display());
         Ok(())
     }
 
@@ -5459,19 +5632,72 @@ fn resolve_direct_launch_plan(
 }
 
 fn apply_auth_defaults(plan: &mut LaunchPlan, config: &Config) -> Result<()> {
+    let cycle_profiles = if config.auth.auto_cycle {
+        auth::discover_profiles(&config.auth)?
+    } else {
+        Vec::new()
+    };
+    let mut claude_index = plan
+        .panes
+        .iter()
+        .filter(|spec| spec.auth_name.is_some() && spec.auth_kind == Some(AgentKind::Claude))
+        .count();
+    let mut codex_index = plan
+        .panes
+        .iter()
+        .filter(|spec| spec.auth_name.is_some() && spec.auth_kind == Some(AgentKind::Codex))
+        .count();
+
     for spec in &mut plan.panes {
         let Some(kind) = spec.command.agent_kind else {
             continue;
         };
-        let Some(auth_env) = auth::env_for_default(&config.auth, kind)? else {
+
+        if let Some(name) = spec.auth_name.clone() {
+            let auth_env = auth::env_for_profile(&config.auth, kind, &name)?;
+            set_spec_auth(spec, auth_env);
             continue;
+        }
+
+        let auth_env = if config.auth.auto_cycle {
+            let ready = cycle_profiles
+                .iter()
+                .filter(|profile| profile.kind == kind && profile.ready)
+                .collect::<Vec<_>>();
+            let index = match kind {
+                AgentKind::Claude => &mut claude_index,
+                AgentKind::Codex => &mut codex_index,
+            };
+            let selected = ready.get(*index % ready.len().max(1)).copied();
+            *index += 1;
+            selected
+                .map(|profile| auth::env_for_profile(&config.auth, kind, &profile.name))
+                .transpose()?
+        } else {
+            auth::env_for_default(&config.auth, kind)?
         };
-        spec.env.extend(auth_env.env_map());
-        spec.auth_name = Some(auth_env.name);
-        spec.auth_kind = Some(auth_env.kind);
-        spec.auth_dir = Some(auth_env.dir);
+
+        if let Some(auth_env) = auth_env {
+            set_spec_auth(spec, auth_env);
+        }
     }
     Ok(())
+}
+
+fn clear_spec_auth(spec: &mut PaneLaunchSpec) {
+    spec.env.remove(AgentKind::Claude.env_var());
+    spec.env.remove(AgentKind::Codex.env_var());
+    spec.auth_name = None;
+    spec.auth_kind = None;
+    spec.auth_dir = None;
+}
+
+fn set_spec_auth(spec: &mut PaneLaunchSpec, auth_env: auth::AuthEnv) {
+    clear_spec_auth(spec);
+    spec.env.extend(auth_env.env_map());
+    spec.auth_name = Some(auth_env.name);
+    spec.auth_kind = Some(auth_env.kind);
+    spec.auth_dir = Some(auth_env.dir);
 }
 
 fn uses_direct_launch(cli: &Cli) -> bool {
@@ -6555,6 +6781,41 @@ mod tests {
     }
 
     #[test]
+    fn auto_cycles_ready_auth_profiles_across_matching_panes() {
+        let temp = TempHome::new();
+        for name in ["codex-1", "codex-2"] {
+            let dir = temp.path.join(name);
+            fs::create_dir(&dir).expect("codex dir");
+            fs::write(dir.join(".profile-kind"), "codex").expect("kind");
+            fs::write(dir.join("auth.json"), r#"{"tokens":{}}"#).expect("auth");
+        }
+        let mut config = Config::default();
+        config.auth.home = Some(temp.path.clone());
+        config.auth.auto_cycle = true;
+        let mut plan = LaunchPlan::legacy(
+            "codex".into(),
+            Profile {
+                command: "codex".into(),
+                args: vec![],
+                title: Some("codex".into()),
+                agent_kind: Some(AgentKind::Codex),
+            },
+            env::current_dir().expect("cwd"),
+            3,
+            GridSize {
+                rows: 1,
+                columns: 3,
+            },
+        );
+
+        apply_auth_defaults(&mut plan, &config).expect("apply auth");
+
+        assert_eq!(plan.panes[0].auth_name.as_deref(), Some("codex-1"));
+        assert_eq!(plan.panes[1].auth_name.as_deref(), Some("codex-2"));
+        assert_eq!(plan.panes[2].auth_name.as_deref(), Some("codex-1"));
+    }
+
+    #[test]
     fn command_line_edits_at_cursor() {
         let mut command = CommandLineState::new(PathBuf::from("C:\\repo"));
         command.insert_text("abc");
@@ -6604,13 +6865,14 @@ mod tests {
     #[test]
     fn pane_settings_tracks_active_pane_history() {
         let mut settings = PaneSettingsState::default();
-        settings.open(2, "Assistant: ready".into());
+        settings.open(2, "Assistant: ready".into(), 1);
         assert!(settings.open);
         assert_eq!(settings.pane_index, 2);
         assert_eq!(
             settings.history_summary.as_deref(),
             Some("Assistant: ready")
         );
+        assert_eq!(settings.auth_cursor, 1);
 
         settings.refresh_history("User: rerun tests".into());
         assert_eq!(

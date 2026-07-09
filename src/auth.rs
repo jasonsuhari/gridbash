@@ -30,6 +30,8 @@ pub enum AgentKind {
 pub struct AuthConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub home: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_cycle: bool,
     #[serde(default, skip_serializing_if = "AuthDefaults::is_empty")]
     pub defaults: AuthDefaults,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,7 +124,10 @@ impl AgentKind {
 
 impl AuthConfig {
     pub fn is_empty(&self) -> bool {
-        self.home.is_none() && self.defaults.is_empty() && self.usage_status.is_none()
+        self.home.is_none()
+            && !self.auto_cycle
+            && self.defaults.is_empty()
+            && self.usage_status.is_none()
     }
 
     pub fn usage_enabled(&self) -> bool {
@@ -180,9 +185,9 @@ impl AuthEnv {
 
 pub fn resolve_home(config: &AuthConfig) -> Result<PathBuf> {
     non_empty_env_path(GRIDBASH_AUTH_HOME)
-        .or_else(|| non_empty_env_path(CLAUDE_PROFILES_HOME))
         .or_else(|| config.home.clone())
-        .or_else(|| BaseDirs::new().map(|dirs| dirs.home_dir().join(".claude-profiles")))
+        .or_else(|| non_empty_env_path(CLAUDE_PROFILES_HOME))
+        .or_else(|| BaseDirs::new().map(|dirs| dirs.home_dir().join(".gridbash-auth")))
         .ok_or_else(|| anyhow!("failed to resolve auth profile home"))
 }
 
@@ -641,6 +646,7 @@ mod tests {
         fn config(&self) -> AuthConfig {
             AuthConfig {
                 home: Some(self.path.clone()),
+                auto_cycle: false,
                 defaults: AuthDefaults::default(),
                 usage_status: Some(false),
             }
