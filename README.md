@@ -1,13 +1,58 @@
 # GridBash
 
+[![CI](https://github.com/jasonsuhari/gridbash/actions/workflows/ci.yml/badge.svg)](https://github.com/jasonsuhari/gridbash/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/gridbash?label=npm)](https://www.npmjs.com/package/gridbash)
+[![npm downloads](https://img.shields.io/npm/dm/gridbash?label=npm%20downloads)](https://www.npmjs.com/package/gridbash)
 [![GitHub release](https://img.shields.io/github/v/release/jasonsuhari/gridbash?label=github)](https://github.com/jasonsuhari/gridbash/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D4.svg)](https://github.com/jasonsuhari/gridbash)
 
-Fast, beautiful terminal grids for running lots of CLI agents at once.
+**Run every CLI coding agent in one fast terminal grid.**
 
-GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy development: launch a grid of Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, Git Bash, PowerShell, or any custom command, then select panes and send input only where you want it.
+GridBash by Jason Suhari is a Windows-native Rust TUI for agent-heavy development. Launch Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, Git Bash, PowerShell, or any custom command into a real PTY grid, then select exactly which panes receive your prompt.
+
+Official site: [jasonsuhari.github.io/gridbash](https://jasonsuhari.github.io/gridbash/)
+
+[![GridBash demo showing multiple CLI agents running side by side in a Windows terminal grid](https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-openvid-demo-poster.png)](https://github.com/jasonsuhari/gridbash/blob/main/docs/assets/gridbash-openvid-demo.mp4)
+
+GridBash is built for developers who want parallel CLI-agent work without juggling terminal windows, browser tabs, or accidental cross-pane input.
 
 > V1 is intentionally single-process. Closing GridBash closes its child agents. Daemon detach/reattach is the next major frontier.
+
+## Quickstart
+
+Install the published Windows x64 npm package:
+
+```powershell
+npm install -g gridbash
+gridbash
+```
+
+Open a focused CLI-agent grid:
+
+```powershell
+gridbash 2x3 --profile codex
+```
+
+Launch every pane in a separate repo-local git worktree:
+
+```powershell
+gridbash 2x3 --profile codex --worktrees
+```
+
+## Why Developers Try It
+
+- Run up to 100 PTY-backed panes from one terminal process.
+- Send input to one pane, selected panes, or every pane in the grid.
+- Start panes in isolated repo-local git worktrees for safer parallel agent work.
+- Use modeless Alt shortcuts and mouse selection without leaving normal terminal mode.
+- Launch common CLI agents with built-in profiles for Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, and Copilot.
+
+## What GridBash Is For
+
+GridBash is for CLI agent orchestration in the terminal: compare ideas from multiple coding agents, run review/build/test loops in parallel, keep shells visible, and send a prompt only to the panes that should receive it.
+
+Its niche is Windows-native, PTY-backed, agent-first terminal grids. Traditional terminal multiplexers are still great; GridBash focuses on the workflows that appear when Codex, Claude, Gemini, Aider, and other CLI agents are all part of the same development session.
 
 ## Release Status & Devlogs
 
@@ -33,27 +78,21 @@ GridBash is a Windows-native Rust TUI multiplexer built for agent-heavy developm
 - Startup dimension picker with a live grid preview.
 - Optional managed git worktrees so every pane can work in an isolated checkout.
 
-## Demo
+## Demo Assets
 
-Watch the OpenVid-style demo: [`docs/assets/gridbash-openvid-demo.mp4`](docs/assets/gridbash-openvid-demo.mp4).
+- Watch the OpenVid-style demo: [`docs/assets/gridbash-openvid-demo.mp4`](https://github.com/jasonsuhari/gridbash/blob/main/docs/assets/gridbash-openvid-demo.mp4).
+- See the source scene and OpenVid recreation recipe in [`docs/demo/openvid-gridbash-demo.md`](https://github.com/jasonsuhari/gridbash/blob/main/docs/demo/openvid-gridbash-demo.md).
+- Use [`docs/assets/gridbash-social-preview.png`](docs/assets/gridbash-social-preview.png) as the GitHub social preview image.
 
-The source scene and OpenVid recreation recipe are in [`docs/demo/openvid-gridbash-demo.md`](docs/demo/openvid-gridbash-demo.md).
+## Install From This Repo
 
-## Demo
-
-Watch the OpenVid-style demo: [`docs/assets/gridbash-openvid-demo.mp4`](docs/assets/gridbash-openvid-demo.mp4).
-
-The source scene and OpenVid recreation recipe are in [`docs/demo/openvid-gridbash-demo.md`](docs/demo/openvid-gridbash-demo.md).
-
-## Install With npm
-
-From this repo:
+For local development installs:
 
 ```powershell
 npm run install:local
 ```
 
-Then run it from anywhere:
+Then run GridBash from anywhere:
 
 ```powershell
 gridbash

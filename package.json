@@ -1,9 +1,9 @@
 {
   "name": "gridbash",
   "version": "0.1.5",
-  "description": "Fast, beautiful terminal grids for running lots of CLI agents at once.",
+  "description": "Windows-native terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side.",
   "license": "MIT",
-  "homepage": "https://github.com/jasonsuhari/gridbash#readme",
+  "homepage": "https://jasonsuhari.github.io/gridbash/",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jasonsuhari/gridbash.git"
@@ -29,17 +29,35 @@
     "install:local": "node npm/scripts/install-local.js",
     "prepare": "node npm/scripts/prepare.js",
     "release": "node npm/scripts/release.js",
+    "test:launcher": "node --test npm/scripts/gridbash-launcher.test.js",
     "test": "cargo test"
   },
   "keywords": [
     "terminal",
+    "terminal-grid",
+    "terminal-ui",
     "multiplexer",
     "agents",
+    "ai-agents",
+    "cli-agents",
+    "coding-agents",
+    "multi-agent",
+    "agent-orchestration",
     "codex",
     "claude",
+    "claude-code",
+    "gemini",
+    "gemini-cli",
+    "aider",
+    "openai",
     "tui",
+    "ratatui",
     "pty",
-    "conpty"
+    "conpty",
+    "windows",
+    "powershell",
+    "git-bash",
+    "developer-tools"
   ],
   "engines": {
     "node": ">=18"
