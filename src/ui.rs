@@ -1,6 +1,6 @@
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -1935,6 +1935,7 @@ fn conversation_footer(summary: String, emphasized: bool) -> Line<'static> {
         Span::styled(summary, summary_style),
         Span::raw(" "),
     ])
+    .alignment(Alignment::Center)
 }
 
 fn settings_summary(width: u16) -> String {
@@ -2693,6 +2694,14 @@ mod tests {
         assert_eq!(
             pane_title("api", QUIET_MARKER, "gridbash/", None, None, None, None, ""),
             " api * | gridbash/ "
+        );
+    }
+
+    #[test]
+    fn conversation_footer_is_centered() {
+        assert_eq!(
+            conversation_footer("reviewing changes".into(), false).alignment,
+            Some(Alignment::Center)
         );
     }
 
