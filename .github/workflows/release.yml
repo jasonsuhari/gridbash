@@ -116,13 +116,17 @@ jobs:
           }
 
           $text = $raw | Out-String
-          $match = [regex]::Match($text, '(?s)\[\s*\{.*?"filename"\s*:\s*"(?<filename>[^"]+)"')
-          if (-not $match.Success) {
+          $parsed = $text | ConvertFrom-Json
+          if ($parsed -is [array]) {
+            $pack = $parsed[0].filename
+          } else {
+            $pack = $parsed.filename
+          }
+
+          if (-not $pack) {
             $text | Write-Output
             throw "Could not parse npm pack filename."
           }
-
-          $pack = $match.Groups["filename"].Value
           "tarball=$pack" >> $env:GITHUB_OUTPUT
 
       - name: Publish npm package
@@ -216,13 +220,17 @@ jobs:
           }
 
           $text = $raw | Out-String
-          $match = [regex]::Match($text, '(?s)\[\s*\{.*?"filename"\s*:\s*"(?<filename>[^"]+)"')
-          if (-not $match.Success) {
+          $parsed = $text | ConvertFrom-Json
+          if ($parsed -is [array]) {
+            $pack = $parsed[0].filename
+          } else {
+            $pack = $parsed.filename
+          }
+
+          if (-not $pack) {
             $text | Write-Output
             throw "Could not parse npm pack filename."
           }
-
-          $pack = $match.Groups["filename"].Value
           "tarball=$pack" >> $env:GITHUB_OUTPUT
 
       - name: Resolve release notes

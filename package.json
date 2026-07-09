@@ -1,6 +1,6 @@
 {
   "name": "gridbash",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Windows-native terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side.",
   "license": "MIT",
   "homepage": "https://jasonsuhari.github.io/gridbash/",

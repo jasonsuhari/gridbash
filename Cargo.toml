@@ -1,6 +1,6 @@
 [package]
 name = "gridbash"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 description = "Windows-native terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side."
 license = "MIT"
