@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     env,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -94,6 +95,7 @@ impl PtyPane {
         generation: u64,
         command: &Path,
         args: &[String],
+        env: &BTreeMap<String, String>,
         cwd: &Path,
         extra_env: &[(String, String)],
         event_tx: mpsc::UnboundedSender<PtyEvent>,
@@ -117,6 +119,9 @@ impl PtyPane {
         command_builder.cwd(cwd);
         command_builder.env("TERM", "xterm-256color");
         command_builder.env("COLORTERM", "truecolor");
+        for (key, value) in env {
+            command_builder.env(key, value);
+        }
         for (key, value) in extra_env {
             command_builder.env(key, value);
         }
@@ -600,6 +605,7 @@ mod tests {
                 "/c".to_string(),
                 "set /p GRIDBASH_IN= & echo GRIDBASH_READY:!GRIDBASH_IN!".to_string(),
             ],
+            &BTreeMap::new(),
             &cwd,
             &[],
             event_tx,
