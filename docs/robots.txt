@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://jasonsuhari.github.io/gridbash/sitemap.xml
