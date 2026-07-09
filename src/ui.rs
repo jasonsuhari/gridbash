@@ -42,18 +42,27 @@ pub struct PaneRenderCache {
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) -> DrawState {
     let area = frame.area();
+    let output_height = if app.command_output_expanded() {
+        command_output_height(area.height, app.command_output_lines().len())
+    } else {
+        0
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
+            Constraint::Length(output_height),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(area);
 
     let tab_area = chunks[0];
     let grid_area = chunks[1];
-    let status_area = chunks[2];
+    let command_output_area = chunks[2];
+    let command_area = chunks[3];
+    let status_area = chunks[4];
     let rects = app.pane_rects(grid_area);
     let palette = *app.palette();
     let rename_view = app.rename_pane_view();
@@ -71,7 +80,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) -> DrawState {
             continue;
         };
 
-        let focused = app.focus() == index;
+        let focused = app.focused_pane() == Some(index);
         let selected = app.selected().contains(&index);
         let sleeping = app.pane_sleeping(index);
         let quiet = app.activity_badges_enabled() && app.pane_output_quiet(index);
@@ -131,11 +140,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) -> DrawState {
         }
     }
 
-    let input_scope = if app.selected().len() > 1 {
-        "selected panes"
-    } else {
-        "focused pane"
-    };
+    if output_height > 0 {
+        render_command_output(frame, command_output_area, app);
+    }
+    render_command_line(frame, command_area, app);
+
+    let input_scope = app.input_scope_label();
     let status = Line::from(vec![
         Span::styled(
             " GridBash ",
@@ -154,7 +164,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) -> DrawState {
         Span::raw(" | "),
         Span::styled(
             input_scope,
-            Style::default().fg(if app.selected().len() > 1 {
+            Style::default().fg(if app.command_focused() {
+                palette.accent()
+            } else if app.selected().len() > 1 {
                 palette.selected()
             } else {
                 Color::Gray
@@ -164,7 +176,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) -> DrawState {
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(" | Alt+t tab | Alt+Shift+t restart | Alt+x swap | Alt+z sleep | Alt+q quit"),
+        Span::raw(" | Alt+t tab | Alt+n new | Alt+e output | Alt+x swap | Alt+z sleep | Alt+q quit"),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
@@ -272,6 +284,148 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel]) {
         Paragraph::new(Line::from(spans)).style(Style::default().bg(APP_BG)),
         area,
     );
+}
+
+fn command_output_height(total_height: u16, line_count: usize) -> u16 {
+    let available = total_height.saturating_sub(3);
+    if available < 3 {
+        return 0;
+    }
+
+    let max_height = (total_height / 3).clamp(3, 12).min(available);
+    (line_count as u16).saturating_add(2).clamp(3, max_height)
+}
+
+fn render_command_output(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let border_style = if app.command_focused() {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let title = if app.command_running() {
+        " Command output | running "
+    } else {
+        " Command output "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines = app.command_output_lines();
+    let start = lines.len().saturating_sub(inner.height as usize);
+    let visible = lines[start..]
+        .iter()
+        .cloned()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+
+    frame.render_widget(
+        Paragraph::new(visible).style(
+            Style::default()
+                .fg(Color::Rgb(230, 237, 243))
+                .bg(Color::Rgb(11, 15, 20)),
+        ),
+        inner,
+    );
+}
+
+fn render_command_line(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let width = area.width as usize;
+    let cwd = app.command_cwd().display().to_string();
+    let cwd_budget = command_cwd_budget(width, app.command_input());
+    let cwd = truncate_start(&cwd, cwd_budget);
+    let prompt = format!(" {cwd} > ");
+    let prompt_width = prompt.chars().count();
+    let input_width = width.saturating_sub(prompt_width);
+    let (input, cursor_offset) =
+        visible_input(app.command_input(), app.command_cursor_chars(), input_width);
+    let focused = app.command_focused();
+
+    let prompt_style = if focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let input_style = if focused {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::Rgb(180, 190, 202))
+    };
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(prompt, prompt_style),
+            Span::styled(input, input_style),
+        ]))
+        .style(Style::default().bg(Color::Rgb(14, 20, 28))),
+        area,
+    );
+
+    if focused {
+        let x = area
+            .x
+            .saturating_add((prompt_width + cursor_offset).min(width.saturating_sub(1)) as u16);
+        frame.set_cursor_position((x, area.y));
+    }
+}
+
+fn command_cwd_budget(width: usize, input: &str) -> usize {
+    if width <= 4 {
+        return 0;
+    }
+    if input.is_empty() {
+        return width.saturating_sub(4);
+    }
+
+    width.saturating_sub(14).min((width * 2) / 3)
+}
+
+fn truncate_start(value: &str, max_chars: usize) -> String {
+    let chars = value.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return chars[chars.len().saturating_sub(max_chars)..]
+            .iter()
+            .collect();
+    }
+
+    let tail = chars[chars.len() - (max_chars - 3)..]
+        .iter()
+        .collect::<String>();
+    format!("...{tail}")
+}
+
+fn visible_input(input: &str, cursor_chars: usize, width: usize) -> (String, usize) {
+    if width == 0 {
+        return (String::new(), 0);
+    }
+
+    let chars = input.chars().collect::<Vec<_>>();
+    let cursor = cursor_chars.min(chars.len());
+    if chars.len() <= width {
+        return (input.to_string(), cursor);
+    }
+
+    let start = cursor.saturating_sub(width.saturating_sub(1));
+    let end = (start + width).min(chars.len());
+    (chars[start..end].iter().collect(), cursor - start)
 }
 
 #[derive(Debug, PartialEq)]
