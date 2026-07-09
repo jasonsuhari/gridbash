@@ -1997,9 +1997,9 @@ impl App {
                 self.capture_worker_output(index, &bytes);
                 self.mark_pane_touched(index);
                 changed = true;
-            } else if self.process_manager_output(pane, generation, &bytes, &mut dispatches) {
-                changed = true;
-            } else if self.process_inactive_output(pane, generation, &bytes) {
+            } else if self.process_manager_output(pane, generation, &bytes, &mut dispatches)
+                || self.process_inactive_output(pane, generation, &bytes)
+            {
                 changed = true;
             }
         }
@@ -2017,9 +2017,9 @@ impl App {
                 {
                     self.follow_up = None;
                 }
-            } else if self.process_manager_exit(pane, generation) {
-                changed = true;
-            } else if self.process_inactive_exit(pane, generation) {
+            } else if self.process_manager_exit(pane, generation)
+                || self.process_inactive_exit(pane, generation)
+            {
                 changed = true;
             }
         }
