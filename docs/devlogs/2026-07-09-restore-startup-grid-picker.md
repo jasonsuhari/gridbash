@@ -22,7 +22,9 @@ Release target: unreleased
 ## Validation
 
 - `cargo fmt --check`
+- `cargo clippy -- -D warnings`
 - `cargo test`
+- `cargo build --release`
 - `npm run test:launcher`
 
 ## Release Notes
