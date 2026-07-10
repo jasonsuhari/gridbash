@@ -33,17 +33,13 @@ use crate::{
     control::{self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse},
     image_preview::{self, ImagePreview},
     layout::{GridLayout, GridSize, PaneId, pane_at},
-    orchestrator::{
-        GroupColor, GroupId, MAX_GROUPS, SendBlock, SendTargets, extract_send_blocks, group_color,
-        group_label, manager_pane_id,
-    },
-    profiles::{Profile, find_profile},
-    pty::{PtyEvent, PtyPane},
+    manager::{self, ManagerDecision},
+    profiles::find_profile,
+    pty::{PtyEvent, PtyPane, plain_terminal_text},
     session::{SavedPaneHistory, SessionRecord, SessionRecorder},
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
     usage::{self, UsageEvent, UsageTarget},
-    vibe,
     voice::{VoiceInput, VoiceOutcome},
     worktrees::ManagedWorktreeOptions,
 };
@@ -51,9 +47,11 @@ use crate::{
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
-const WORKER_RELAY_IDLE: Duration = Duration::from_millis(900);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const WORKER_RELAY_MAX_BYTES: usize = 6000;
+const PANE_GOAL_OUTPUT_MAX_BYTES: usize = 12_000;
+const PANE_GOAL_REVIEW_IDLE: Duration = Duration::from_secs(2);
+const PANE_GOAL_RETRY_DELAY: Duration = Duration::from_secs(30);
+const MAX_MANAGER_SETTING_CHARS: usize = 2048;
 const MAX_PANE_NAME_CHARS: usize = 32;
 const MAX_TAB_TITLE_CHARS: usize = 40;
 const CONVERSATION_SUMMARY_MAX_CHARS: usize = 120;
@@ -69,7 +67,6 @@ const PANE_SCROLL_ROWS: isize = 3;
 pub struct App {
     config: Config,
     config_path: Option<PathBuf>,
-    manager_profile_name: Option<String>,
     worktrees: Option<ManagedWorktreeOptions>,
     tabs: Vec<Option<GridTabSnapshot>>,
     active_tab: usize,
@@ -84,9 +81,11 @@ pub struct App {
     pane_names: Vec<Option<String>>,
     text_selection: Option<MouseSelection>,
     sleeping: BTreeSet<usize>,
-    groups: Vec<AgentGroup>,
-    next_group_id: usize,
-    prompt: Option<PromptState>,
+    pane_goals: Vec<Option<PaneGoal>>,
+    goal_editor: Option<GoalEditorState>,
+    next_goal_id: u64,
+    goal_tx: std_mpsc::Sender<GoalReviewEvent>,
+    goal_rx: std_mpsc::Receiver<GoalReviewEvent>,
     rects: Vec<Rect>,
     mouse_enabled: bool,
     command_line: CommandLineState,
@@ -115,6 +114,9 @@ pub struct App {
     pane_settings_button: Option<Rect>,
     pane_settings_rename_button: Option<Rect>,
     pane_settings_reload_button: Option<Rect>,
+    pane_settings_sleep_button: Option<Rect>,
+    pane_settings_goal_button: Option<Rect>,
+    pane_settings_stop_goal_button: Option<Rect>,
     event_tx: mpsc::UnboundedSender<PtyEvent>,
     event_rx: mpsc::UnboundedReceiver<PtyEvent>,
     usage_tx: std_mpsc::Sender<UsageEvent>,
@@ -128,7 +130,6 @@ pub struct App {
 struct AppInit {
     config: Config,
     config_path: Option<PathBuf>,
-    manager_profile_name: Option<String>,
     worktrees: Option<ManagedWorktreeOptions>,
     launch_plan: Option<LaunchPlan>,
     grid: GridSize,
@@ -153,9 +154,7 @@ struct GridTabSnapshot {
     pane_names: Vec<Option<String>>,
     text_selection: Option<MouseSelection>,
     sleeping: BTreeSet<usize>,
-    groups: Vec<AgentGroup>,
-    next_group_id: usize,
-    prompt: Option<PromptState>,
+    pane_goals: Vec<Option<PaneGoal>>,
     rects: Vec<Rect>,
 }
 
@@ -261,34 +260,42 @@ enum SwapSelection {
     Pair(usize, usize),
 }
 
-struct AgentGroup {
-    id: GroupId,
-    palette_index: usize,
-    label: char,
-    workers: BTreeSet<usize>,
-    manager: PtyPane,
-    manager_buffer: String,
-    relay_buffers: BTreeMap<usize, String>,
-    last_worker_output: Option<Instant>,
+#[derive(Debug, Clone)]
+struct PaneGoal {
+    id: u64,
+    objective: String,
+    active: bool,
+    output_buffer: String,
+    last_output_at: Option<Instant>,
+    in_flight: bool,
+    retry_after: Option<Instant>,
     status: String,
 }
 
-struct PromptState {
-    group_id: GroupId,
+#[derive(Debug, Clone)]
+struct GoalEditorState {
+    pane_index: usize,
     input: String,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct PaneGroupView {
-    pub label: char,
-    pub color: GroupColor,
+#[derive(Debug)]
+struct GoalReviewEvent {
+    pane_id: PaneId,
+    pane_generation: u64,
+    goal_id: u64,
+    result: Result<ManagerDecision, String>,
 }
 
 #[derive(Debug, Clone)]
-pub struct PromptView {
-    pub label: char,
-    pub color: GroupColor,
+pub struct GoalEditorView {
+    pub pane_number: usize,
     pub input: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaneGoalView {
+    pub objective: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,6 +497,7 @@ pub enum SettingsGroup {
     Todo,
     Performance,
     Theme,
+    Manager,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -638,6 +646,8 @@ pub struct PaneSettingsView {
     pub auth_kind: Option<AgentKind>,
     pub auth_options: Vec<PaneAuthOption>,
     pub auth_cursor: usize,
+    pub goal: Option<PaneGoalView>,
+    pub manager_configured: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -685,6 +695,24 @@ pub struct ExitedPaneRecoveryView {
 pub enum SettingsTab {
     General,
     Auth,
+    Manager,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagerSettingTarget {
+    Endpoint,
+    Model,
+    ApiKey,
+}
+
+impl ManagerSettingTarget {
+    const ALL: [Self; 3] = [Self::Endpoint, Self::Model, Self::ApiKey];
+}
+
+#[derive(Debug, Clone)]
+struct ManagerSettingEdit {
+    target: ManagerSettingTarget,
+    buffer: String,
 }
 
 #[derive(Debug, Clone)]
@@ -868,6 +896,8 @@ struct SettingsState {
     scrollback: i32,
     refresh_ms: i32,
     palette: GridPalette,
+    manager_cursor: usize,
+    manager_edit: Option<ManagerSettingEdit>,
 }
 
 #[derive(Debug, Clone)]
@@ -1027,6 +1057,8 @@ impl Default for SettingsState {
             scrollback: 10_000,
             refresh_ms: 16,
             palette: GridPalette::default(),
+            manager_cursor: 0,
+            manager_edit: None,
         }
     }
 }
@@ -1236,6 +1268,119 @@ impl SettingsState {
             self.idle_seconds
                 .clamp(MIN_TODO_IDLE_SECONDS, MAX_TODO_IDLE_SECONDS),
         )
+    }
+
+    fn move_manager_cursor(&mut self, delta: isize) {
+        if self.manager_edit.is_some() {
+            return;
+        }
+        self.manager_cursor = (self.manager_cursor as isize + delta)
+            .clamp(0, ManagerSettingTarget::ALL.len() as isize - 1)
+            as usize;
+    }
+
+    fn selected_manager_target(&self) -> ManagerSettingTarget {
+        ManagerSettingTarget::ALL[self
+            .manager_cursor
+            .min(ManagerSettingTarget::ALL.len().saturating_sub(1))]
+    }
+
+    fn begin_manager_edit(&mut self, config: &crate::config::ManagerConfig) {
+        let target = self.selected_manager_target();
+        let buffer = match target {
+            ManagerSettingTarget::Endpoint => config.endpoint.clone(),
+            ManagerSettingTarget::Model => config.model.clone(),
+            ManagerSettingTarget::ApiKey => String::new(),
+        };
+        self.manager_edit = Some(ManagerSettingEdit { target, buffer });
+    }
+
+    fn editing_manager(&self) -> bool {
+        self.manager_edit.is_some()
+    }
+
+    fn insert_manager_text(&mut self, text: &str) -> bool {
+        let Some(edit) = &mut self.manager_edit else {
+            return false;
+        };
+        let remaining = MAX_MANAGER_SETTING_CHARS.saturating_sub(edit.buffer.chars().count());
+        let text = text
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(remaining)
+            .collect::<String>();
+        if text.is_empty() {
+            return false;
+        }
+        edit.buffer.push_str(&text);
+        true
+    }
+
+    fn backspace_manager_text(&mut self) -> bool {
+        self.manager_edit
+            .as_mut()
+            .is_some_and(|edit| edit.buffer.pop().is_some())
+    }
+
+    fn manager_rows(&self, config: &crate::config::ManagerConfig) -> Vec<SettingsRow> {
+        ManagerSettingTarget::ALL
+            .into_iter()
+            .map(|target| {
+                let editing = self
+                    .manager_edit
+                    .as_ref()
+                    .is_some_and(|edit| edit.target == target);
+                let raw = self
+                    .manager_edit
+                    .as_ref()
+                    .filter(|edit| edit.target == target)
+                    .map(|edit| edit.buffer.as_str())
+                    .unwrap_or_else(|| match target {
+                        ManagerSettingTarget::Endpoint => config.endpoint.as_str(),
+                        ManagerSettingTarget::Model => config.model.as_str(),
+                        ManagerSettingTarget::ApiKey => config.api_key.as_str(),
+                    });
+                let (label, value, hint) = match target {
+                    ManagerSettingTarget::Endpoint => (
+                        "API endpoint",
+                        format!("{}{}", raw, if editing { "_" } else { "" }),
+                        "OpenAI-compatible chat completions URL",
+                    ),
+                    ManagerSettingTarget::Model => (
+                        "Model",
+                        format!("{}{}", raw, if editing { "_" } else { "" }),
+                        "model name sent with manager reviews",
+                    ),
+                    ManagerSettingTarget::ApiKey => (
+                        "API key",
+                        format!(
+                            "{}{}",
+                            if raw.is_empty() {
+                                "not set"
+                            } else {
+                                "********"
+                            },
+                            if editing { "_" } else { "" }
+                        ),
+                        "stored in the local GridBash config",
+                    ),
+                };
+                SettingsRow {
+                    selected: self.selected_manager_target() == target,
+                    group: SettingsGroup::Manager,
+                    value_kind: SettingsValueKind::Text,
+                    editing,
+                    label: label.into(),
+                    value,
+                    value_color: None,
+                    hint: if editing {
+                        "Enter save | Esc cancel".into()
+                    } else {
+                        hint.into()
+                    },
+                }
+            })
+            .collect()
     }
 
     fn selected_target(&self) -> Option<SettingsTarget> {
@@ -1482,10 +1627,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
             .into()
     } else {
-        "Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        "Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
             .into()
     }
 }
@@ -1502,7 +1647,6 @@ impl App {
         if let Some(plan) = launch_plan.as_mut() {
             apply_auth_defaults(plan, &config)?;
         }
-        let manager_profile_name = resolve_manager_profile_name(&cli, &config);
         let mouse_enabled = !cli.no_mouse;
         let grid = launch_plan
             .as_ref()
@@ -1534,7 +1678,6 @@ impl App {
         Ok(Self::from_parts(AppInit {
             config,
             config_path,
-            manager_profile_name,
             worktrees,
             launch_plan,
             grid,
@@ -1556,7 +1699,6 @@ impl App {
         let restored_histories = record.session.pane_histories();
         let session_id = record.session.id.clone();
         let recorder = SessionRecorder::continue_record(record);
-        let manager_profile_name = config.defaults.manager_profile.clone();
         let settings = SettingsState::from_config(&config);
         let command_cwd = launch_plan
             .panes
@@ -1567,7 +1709,6 @@ impl App {
         Ok(Self::from_parts(AppInit {
             config,
             config_path: None,
-            manager_profile_name,
             worktrees: None,
             launch_plan: Some(launch_plan),
             grid,
@@ -1586,11 +1727,11 @@ impl App {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (usage_tx, usage_rx) = std_mpsc::channel();
         let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let (goal_tx, goal_rx) = std_mpsc::channel();
 
         Self {
             config: init.config,
             config_path: init.config_path,
-            manager_profile_name: init.manager_profile_name,
             worktrees: init.worktrees,
             tabs: vec![None],
             active_tab: 0,
@@ -1605,9 +1746,11 @@ impl App {
             pane_names: Vec::new(),
             text_selection: None,
             sleeping: BTreeSet::new(),
-            groups: Vec::new(),
-            next_group_id: 0,
-            prompt: None,
+            pane_goals: Vec::new(),
+            goal_editor: None,
+            next_goal_id: 1,
+            goal_tx,
+            goal_rx,
             rects: Vec::new(),
             mouse_enabled: init.mouse_enabled,
             command_line: CommandLineState::new(init.command_cwd),
@@ -1636,6 +1779,9 @@ impl App {
             pane_settings_button: None,
             pane_settings_rename_button: None,
             pane_settings_reload_button: None,
+            pane_settings_sleep_button: None,
+            pane_settings_goal_button: None,
+            pane_settings_stop_goal_button: None,
             event_tx,
             event_rx,
             usage_tx,
@@ -1700,13 +1846,12 @@ impl App {
         self.pane_names = vec![None; plan.panes.len()];
         self.text_selection = None;
         self.sleeping.clear();
+        self.pane_goals.clear();
+        self.goal_editor = None;
         self.next_pane_id = 0;
         self.pane_idle.clear();
         self.last_exit_poll = Instant::now();
         self.follow_up = None;
-        self.groups.clear();
-        self.next_group_id = 0;
-        self.prompt = None;
         self.start_session_recorder(&plan)?;
 
         for (index, spec) in plan.panes.iter().enumerate() {
@@ -1737,9 +1882,7 @@ impl App {
             pane_names: mem::take(&mut self.pane_names),
             text_selection: self.text_selection.take(),
             sleeping: mem::take(&mut self.sleeping),
-            groups: mem::take(&mut self.groups),
-            next_group_id: self.next_group_id,
-            prompt: self.prompt.take(),
+            pane_goals: mem::take(&mut self.pane_goals),
             rects: mem::take(&mut self.rects),
         }
     }
@@ -1755,9 +1898,7 @@ impl App {
         self.pane_names = tab.pane_names;
         self.text_selection = tab.text_selection;
         self.sleeping = tab.sleeping;
-        self.groups = tab.groups;
-        self.next_group_id = tab.next_group_id;
-        self.prompt = tab.prompt;
+        self.pane_goals = tab.pane_goals;
         self.rects = tab.rects;
     }
 
@@ -1775,7 +1916,7 @@ impl App {
         self.previous_panes.close();
         self.pane_settings.close();
         self.follow_up = None;
-        self.prompt = None;
+        self.goal_editor = None;
         self.text_selection = None;
         self.command_line.focused = false;
     }
@@ -1792,9 +1933,8 @@ impl App {
         self.pane_names = vec![None; plan.panes.len()];
         self.text_selection = None;
         self.sleeping.clear();
-        self.groups.clear();
-        self.next_group_id = 0;
-        self.prompt = None;
+        self.pane_goals.clear();
+        self.goal_editor = None;
         self.rects.clear();
         self.follow_up = None;
         self.restored_histories.clear();
@@ -1843,6 +1983,7 @@ impl App {
         }
         self.panes.push(pane);
         self.pane_idle.push(PaneIdleState::new(Instant::now()));
+        self.pane_goals.push(None);
         Ok(())
     }
 
@@ -1888,11 +2029,12 @@ impl App {
             needs_render |= self.drain_usage_events();
             needs_render |= self.drain_auth_refresh();
             needs_render |= self.drain_command_events();
+            needs_render |= self.drain_goal_reviews();
             needs_render |= self.drain_voice_events()?;
             needs_render |= self.drain_control_events();
             needs_render |= self.decay_activity();
             needs_render |= self.update_follow_up_prompt();
-            needs_render |= self.relay_worker_output();
+            needs_render |= self.schedule_goal_reviews();
 
             if needs_render {
                 terminal.draw(|frame| {
@@ -1904,6 +2046,9 @@ impl App {
                     self.pane_settings_button = draw_state.pane_settings_button;
                     self.pane_settings_rename_button = draw_state.pane_settings_rename_button;
                     self.pane_settings_reload_button = draw_state.pane_settings_reload_button;
+                    self.pane_settings_sleep_button = draw_state.pane_settings_sleep_button;
+                    self.pane_settings_goal_button = draw_state.pane_settings_goal_button;
+                    self.pane_settings_stop_goal_button = draw_state.pane_settings_stop_goal_button;
                 })?;
                 self.sync_pane_sizes();
                 needs_render = false;
@@ -1933,14 +2078,21 @@ impl App {
                         self.rename.insert_text(&text);
                         needs_render = true;
                     }
+                    Event::Paste(text) if self.settings.editing_manager() => {
+                        if self.settings.insert_manager_text(&text) {
+                            needs_render = true;
+                        }
+                    }
                     Event::Paste(text) if self.settings.editing_todo() => {
                         if self.settings.insert_todo_text(&text) {
                             needs_render = true;
                         }
                     }
-                    Event::Paste(text) if self.prompt.is_some() => {
-                        if let Some(prompt) = &mut self.prompt {
-                            prompt.input.push_str(&text);
+                    Event::Paste(text) if self.goal_editor.is_some() => {
+                        if let Some(editor) = &mut self.goal_editor {
+                            let remaining =
+                                TODO_INPUT_LIMIT.saturating_sub(editor.input.chars().count());
+                            editor.input.extend(text.chars().take(remaining));
                             needs_render = true;
                         }
                     }
@@ -1951,7 +2103,7 @@ impl App {
                             && !self.pane_settings.open
                             && self.image_overlay.is_none()
                             && self.follow_up.is_none()
-                            && self.prompt.is_none() =>
+                            && self.goal_editor.is_none() =>
                     {
                         if self.command_line.focused {
                             self.command_line.insert_text(&text);
@@ -1964,7 +2116,7 @@ impl App {
                         if (self.mouse_enabled || !self.sleeping.is_empty())
                             && !self.settings.open
                             && self.follow_up.is_none()
-                            && self.prompt.is_none() =>
+                            && self.goal_editor.is_none() =>
                     {
                         needs_render |= self.handle_mouse(mouse, terminal)?;
                     }
@@ -1997,7 +2149,6 @@ impl App {
 
     fn drain_pty_events(&mut self) -> bool {
         let mut changed = false;
-        let mut dispatches = Vec::new();
         let mut pending_output = BTreeMap::<(PaneId, u64), Vec<u8>>::new();
         let mut exited = Vec::new();
 
@@ -2023,12 +2174,10 @@ impl App {
             if let Some(index) = self.visible_pane_index(pane, generation) {
                 let target = &mut self.panes[index];
                 target.process_output(&bytes);
-                self.capture_worker_output(index, &bytes);
+                self.capture_goal_output(index, &bytes);
                 self.mark_pane_touched(index);
                 changed = true;
-            } else if self.process_manager_output(pane, generation, &bytes, &mut dispatches)
-                || self.process_inactive_output(pane, generation, &bytes)
-            {
+            } else if self.process_inactive_output(pane, generation, &bytes) {
                 changed = true;
             }
         }
@@ -2046,9 +2195,7 @@ impl App {
                 {
                     self.follow_up = None;
                 }
-            } else if self.process_manager_exit(pane, generation)
-                || self.process_inactive_exit(pane, generation)
-            {
+            } else if self.process_inactive_exit(pane, generation) {
                 changed = true;
             }
         }
@@ -2065,29 +2212,13 @@ impl App {
                     changed = true;
                 }
             }
-            for group in &mut self.groups {
-                let exited_now = group.manager.poll_exit();
-                if exited_now {
-                    group.status = "manager exited".into();
-                }
-                changed |= exited_now;
-            }
             for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
                 for pane in &mut tab.panes {
                     changed |= pane.poll_exit();
                 }
-                for group in &mut tab.groups {
-                    let exited_now = group.manager.poll_exit();
-                    if exited_now {
-                        group.status = "manager exited".into();
-                    }
-                    changed |= exited_now;
-                }
             }
             self.last_exit_poll = Instant::now();
         }
-
-        changed |= self.dispatch_manager_commands(dispatches);
 
         changed
     }
@@ -2098,73 +2229,15 @@ impl App {
             .position(|target| target.id() == pane && target.generation() == generation)
     }
 
-    fn process_manager_output(
-        &mut self,
-        pane: PaneId,
-        generation: u64,
-        bytes: &[u8],
-        dispatches: &mut Vec<(GroupId, SendBlock)>,
-    ) -> bool {
-        let Some(group) = self
-            .groups
-            .iter_mut()
-            .find(|group| group.manager.id() == pane && group.manager.generation() == generation)
-        else {
-            return false;
-        };
-
-        group.manager.process_output(bytes);
-        group
-            .manager_buffer
-            .push_str(&String::from_utf8_lossy(bytes));
-        for block in extract_send_blocks(&mut group.manager_buffer) {
-            dispatches.push((group.id, block));
-        }
-        let label = group.label;
-        group.status = "manager active".into();
-        self.status = format!("group {label}: manager active");
-        true
-    }
-
-    fn process_manager_exit(&mut self, pane: PaneId, generation: u64) -> bool {
-        let Some(group) = self
-            .groups
-            .iter_mut()
-            .find(|group| group.manager.id() == pane && group.manager.generation() == generation)
-        else {
-            return false;
-        };
-
-        if group.manager.exited {
-            return false;
-        }
-
-        let label = group.label;
-        group.manager.exited = true;
-        group.status = "manager exited".into();
-        self.status = format!("group {label}: manager exited");
-        true
-    }
-
     fn process_inactive_output(&mut self, pane: PaneId, generation: u64, bytes: &[u8]) -> bool {
         for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
-            if let Some(target) = tab
+            if let Some(index) = tab
                 .panes
-                .iter_mut()
-                .find(|target| target.id() == pane && target.generation() == generation)
+                .iter()
+                .position(|target| target.id() == pane && target.generation() == generation)
             {
-                target.process_output(bytes);
-                return true;
-            }
-
-            if let Some(group) = tab.groups.iter_mut().find(|group| {
-                group.manager.id() == pane && group.manager.generation() == generation
-            }) {
-                group.manager.process_output(bytes);
-                group
-                    .manager_buffer
-                    .push_str(&String::from_utf8_lossy(bytes));
-                group.status = "manager active".into();
+                tab.panes[index].process_output(bytes);
+                capture_goal_bytes(&mut tab.pane_goals, &tab.sleeping, index, bytes);
                 return true;
             }
         }
@@ -2185,118 +2258,87 @@ impl App {
                 target.exited = true;
                 return true;
             }
-
-            if let Some(group) = tab.groups.iter_mut().find(|group| {
-                group.manager.id() == pane && group.manager.generation() == generation
-            }) {
-                if group.manager.exited {
-                    return false;
-                }
-                group.manager.exited = true;
-                group.status = "manager exited".into();
-                return true;
-            }
         }
 
         false
     }
 
-    fn capture_worker_output(&mut self, pane_index: usize, bytes: &[u8]) {
-        if self.sleeping.contains(&pane_index) {
-            return;
-        }
-
-        let output = String::from_utf8_lossy(bytes);
-        if output.trim().is_empty() {
-            return;
-        }
-
-        for group in &mut self.groups {
-            if !group.workers.contains(&pane_index) {
-                continue;
-            }
-
-            let buffer = group.relay_buffers.entry(pane_index).or_default();
-            buffer.push_str(&output);
-            trim_relay_buffer(buffer);
-            group.last_worker_output = Some(Instant::now());
-        }
+    fn capture_goal_output(&mut self, pane_index: usize, bytes: &[u8]) {
+        capture_goal_bytes(&mut self.pane_goals, &self.sleeping, pane_index, bytes);
     }
 
-    fn dispatch_manager_commands(&mut self, dispatches: Vec<(GroupId, SendBlock)>) -> bool {
-        let mut changed = false;
-
-        for (group_id, block) in dispatches {
-            let Some(group_index) = self.groups.iter().position(|group| group.id == group_id)
-            else {
+    fn schedule_goal_reviews(&mut self) -> bool {
+        let now = Instant::now();
+        let mut requests = Vec::new();
+        for (index, goal) in self.pane_goals.iter_mut().enumerate() {
+            let Some(goal) = goal else {
                 continue;
             };
-            let workers = self.groups[group_index].workers.clone();
-            let targets = match block.targets {
-                SendTargets::All => workers,
-                SendTargets::Panes(panes) => panes
-                    .into_iter()
-                    .filter_map(|pane_number| pane_number.checked_sub(1))
-                    .filter(|pane_index| workers.contains(pane_index))
-                    .collect::<BTreeSet<_>>(),
-            };
-            let targets = targets
-                .into_iter()
-                .filter(|pane_index| !self.sleeping.contains(pane_index))
-                .collect::<BTreeSet<_>>();
-
-            if targets.is_empty() {
-                self.groups[group_index].status = "manager send had no awake valid targets".into();
-                self.status = format!(
-                    "group {} send skipped: no awake valid targets",
-                    self.groups[group_index].label
-                );
-                changed = true;
+            if !goal.active
+                || goal.in_flight
+                || goal.output_buffer.trim().is_empty()
+                || self.sleeping.contains(&index)
+                || self.panes.get(index).is_none_or(|pane| pane.exited)
+                || goal.retry_after.is_some_and(|retry| now < retry)
+                || goal
+                    .last_output_at
+                    .is_none_or(|last| now.duration_since(last) < PANE_GOAL_REVIEW_IDLE)
+            {
                 continue;
             }
 
-            let bytes = paste_and_enter_bytes(&block.message);
-            let mut sent = 0_usize;
-            for pane_index in targets {
-                if let Some(pane) = self.panes.get(pane_index)
-                    && pane.write(&bytes).is_ok()
-                {
-                    sent += 1;
-                }
-            }
+            let pane = &self.panes[index];
+            goal.in_flight = true;
+            goal.retry_after = None;
+            goal.status = "reviewing pane output".into();
+            requests.push((
+                pane.id(),
+                pane.generation(),
+                goal.id,
+                goal.objective.clone(),
+                goal.output_buffer.clone(),
+            ));
+        }
 
-            let label = self.groups[group_index].label;
-            self.groups[group_index].status = format!("sent to {sent} worker(s)");
-            self.status = format!("group {label} manager sent to {sent} worker(s)");
-            changed = true;
+        let changed = !requests.is_empty();
+        for (pane_id, pane_generation, goal_id, objective, output) in requests {
+            let config = self.config.manager.clone();
+            let tx = self.goal_tx.clone();
+            thread::spawn(move || {
+                let result = manager::review(&config, &objective, &output)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = tx.send(GoalReviewEvent {
+                    pane_id,
+                    pane_generation,
+                    goal_id,
+                    result,
+                });
+            });
         }
 
         changed
     }
 
-    fn relay_worker_output(&mut self) -> bool {
-        let now = Instant::now();
+    fn drain_goal_reviews(&mut self) -> bool {
         let mut changed = false;
-
-        for group in &mut self.groups {
-            let Some(last_output) = group.last_worker_output else {
-                continue;
-            };
-            if now.duration_since(last_output) < WORKER_RELAY_IDLE || group.relay_buffers.is_empty()
+        while let Ok(event) = self.goal_rx.try_recv() {
+            if let Some(status) =
+                apply_goal_review(&self.panes, &mut self.pane_goals, &self.sleeping, &event)
             {
+                self.status = status;
+                changed = true;
                 continue;
             }
 
-            let relay = worker_relay_message(group.label, &group.relay_buffers);
-            if group.manager.write(&paste_and_enter_bytes(&relay)).is_ok() {
-                group.status = format!("relayed {} worker(s)", group.relay_buffers.len());
-                self.status = format!("group {}: worker output relayed", group.label);
-                group.relay_buffers.clear();
-                group.last_worker_output = None;
-                changed = true;
+            for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
+                if apply_goal_review(&tab.panes, &mut tab.pane_goals, &tab.sleeping, &event)
+                    .is_some()
+                {
+                    changed = true;
+                    break;
+                }
             }
         }
-
         changed
     }
 
@@ -2600,8 +2642,8 @@ impl App {
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
         }
 
-        if self.prompt.is_some() {
-            let outcome = self.handle_prompt_key(key)?;
+        if self.goal_editor.is_some() {
+            let outcome = self.handle_goal_editor_key(key)?;
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
         }
 
@@ -2773,15 +2815,11 @@ impl App {
                 Ok(Some(false))
             }
             'g' => {
-                if self.selected.is_empty() {
-                    self.open_manager_prompt()?;
-                } else {
-                    self.create_group_from_selection()?;
-                }
+                self.open_goal_editor_for(self.focus);
                 Ok(Some(false))
             }
             'u' => {
-                self.dissolve_focused_group();
+                self.stop_pane_goal(self.focus);
                 Ok(Some(false))
             }
             'o' => {
@@ -3120,6 +3158,22 @@ impl App {
             self.begin_rename_for(self.pane_settings.pane_index);
             return Ok(KeyOutcome::Render);
         }
+        if matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z')) {
+            let pane_index = self.pane_settings.pane_index;
+            self.toggle_sleep_for_panes(&[pane_index]);
+            return Ok(KeyOutcome::Render);
+        }
+        if matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G')) {
+            let pane_index = self.pane_settings.pane_index;
+            self.pane_settings.close();
+            self.open_goal_editor_for(pane_index);
+            return Ok(KeyOutcome::Render);
+        }
+        if matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U')) {
+            let pane_index = self.pane_settings.pane_index;
+            self.stop_pane_goal(pane_index);
+            return Ok(KeyOutcome::Render);
+        }
 
         let changed = match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
@@ -3362,326 +3416,11 @@ impl App {
             plan.panes.swap(first, second);
         }
         swap_set_indices(&mut self.sleeping, first, second);
-        self.swap_group_indices(first, second);
+        if first < self.pane_goals.len() && second < self.pane_goals.len() {
+            self.pane_goals.swap(first, second);
+        }
         self.focus = swapped_index(self.focus, first, second);
         self.status = format!("swapped panes {} and {}", first + 1, second + 1);
-    }
-
-    fn swap_group_indices(&mut self, first: usize, second: usize) {
-        for group in &mut self.groups {
-            swap_set_indices(&mut group.workers, first, second);
-
-            let first_buffer = group.relay_buffers.remove(&first);
-            let second_buffer = group.relay_buffers.remove(&second);
-            if let Some(buffer) = first_buffer {
-                group.relay_buffers.insert(second, buffer);
-            }
-            if let Some(buffer) = second_buffer {
-                group.relay_buffers.insert(first, buffer);
-            }
-        }
-    }
-
-    fn create_group_from_selection(&mut self) -> Result<()> {
-        if self.groups.len() >= MAX_GROUPS {
-            self.status = format!("group limit reached ({MAX_GROUPS})");
-            return Ok(());
-        }
-
-        let workers = self
-            .selected
-            .iter()
-            .copied()
-            .filter(|index| *index < self.panes.len() && !self.sleeping.contains(index))
-            .collect::<BTreeSet<_>>();
-        if workers.is_empty() {
-            self.status = "select awake worker panes before grouping".into();
-            return Ok(());
-        }
-
-        if let Some((pane_index, label)) = self.first_grouped_pane(&workers) {
-            self.status = format!("pane {} already belongs to group {label}", pane_index + 1);
-            return Ok(());
-        }
-
-        let Some(palette_index) = self.next_palette_index() else {
-            self.status = format!("group limit reached ({MAX_GROUPS})");
-            return Ok(());
-        };
-        let label = group_label(palette_index);
-
-        let (manager_name, manager_profile) = match self.resolve_manager_profile() {
-            Ok(profile) => profile,
-            Err(error) => {
-                self.status = format!("manager profile unavailable: {error:#}");
-                return Ok(());
-            }
-        };
-        let launch = match manager_profile.resolved_command() {
-            Ok(launch) => launch,
-            Err(error) => {
-                self.status = format!("manager profile failed: {error:#}");
-                return Ok(());
-            }
-        };
-
-        let group_id = GroupId(self.next_group_id);
-        self.next_group_id += 1;
-        let cwd = self.group_cwd(&workers)?;
-        let mut manager_env = BTreeMap::new();
-        if let Some(kind) = manager_profile.agent_kind
-            && let Some(auth_env) = auth::env_for_default(&self.config.auth, kind)?
-        {
-            manager_env.extend(auth_env.env_map());
-        }
-        let manager = match PtyPane::spawn(
-            &manager_name,
-            PaneId(manager_pane_id(group_id)),
-            group_id.0 as u64 + 1,
-            &launch.command,
-            &launch.args,
-            &manager_env,
-            &cwd,
-            &[],
-            self.event_tx.clone(),
-        ) {
-            Ok(manager) => manager,
-            Err(error) => {
-                self.status = format!("manager spawn failed: {error:#}");
-                return Ok(());
-            }
-        };
-
-        let intro = self.manager_intro_message(label, &workers);
-        if let Err(error) = manager.write(&paste_and_enter_bytes(&intro)) {
-            self.status = format!("manager init failed: {error:#}");
-            return Ok(());
-        }
-
-        self.groups.push(AgentGroup {
-            id: group_id,
-            palette_index,
-            label,
-            workers,
-            manager,
-            manager_buffer: String::new(),
-            relay_buffers: BTreeMap::new(),
-            last_worker_output: None,
-            status: format!("manager {manager_name} ready"),
-        });
-        self.selected.clear();
-        self.status = format!("group {label} attached to hidden manager {manager_name}");
-        Ok(())
-    }
-
-    fn open_manager_prompt(&mut self) -> Result<()> {
-        let group_id = self
-            .group_for_pane(self.focus)
-            .or_else(|| (self.groups.len() == 1).then_some(self.groups[0].id));
-        let Some(group_id) = group_id else {
-            self.status = "select panes to create a group, or focus a grouped pane".into();
-            return Ok(());
-        };
-
-        let Some(group) = self.groups.iter().find(|group| group.id == group_id) else {
-            self.status = "group is no longer available".into();
-            return Ok(());
-        };
-
-        self.prompt = Some(PromptState {
-            group_id,
-            input: String::new(),
-        });
-        self.status = format!("talking to group {} manager", group.label);
-        Ok(())
-    }
-
-    fn dissolve_focused_group(&mut self) {
-        let group_id = self
-            .group_for_pane(self.focus)
-            .or_else(|| (self.groups.len() == 1).then_some(self.groups[0].id));
-        let Some(group_id) = group_id else {
-            self.status = "focus a grouped pane to dissolve its group".into();
-            return;
-        };
-
-        let Some(index) = self.groups.iter().position(|group| group.id == group_id) else {
-            self.status = "group is no longer available".into();
-            return;
-        };
-
-        let label = self.groups[index].label;
-        if self
-            .prompt
-            .as_ref()
-            .is_some_and(|prompt| prompt.group_id == group_id)
-        {
-            self.prompt = None;
-        }
-        self.groups.remove(index);
-        self.status = format!("group {label} dissolved");
-    }
-
-    fn handle_prompt_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
-        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
-            return Ok(KeyOutcome::Quit);
-        }
-
-        let Some(prompt) = &mut self.prompt else {
-            return Ok(KeyOutcome::Continue);
-        };
-
-        match key.code {
-            KeyCode::Esc => {
-                self.prompt = None;
-                self.status = "manager prompt closed".into();
-                Ok(KeyOutcome::Render)
-            }
-            KeyCode::Enter => self.send_prompt_to_manager(),
-            KeyCode::Backspace => {
-                prompt.input.pop();
-                Ok(KeyOutcome::Render)
-            }
-            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                prompt.input.clear();
-                Ok(KeyOutcome::Render)
-            }
-            KeyCode::Char(ch)
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                prompt.input.push(ch);
-                Ok(KeyOutcome::Render)
-            }
-            _ => Ok(KeyOutcome::Continue),
-        }
-    }
-
-    fn send_prompt_to_manager(&mut self) -> Result<KeyOutcome> {
-        let Some(prompt) = self.prompt.take() else {
-            return Ok(KeyOutcome::Continue);
-        };
-        let input = prompt.input.trim();
-        if input.is_empty() {
-            self.status = "manager prompt skipped".into();
-            return Ok(KeyOutcome::Render);
-        }
-
-        let Some(group) = self
-            .groups
-            .iter_mut()
-            .find(|group| group.id == prompt.group_id)
-        else {
-            self.status = "group is no longer available".into();
-            return Ok(KeyOutcome::Render);
-        };
-
-        let message = user_manager_message(group.label, input);
-        match group.manager.write(&paste_and_enter_bytes(&message)) {
-            Ok(()) => {
-                group.status = "manager prompted".into();
-                self.status = format!("sent prompt to group {} manager", group.label);
-            }
-            Err(error) => {
-                group.status = "manager write failed".into();
-                self.status = format!("manager prompt failed: {error:#}");
-            }
-        }
-
-        Ok(KeyOutcome::Render)
-    }
-
-    fn first_grouped_pane(&self, workers: &BTreeSet<usize>) -> Option<(usize, char)> {
-        workers.iter().find_map(|pane_index| {
-            self.groups
-                .iter()
-                .find(|group| group.workers.contains(pane_index))
-                .map(|group| (*pane_index, group.label))
-        })
-    }
-
-    fn next_palette_index(&self) -> Option<usize> {
-        let used = self
-            .groups
-            .iter()
-            .map(|group| group.palette_index)
-            .collect::<BTreeSet<_>>();
-        (0..MAX_GROUPS).find(|index| !used.contains(index))
-    }
-
-    fn resolve_manager_profile(&self) -> Result<(String, Profile)> {
-        let name = self
-            .manager_profile_name
-            .as_deref()
-            .ok_or_else(|| anyhow!("set --manager-profile or [defaults].manager_profile"))?;
-
-        if let Ok(profile) = find_profile(&self.config, name) {
-            return Ok((name.to_string(), profile));
-        }
-
-        let profiles = vibe::load_profiles()?;
-        let profile = vibe::profile_for_name(name, &profiles)
-            .ok_or_else(|| anyhow!("vibe profile '{name}' is missing or not ready"))?;
-        Ok((name.to_string(), profile))
-    }
-
-    fn group_cwd(&self, workers: &BTreeSet<usize>) -> Result<PathBuf> {
-        let Some(first_worker) = workers.iter().next() else {
-            return resolved_current_dir();
-        };
-        Ok(self
-            .panes
-            .get(*first_worker)
-            .map(|pane| pane.cwd().to_path_buf())
-            .unwrap_or(resolved_current_dir()?))
-    }
-
-    fn manager_intro_message(&self, label: char, workers: &BTreeSet<usize>) -> String {
-        let worker_lines = workers
-            .iter()
-            .map(|pane_index| {
-                format!(
-                    "- pane {}: {}",
-                    pane_index + 1,
-                    self.worker_label(*pane_index)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        format!(
-            "You are the hidden GridBash manager for group {label}.\n\
-            Coordinate only these worker panes:\n\
-            {worker_lines}\n\n\
-            When you need GridBash to send instructions to workers, emit a fenced block whose opening line is three backticks immediately followed by one of these commands:\n\
-            gridbash send all\n\
-            gridbash send panes 1, 3\n\
-            Put only the worker instruction text inside that fence.\n\n\
-            I will relay worker output snapshots back to you. Keep routing blocks concise and only target panes in this group."
-        )
-    }
-
-    fn worker_label(&self, pane_index: usize) -> String {
-        let folder = self
-            .pane_folder(pane_index)
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                self.panes
-                    .get(pane_index)
-                    .map(|pane| pane.cwd().display().to_string())
-                    .unwrap_or_else(|| "unknown cwd".into())
-            });
-        match self.pane_worktree(pane_index) {
-            Some(worktree) => format!("{folder} ({worktree})"),
-            None => folder,
-        }
-    }
-
-    fn group_for_pane(&self, pane_index: usize) -> Option<GroupId> {
-        self.groups
-            .iter()
-            .find(|group| group.workers.contains(&pane_index))
-            .map(|group| group.id)
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -3691,6 +3430,10 @@ impl App {
 
         if self.settings.editing_todo() {
             return self.handle_todo_edit_key(key);
+        }
+
+        if self.settings.editing_manager() {
+            return self.handle_manager_edit_key(key);
         }
 
         if key.modifiers.contains(KeyModifiers::ALT)
@@ -3716,6 +3459,9 @@ impl App {
 
         if self.settings.tab == SettingsTab::Auth {
             return self.handle_auth_settings_key(key);
+        }
+        if self.settings.tab == SettingsTab::Manager {
+            return self.handle_manager_settings_key(key);
         }
 
         let change = match key.code {
@@ -3793,6 +3539,196 @@ impl App {
         } else {
             KeyOutcome::Continue
         })
+    }
+
+    fn open_goal_editor_for(&mut self, pane_index: usize) {
+        if pane_index >= self.panes.len() {
+            self.status = "no pane available for a manager goal".into();
+            return;
+        }
+        let input = self
+            .pane_goals
+            .get(pane_index)
+            .and_then(Option::as_ref)
+            .map(|goal| goal.objective.clone())
+            .unwrap_or_default();
+        self.goal_editor = Some(GoalEditorState { pane_index, input });
+        self.status = format!("editing pane {} manager goal", pane_index + 1);
+    }
+
+    fn handle_goal_editor_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return Ok(KeyOutcome::Quit);
+        }
+        let Some(editor) = &mut self.goal_editor else {
+            return Ok(KeyOutcome::Continue);
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.goal_editor = None;
+                self.status = "manager goal edit cancelled".into();
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Enter => self.save_goal_editor(),
+            KeyCode::Backspace => {
+                editor.input.pop();
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                editor.input.clear();
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT)
+                    && editor.input.chars().count() < TODO_INPUT_LIMIT =>
+            {
+                editor.input.push(ch);
+                Ok(KeyOutcome::Render)
+            }
+            _ => Ok(KeyOutcome::Continue),
+        }
+    }
+
+    fn save_goal_editor(&mut self) -> Result<KeyOutcome> {
+        let Some(editor) = self.goal_editor.take() else {
+            return Ok(KeyOutcome::Continue);
+        };
+        let objective = editor
+            .input
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if objective.is_empty() {
+            self.status = "manager goal cannot be empty".into();
+            return Ok(KeyOutcome::Render);
+        }
+        if let Err(error) = self.config.manager.validate() {
+            self.status = format!("manager unavailable: {error:#}");
+            return Ok(KeyOutcome::Render);
+        }
+        if self.sleeping.contains(&editor.pane_index) {
+            self.status = format!(
+                "wake pane {} before starting its goal",
+                editor.pane_index + 1
+            );
+            return Ok(KeyOutcome::Render);
+        }
+        let Some(pane) = self.panes.get(editor.pane_index) else {
+            self.status = "pane is no longer available".into();
+            return Ok(KeyOutcome::Render);
+        };
+        if pane.exited {
+            self.status = format!(
+                "restart pane {} before starting its goal",
+                editor.pane_index + 1
+            );
+            return Ok(KeyOutcome::Render);
+        }
+
+        pane.write(&paste_and_enter_bytes(&pane_goal_intro(&objective)))?;
+        let goal = PaneGoal {
+            id: self.next_goal_id,
+            objective,
+            active: true,
+            output_buffer: String::new(),
+            last_output_at: None,
+            in_flight: false,
+            retry_after: None,
+            status: "waiting for pane output".into(),
+        };
+        self.next_goal_id = self.next_goal_id.saturating_add(1);
+        if self.pane_goals.len() < self.panes.len() {
+            self.pane_goals.resize(self.panes.len(), None);
+        }
+        self.pane_goals[editor.pane_index] = Some(goal);
+        self.status = format!("manager goal started in pane {}", editor.pane_index + 1);
+        Ok(KeyOutcome::Render)
+    }
+
+    fn stop_pane_goal(&mut self, pane_index: usize) {
+        let stopped = self
+            .pane_goals
+            .get_mut(pane_index)
+            .is_some_and(|goal| goal.take().is_some());
+        self.status = if stopped {
+            format!("manager goal stopped in pane {}", pane_index + 1)
+        } else {
+            format!("pane {} has no manager goal", pane_index + 1)
+        };
+    }
+
+    fn handle_manager_settings_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        let changed = match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.settings.open = false;
+                self.status = "settings closed".into();
+                true
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.settings.move_manager_cursor(-1);
+                true
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.settings.move_manager_cursor(1);
+                true
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.settings.begin_manager_edit(&self.config.manager);
+                self.status = "editing manager API setting".into();
+                true
+            }
+            _ => false,
+        };
+        Ok(if changed {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        })
+    }
+
+    fn handle_manager_edit_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        match key.code {
+            KeyCode::Esc => {
+                self.settings.manager_edit = None;
+                self.status = "manager setting edit cancelled".into();
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Enter => {
+                let Some(edit) = self.settings.manager_edit.take() else {
+                    return Ok(KeyOutcome::Continue);
+                };
+                let value = edit.buffer.trim().to_string();
+                match edit.target {
+                    ManagerSettingTarget::Endpoint => self.config.manager.endpoint = value,
+                    ManagerSettingTarget::Model => self.config.manager.model = value,
+                    ManagerSettingTarget::ApiKey => self.config.manager.api_key = value,
+                }
+                match self.config.save(self.config_path.as_deref()) {
+                    Ok(_) => self.status = "manager API setting saved".into(),
+                    Err(error) => {
+                        self.status = format!("failed to save manager setting: {error:#}")
+                    }
+                }
+                Ok(KeyOutcome::Render)
+            }
+            KeyCode::Backspace => Ok(if self.settings.backspace_manager_text() {
+                KeyOutcome::Render
+            } else {
+                KeyOutcome::Continue
+            }),
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                Ok(if self.settings.insert_manager_text(&ch.to_string()) {
+                    KeyOutcome::Render
+                } else {
+                    KeyOutcome::Continue
+                })
+            }
+            _ => Ok(KeyOutcome::Continue),
+        }
     }
 
     fn handle_auth_create_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -3953,7 +3889,10 @@ impl App {
             return Ok(false);
         };
 
-        let bytes = mouse_scroll_bytes(mouse, point, pane.screen());
+        // Selection is a GridBash control state, so wheel input must stay local to
+        // the pane under the pointer instead of being consumed by the terminal app.
+        let bytes =
+            pane_mouse_scroll_bytes(mouse, point, pane.screen(), self.selected.contains(&index));
         let exited = pane.exited;
         let mut changed = self.focus != index || self.clear_text_selection();
         self.focus = index;
@@ -4012,6 +3951,22 @@ impl App {
             self.reload_pane_history();
             return true;
         }
+        if self.pane_settings_sleep_button_at(mouse.column, mouse.row) {
+            let pane_index = self.pane_settings.pane_index;
+            self.toggle_sleep_for_panes(&[pane_index]);
+            return true;
+        }
+        if self.pane_settings_goal_button_at(mouse.column, mouse.row) {
+            let pane_index = self.pane_settings.pane_index;
+            self.pane_settings.close();
+            self.open_goal_editor_for(pane_index);
+            return true;
+        }
+        if self.pane_settings_stop_goal_button_at(mouse.column, mouse.row) {
+            let pane_index = self.pane_settings.pane_index;
+            self.stop_pane_goal(pane_index);
+            return true;
+        }
         if self.pane_settings_rename_button_at(mouse.column, mouse.row) {
             self.begin_rename_for(self.pane_settings.pane_index);
             return true;
@@ -4043,6 +3998,21 @@ impl App {
 
     fn pane_settings_rename_button_at(&self, x: u16, y: u16) -> bool {
         self.pane_settings_rename_button
+            .is_some_and(|rect| rect_contains(rect, x, y))
+    }
+
+    fn pane_settings_sleep_button_at(&self, x: u16, y: u16) -> bool {
+        self.pane_settings_sleep_button
+            .is_some_and(|rect| rect_contains(rect, x, y))
+    }
+
+    fn pane_settings_goal_button_at(&self, x: u16, y: u16) -> bool {
+        self.pane_settings_goal_button
+            .is_some_and(|rect| rect_contains(rect, x, y))
+    }
+
+    fn pane_settings_stop_goal_button_at(&self, x: u16, y: u16) -> bool {
+        self.pane_settings_stop_goal_button
             .is_some_and(|rect| rect_contains(rect, x, y))
     }
 
@@ -4295,6 +4265,7 @@ impl App {
         }
         self.pane_names.truncate(target_count);
         self.pane_idle.truncate(target_count);
+        self.pane_goals.truncate(target_count);
         if self
             .follow_up
             .is_some_and(|prompt| prompt.pane_index >= target_count)
@@ -4313,28 +4284,8 @@ impl App {
         {
             self.text_selection = None;
         }
-        self.truncate_groups(target_count);
         true
     }
-
-    fn truncate_groups(&mut self, target_count: usize) {
-        self.groups.retain_mut(|group| {
-            group.workers.retain(|index| *index < target_count);
-            group
-                .relay_buffers
-                .retain(|pane_index, _| *pane_index < target_count);
-            !group.workers.is_empty()
-        });
-
-        if self
-            .prompt
-            .as_ref()
-            .is_some_and(|prompt| !self.groups.iter().any(|group| group.id == prompt.group_id))
-        {
-            self.prompt = None;
-        }
-    }
-
     fn toggle_sleep_for_targets(&mut self) {
         let targets = self.target_panes();
         self.toggle_sleep_for_panes(&targets);
@@ -5006,6 +4957,10 @@ impl App {
         self.settings.rows()
     }
 
+    pub fn manager_settings_rows(&self) -> Vec<SettingsRow> {
+        self.settings.manager_rows(&self.config.manager)
+    }
+
     pub fn settings_tab(&self) -> SettingsTab {
         self.settings.tab
     }
@@ -5146,6 +5101,15 @@ impl App {
             auth_kind: spec.and_then(|spec| spec.command.agent_kind),
             auth_options,
             auth_cursor: self.pane_settings.auth_cursor,
+            goal: self
+                .pane_goals
+                .get(index)
+                .and_then(Option::as_ref)
+                .map(|goal| PaneGoalView {
+                    objective: goal.objective.clone(),
+                    status: goal.status.clone(),
+                }),
+            manager_configured: self.config.manager.is_configured(),
         })
     }
 
@@ -5207,27 +5171,10 @@ impl App {
             quiet_seconds,
         })
     }
-
-    pub fn pane_group(&self, index: usize) -> Option<PaneGroupView> {
-        self.groups
-            .iter()
-            .find(|group| group.workers.contains(&index))
-            .map(|group| PaneGroupView {
-                label: group.label,
-                color: group_color(group.palette_index),
-            })
-    }
-
-    pub fn prompt_view(&self) -> Option<PromptView> {
-        let prompt = self.prompt.as_ref()?;
-        let group = self
-            .groups
-            .iter()
-            .find(|group| group.id == prompt.group_id)?;
-        Some(PromptView {
-            label: group.label,
-            color: group_color(group.palette_index),
-            input: prompt.input.clone(),
+    pub fn goal_editor_view(&self) -> Option<GoalEditorView> {
+        self.goal_editor.as_ref().map(|editor| GoalEditorView {
+            pane_number: editor.pane_index + 1,
+            input: editor.input.clone(),
         })
     }
 
@@ -5397,7 +5344,8 @@ impl App {
     fn toggle_settings_tab(&mut self) {
         self.settings.tab = match self.settings.tab {
             SettingsTab::General => SettingsTab::Auth,
-            SettingsTab::Auth => SettingsTab::General,
+            SettingsTab::Auth => SettingsTab::Manager,
+            SettingsTab::Manager => SettingsTab::General,
         };
         if self.settings.tab == SettingsTab::Auth && self.auth_profiles.is_empty() {
             self.start_auth_refresh();
@@ -5733,44 +5681,115 @@ fn resolve_profile_name(cli: &Cli, config: &Config) -> String {
         .or_else(|| config.defaults.profile.clone())
         .unwrap_or_else(|| "git-bash".into())
 }
-
-fn resolve_manager_profile_name(cli: &Cli, config: &Config) -> Option<String> {
-    cli.manager_profile
-        .clone()
-        .or_else(|| env::var("GRIDBASH_MANAGER_PROFILE").ok())
-        .or_else(|| config.defaults.manager_profile.clone())
-}
-
 fn resolved_current_dir() -> Result<std::path::PathBuf> {
     let current = env::current_dir().context("failed to resolve current directory")?;
     Ok(current.canonicalize().unwrap_or(current))
 }
+fn capture_goal_bytes(
+    goals: &mut [Option<PaneGoal>],
+    sleeping: &BTreeSet<usize>,
+    pane_index: usize,
+    bytes: &[u8],
+) {
+    if sleeping.contains(&pane_index) {
+        return;
+    }
 
-fn trim_relay_buffer(buffer: &mut String) {
-    if buffer.len() > WORKER_RELAY_MAX_BYTES {
-        let keep_from = buffer.len().saturating_sub(WORKER_RELAY_MAX_BYTES);
-        buffer.drain(..keep_from);
+    let Some(goal) = goals.get_mut(pane_index).and_then(Option::as_mut) else {
+        return;
+    };
+    if !goal.active {
+        return;
+    }
+    let output = plain_terminal_text(bytes);
+    if output.trim().is_empty() {
+        return;
+    }
+    goal.output_buffer.push_str(&output);
+    trim_goal_buffer(&mut goal.output_buffer);
+    goal.last_output_at = Some(Instant::now());
+    if !goal.in_flight {
+        goal.status = "waiting for quiet output".into();
     }
 }
 
-fn worker_relay_message(label: char, buffers: &BTreeMap<usize, String>) -> String {
-    let mut message = format!("GridBash worker output snapshot for group {label}.");
-    for (pane_index, output) in buffers {
-        message.push_str(&format!(
-            "\n\n[pane {} output]\n{}",
-            pane_index + 1,
-            output.trim()
-        ));
+fn apply_goal_review(
+    panes: &[PtyPane],
+    goals: &mut [Option<PaneGoal>],
+    sleeping: &BTreeSet<usize>,
+    event: &GoalReviewEvent,
+) -> Option<String> {
+    let pane_index = panes.iter().position(|pane| {
+        pane.id() == event.pane_id && pane.generation() == event.pane_generation
+    })?;
+    let pane = panes.get(pane_index)?;
+    let goal = goals.get_mut(pane_index)?.as_mut()?;
+    if goal.id != event.goal_id {
+        return None;
     }
-    message
+    goal.in_flight = false;
+    match &event.result {
+        Ok(ManagerDecision::Continue(message)) => {
+            if sleeping.contains(&pane_index) {
+                goal.status = "paused while pane sleeps".into();
+                return Some(format!("pane {} manager paused", pane_index + 1));
+            }
+            if pane.exited {
+                goal.status = "paused because pane exited".into();
+                return Some(format!(
+                    "pane {} manager paused: pane exited",
+                    pane_index + 1
+                ));
+            }
+            match pane.write(&paste_and_enter_bytes(message)) {
+                Ok(()) => {
+                    goal.output_buffer.clear();
+                    goal.last_output_at = None;
+                    goal.retry_after = None;
+                    goal.status = "follow-up sent to this pane".into();
+                    Some(format!("manager followed up in pane {}", pane_index + 1))
+                }
+                Err(error) => {
+                    goal.retry_after = Some(Instant::now() + PANE_GOAL_RETRY_DELAY);
+                    goal.status = format!("write failed: {error:#}");
+                    Some(format!("pane {} manager write failed", pane_index + 1))
+                }
+            }
+        }
+        Ok(ManagerDecision::Done(summary)) => {
+            goal.active = false;
+            goal.output_buffer.clear();
+            goal.status = if summary.is_empty() {
+                "goal complete".into()
+            } else {
+                format!("complete: {summary}")
+            };
+            Some(format!("manager goal complete in pane {}", pane_index + 1))
+        }
+        Err(error) => {
+            goal.retry_after = Some(Instant::now() + PANE_GOAL_RETRY_DELAY);
+            goal.status = format!("API error: {error}");
+            Some(format!("pane {} manager error: {error}", pane_index + 1))
+        }
+    }
 }
 
-fn user_manager_message(label: char, input: &str) -> String {
+fn pane_goal_intro(objective: &str) -> String {
     format!(
-        "User instruction for GridBash group {label}:\n{input}\n\nRoute work to workers with gridbash send blocks when needed."
+        "GridBash pane goal: {objective}\nWork toward this goal in this pane. A pane-local manager may send concise follow-ups based only on this pane's output."
     )
 }
 
+fn trim_goal_buffer(buffer: &mut String) {
+    if buffer.len() <= PANE_GOAL_OUTPUT_MAX_BYTES {
+        return;
+    }
+    let mut keep_from = buffer.len().saturating_sub(PANE_GOAL_OUTPUT_MAX_BYTES);
+    while keep_from < buffer.len() && !buffer.is_char_boundary(keep_from) {
+        keep_from += 1;
+    }
+    buffer.drain(..keep_from);
+}
 fn paste_and_enter_bytes(text: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(text.len() + 16);
     bytes.extend_from_slice(b"\x1b[200~");
@@ -6406,6 +6425,19 @@ fn mouse_scroll_bytes(mouse: MouseEvent, point: CellPoint, screen: &Screen) -> O
     }
 }
 
+fn pane_mouse_scroll_bytes(
+    mouse: MouseEvent,
+    point: CellPoint,
+    screen: &Screen,
+    selected: bool,
+) -> Option<Vec<u8>> {
+    if selected {
+        None
+    } else {
+        mouse_scroll_bytes(mouse, point, screen)
+    }
+}
+
 fn mouse_scroll_button(kind: MouseEventKind) -> Option<u8> {
     match kind {
         MouseEventKind::ScrollUp => Some(64),
@@ -6562,6 +6594,20 @@ mod tests {
                 parser.screen()
             ),
             Some(vec![0x1b, b'[', b'M', 96, 33, 33])
+        );
+    }
+
+    #[test]
+    fn selected_pane_scroll_stays_in_gridbash_scrollback() {
+        let mut parser = Parser::new(24, 80, 100);
+        parser.process(b"\x1b[?1000h\x1b[?1006h");
+        let wheel = mouse_event(MouseEventKind::ScrollUp, KeyModifiers::NONE);
+        let point = CellPoint { row: 2, column: 3 };
+
+        assert!(pane_mouse_scroll_bytes(wheel, point, parser.screen(), false).is_some());
+        assert_eq!(
+            pane_mouse_scroll_bytes(wheel, point, parser.screen(), true),
+            None
         );
     }
 
@@ -7129,5 +7175,44 @@ mod selection_tests {
     fn truncates_long_footer_text() {
         assert_eq!(truncate_chars("abcdef", 4), "a...");
         assert_eq!(truncate_chars("abc", 4), "abc");
+    }
+
+    #[test]
+    fn pane_goal_output_capture_never_crosses_panes() {
+        let goal = |id| {
+            Some(PaneGoal {
+                id,
+                objective: format!("goal {id}"),
+                active: true,
+                output_buffer: String::new(),
+                last_output_at: None,
+                in_flight: false,
+                retry_after: None,
+                status: String::new(),
+            })
+        };
+        let mut goals = vec![goal(1), goal(2)];
+
+        capture_goal_bytes(&mut goals, &BTreeSet::new(), 1, b"pane two only\r\n");
+
+        assert!(goals[0].as_ref().unwrap().output_buffer.is_empty());
+        assert_eq!(goals[1].as_ref().unwrap().output_buffer, "pane two only\n");
+    }
+
+    #[test]
+    fn manager_api_key_is_masked_in_settings_rows() {
+        let settings = SettingsState::default();
+        let config = crate::config::ManagerConfig {
+            api_key: "top-secret-key".into(),
+            ..Default::default()
+        };
+
+        let rows = settings.manager_rows(&config);
+        let key = rows
+            .iter()
+            .find(|row| row.label == "API key")
+            .expect("API key row");
+        assert_eq!(key.value, "********");
+        assert!(!format!("{rows:?}").contains("top-secret-key"));
     }
 }

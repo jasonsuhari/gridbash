@@ -18,16 +18,71 @@ pub struct Config {
     pub todos: TodoSettings,
     #[serde(default, skip_serializing_if = "AuthConfig::is_empty")]
     pub auth: AuthConfig,
+    #[serde(default, skip_serializing_if = "ManagerConfig::is_empty")]
+    pub manager: ManagerConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, Profile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManagerConfig {
+    #[serde(default = "ManagerConfig::default_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "ManagerConfig::default_model")]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub api_key: String,
+}
+
+impl Default for ManagerConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: Self::default_endpoint(),
+            model: Self::default_model(),
+            api_key: String::new(),
+        }
+    }
+}
+
+impl ManagerConfig {
+    pub fn validate(&self) -> Result<()> {
+        if self.endpoint.trim().is_empty() {
+            return Err(anyhow!(
+                "set the manager API endpoint in Settings > Manager"
+            ));
+        }
+        if self.model.trim().is_empty() {
+            return Err(anyhow!("set the manager model in Settings > Manager"));
+        }
+        if self.api_key.trim().is_empty() {
+            return Err(anyhow!("set the manager API key in Settings > Manager"));
+        }
+        Ok(())
+    }
+
+    pub fn is_configured(&self) -> bool {
+        self.validate().is_ok()
+    }
+
+    fn default_endpoint() -> String {
+        "https://api.openai.com/v1/chat/completions".into()
+    }
+
+    fn default_model() -> String {
+        "gpt-4o-mini".into()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.endpoint == Self::default_endpoint()
+            && self.model == Self::default_model()
+            && self.api_key.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Defaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub manager_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,7 +158,7 @@ impl Config {
 
 impl Defaults {
     fn is_empty(&self) -> bool {
-        self.profile.is_none() && self.manager_profile.is_none()
+        self.profile.is_none()
     }
 }
 
@@ -187,19 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_manager_profile_default() {
-        let config: Config = toml::from_str(
-            r#"
-            [defaults]
-            manager_profile = "claude-1"
-            "#,
-        )
-        .expect("parse config");
-
-        assert_eq!(config.defaults.manager_profile.as_deref(), Some("claude-1"));
-    }
-
-    #[test]
     fn ignores_legacy_setups_table() {
         let config: Config = toml::from_str(
             r#"
@@ -238,5 +280,24 @@ mod tests {
             config.todos.normalized_prompts(),
             vec!["Review the diff".to_string(), "Run tests".to_string()]
         );
+    }
+
+    #[test]
+    fn parses_and_round_trips_manager_api_settings() {
+        let config: Config = toml::from_str(
+            r#"
+            [manager]
+            endpoint = "https://example.test/v1/chat/completions"
+            model = "local-model"
+            api_key = "secret"
+            "#,
+        )
+        .expect("parse config");
+
+        assert!(config.manager.is_configured());
+        assert_eq!(config.manager.model, "local-model");
+        let serialized = toml::to_string(&config).expect("serialize config");
+        assert!(serialized.contains("[manager]"));
+        assert!(serialized.contains("api_key = \"secret\""));
     }
 }
