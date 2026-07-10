@@ -15,6 +15,7 @@ use crate::{
         SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
     },
     auth::{AgentKind, AuthProfile},
+    composer::GridPickerMode,
     image_preview::ImagePreview,
 };
 
@@ -76,6 +77,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let follow_up_dialog = app.follow_up_dialog();
     let goal_editor_view = app.goal_editor_view();
     let pane_settings_open = app.pane_settings_open();
+    let grid_resizer = app.grid_resizer();
     let image_overlay = app.image_overlay_view();
     let exited_recovery = if app.settings_open()
         || previous_panes_view.is_some()
@@ -83,6 +85,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || rename_view.is_some()
         || tab_rename_view.is_some()
         || follow_up_dialog.is_some()
+        || grid_resizer.is_some()
         || goal_editor_view.is_some()
         || image_overlay.is_some()
     {
@@ -96,6 +99,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || rename_view.is_some()
         || tab_rename_view.is_some()
         || follow_up_dialog.is_some()
+        || grid_resizer.is_some()
         || goal_editor_view.is_some()
         || image_overlay.is_some()
         || exited_recovery.is_some();
@@ -224,7 +228,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(
-            " | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+v voice | Alt+e output | Alt+p panes | Alt+P pane | Alt+x swap | Alt+z sleep | Alt+q quit",
+            " | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+v voice | Alt+e output | Alt+p panes | Alt+P pane | Alt+x swap | Alt+z sleep | Alt+q quit",
         ),
     ]);
     frame.render_widget(
@@ -256,6 +260,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
     if let Some(recovery) = exited_recovery.as_ref() {
         render_exited_recovery(frame, area, recovery, palette);
+    }
+    if let Some(picker) = grid_resizer {
+        picker.draw(frame, GridPickerMode::Resize, None);
     }
 
     DrawState {

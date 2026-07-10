@@ -261,8 +261,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Mouse wheel | Scroll only the pane under the pointer; selected panes use GridBash scrollback |
 | Alt+Left / Alt+Right | Focus previous / next pane in the row, wrapping at row edges |
 | Alt+Up / Alt+Down | Focus pane above / below in the column, wrapping at column edges |
-| Alt+Shift+Up / Alt+Shift+Down | Remove / add a row when safe |
-| Alt+Shift+Left / Alt+Shift+Right | Remove / add a column when safe |
+| Alt+l | Open the grid resizer; Enter applies the chosen dimensions and Esc cancels |
 | Alt+n | Open the startup picker and launch a new tab |
 | Alt+t | Switch to the next tab |
 | Alt+s | Toggle focused pane selection |
@@ -295,6 +294,10 @@ When the focused pane has exited, GridBash shows a recovery dialog. Press `Enter
 exited target panes directly.
 
 Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane. When the one-line command bar is focused, typing stays in that bar; Enter runs the command from the cwd shown in the prompt and keeps output hidden until expanded.
+
+The grid resizer uses the same row-and-column picker as startup, with active cells
+shown in blue. Shrinking removes live panes outside the retained upper-left
+rectangle. For example, changing 3x3 to 3x2 deactivates the full rightmost column.
 
 Voice mode uses modern Windows online dictation and the default microphone. Press
 `Alt+v` to listen for one utterance; GridBash waits up to 15 seconds for speech.
