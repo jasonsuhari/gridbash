@@ -18,19 +18,68 @@ const RECOGNIZE_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
 $recognizer = $null
 try {
-    Add-Type -AssemblyName System.Speech
-    $recognizer = New-Object System.Speech.Recognition.SpeechRecognitionEngine
-    $recognizer.LoadGrammar((New-Object System.Speech.Recognition.DictationGrammar))
-    $recognizer.SetInputToDefaultAudioDevice()
-    $result = $recognizer.Recognize([TimeSpan]::FromSeconds(15))
-    if ($null -eq $result) { exit 2 }
+    Add-Type -AssemblyName System.Runtime.WindowsRuntime
+    $null = [Windows.Media.SpeechRecognition.SpeechRecognizer, Windows.Media.SpeechRecognition, ContentType=WindowsRuntime]
+
+    $asTaskMethod = [System.WindowsRuntimeSystemExtensions].GetMethods() |
+        Where-Object {
+            $_.Name -eq 'AsTask' -and
+            $_.IsGenericMethod -and
+            $_.GetParameters().Count -eq 1 -and
+            $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1'
+        } |
+        Select-Object -First 1
+    if ($null -eq $asTaskMethod) {
+        throw 'could not access the Windows Runtime async bridge'
+    }
+
+    function Wait-WindowsRuntimeOperation($operation, [Type] $resultType) {
+        $task = $asTaskMethod.MakeGenericMethod($resultType).Invoke($null, @($operation))
+        $task.GetAwaiter().GetResult()
+    }
+
+    $recognizer = [Windows.Media.SpeechRecognition.SpeechRecognizer]::new()
+    $recognizer.Timeouts.InitialSilenceTimeout = [TimeSpan]::FromSeconds(15)
+    $recognizer.Timeouts.EndSilenceTimeout = [TimeSpan]::FromMilliseconds(1500)
+    $recognizer.Timeouts.BabbleTimeout = [TimeSpan]::FromSeconds(15)
+
+    $compileResult = Wait-WindowsRuntimeOperation `
+        $recognizer.CompileConstraintsAsync() `
+        ([Windows.Media.SpeechRecognition.SpeechRecognitionCompilationResult])
+    if ($compileResult.Status -ne 'Success') {
+        throw "Windows dictation grammar failed to compile: $($compileResult.Status)"
+    }
+
+    $result = Wait-WindowsRuntimeOperation `
+        $recognizer.RecognizeAsync() `
+        ([Windows.Media.SpeechRecognition.SpeechRecognitionResult])
+    if ($result.Status -eq 'UserCanceled' -or [string]::IsNullOrWhiteSpace($result.Text)) {
+        exit 2
+    }
+    if ($result.Status -ne 'Success') {
+        throw "Windows dictation failed: $($result.Status)"
+    }
+
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
     [Console]::Out.Write($result.Text)
 } catch {
-    [Console]::Error.Write($_.Exception.Message)
+    $exception = $_.Exception
+    if ($null -ne $exception.InnerException) {
+        $exception = $exception.InnerException
+    }
+    $errorCode = '{0:X8}' -f ($exception.HResult -band 0xffffffffL)
+    $message = switch ($errorCode) {
+        '80045509' { 'online speech recognition is off; enable Windows Settings > Privacy & security > Speech > Online speech recognition' }
+        '80070005' { 'microphone access is denied; allow desktop apps under Windows Settings > Privacy & security > Microphone' }
+        'C00DABE0' { 'no microphone is available' }
+        default { "modern Windows dictation failed: $($exception.Message)" }
+    }
+    [Console]::Error.Write($message)
     exit 1
 } finally {
-    if ($null -ne $recognizer) { $recognizer.Dispose() }
+    if ($null -ne $recognizer) {
+        try { $recognizer.Dispose() } catch {}
+    }
 }
 "#;
 
@@ -149,7 +198,7 @@ fn recognize(cancel_rx: Receiver<()>) -> Option<VoiceOutcome> {
         Ok(child) => child,
         Err(error) => {
             return Some(VoiceOutcome::Error(format!(
-                "could not start Windows speech recognition: {error}"
+                "could not start modern Windows dictation: {error}"
             )));
         }
     };
@@ -169,7 +218,7 @@ fn recognize(cancel_rx: Receiver<()>) -> Option<VoiceOutcome> {
             Err(error) => {
                 terminate(&mut child);
                 return Some(VoiceOutcome::Error(format!(
-                    "speech recognition failed: {error}"
+                    "modern Windows dictation failed: {error}"
                 )));
             }
         }
@@ -200,7 +249,7 @@ fn read_outcome(child: &mut Child, status: ExitStatus) -> VoiceOutcome {
 
     let detail = normalize_transcript(&stderr);
     if detail.is_empty() {
-        VoiceOutcome::Error(format!("Windows speech recognition exited with {status}"))
+        VoiceOutcome::Error(format!("modern Windows dictation exited with {status}"))
     } else {
         VoiceOutcome::Error(detail)
     }

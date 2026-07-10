@@ -294,12 +294,17 @@ The grid resizer uses the same row-and-column picker as startup, with active cel
 shown in blue. Shrinking removes live panes outside the retained upper-left
 rectangle. For example, changing 3x3 to 3x2 deactivates the full rightmost column.
 
-Voice mode uses the installed Windows speech recognizer and the default microphone.
-Press `Alt+v` to listen for one utterance (up to 15 seconds). The transcript is
-inserted into the command bar or the panes that were targeted when listening
-started. GridBash never presses Enter for dictated text, so you can review or edit
-it before submitting. Press `Alt+v` while listening to cancel. A Windows speech
-language pack matching the desired dictation language must be installed.
+Voice mode uses modern Windows online dictation and the default microphone. Press
+`Alt+v` to listen for one utterance; GridBash waits up to 15 seconds for speech.
+The transcript is inserted into the command bar or the panes that were targeted
+when listening started. GridBash never presses Enter for dictated text, so you can
+review or edit it before submitting. Press `Alt+v` while listening to cancel.
+
+Voice audio is processed by Microsoft's online speech service. Enable **Online
+speech recognition** in Windows Settings under **Privacy & security > Speech**,
+allow desktop apps to access the microphone, and install the Windows speech
+language pack matching the desired dictation language. If any requirement is
+missing, GridBash reports the Windows dictation error instead of inserting text.
 
 Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
 
