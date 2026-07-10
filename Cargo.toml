@@ -26,3 +26,8 @@ shell-words = "1.1"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
 toml = "0.9"
 vt100 = "0.16"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = "0.18"
+sha2 = "0.10"
+whisper-rs = "0.16"
