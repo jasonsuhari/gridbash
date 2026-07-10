@@ -135,6 +135,13 @@ xcode-select --install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
+On Debian or Ubuntu Linux, install the native build prerequisites before Rust:
+
+```bash
+sudo apt-get install build-essential pkg-config libasound2-dev cmake clang
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
 Build GridBash:
 
 ```powershell
@@ -144,7 +151,7 @@ cargo build --release
 ```
 
 The executable is `target\release\gridbash.exe` on Windows or
-`target/release/gridbash` on macOS. On Windows:
+`target/release/gridbash` on Linux and macOS. On Windows:
 
 ```text
 target\release\gridbash.exe
@@ -158,7 +165,11 @@ Open the startup grid picker:
 gridbash
 ```
 
-When launched through the npm command, GridBash inherits the invoking shell for new panes: PowerShell launches PowerShell, PowerShell 7 launches `pwsh`, cmd launches cmd, and Git Bash launches Git Bash. Use `--profile` or `GRIDBASH_PROFILE` to override shell inheritance.
+When launched through the npm command on Windows, GridBash inherits the invoking
+shell for new panes: PowerShell launches PowerShell, PowerShell 7 launches
+`pwsh`, cmd launches cmd, and Git Bash launches Git Bash. Linux defaults to bash
+and macOS defaults to zsh. Use `--profile` or `GRIDBASH_PROFILE` to override the
+platform default.
 
 If the invoking shell cannot be detected and no default profile is configured, GridBash opens an animated setup screen and asks you to choose from the detected terminal profiles. The choice is saved to:
 
@@ -313,7 +324,8 @@ The grid resizer uses the same row-and-column picker as startup, with active cel
 shown in blue. Shrinking removes live panes outside the retained upper-left
 rectangle. For example, changing 3x3 to 3x2 deactivates the full rightmost column.
 
-Voice mode uses modern Windows dictation on Windows and Apple Speech on macOS.
+Voice mode uses modern Windows dictation on Windows, Apple Speech on macOS, and
+offline Whisper transcription on Linux.
 `Alt+Shift+V` to listen for one utterance; GridBash waits up to 15 seconds for speech.
 The transcript is inserted into the command bar or the panes that were targeted
 when listening started. GridBash never presses Enter for dictated text, so you can
@@ -328,6 +340,22 @@ missing, GridBash reports the Windows dictation error instead of inserting text.
 On macOS, GridBash asks for Speech Recognition and Microphone permission on
 first use. It prefers on-device recognition and uses Apple's authorized speech
 service when the current locale does not support local recognition.
+
+On Linux, the first voice shortcut explains that a 57 MiB offline model is
+required; press the shortcut again to approve the one-time download. The model
+is checksum-verified and stored in the local XDG data directory. Audio remains
+on the machine. Set `GRIDBASH_VOICE_MODEL` to use another local Whisper model,
+or `GRIDBASH_SPEECH_HELPER` to override the packaged helper. Microphone capture
+uses ALSA and may require granting device access in containers or remote sessions.
+
+## Terminal Compatibility
+
+GridBash targets modern UTF-8, ANSI/xterm-compatible terminals, including
+Windows Terminal, Apple Terminal, iTerm2, GNOME Terminal, Konsole, Kitty,
+WezTerm, and Alacritty. It also works through SSH and tmux when the remote
+session advertises a color-capable `TERM`. `TERM=dumb` and Linux kernel consoles
+are not supported. Use `--no-mouse` when a terminal, serial link, or multiplexer
+does not forward mouse reporting; keyboard navigation remains available.
 
 Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
 
@@ -374,8 +402,8 @@ Built-in terminal profile keys are platform-specific:
 
 ```text
 Windows: git-bash pwsh powershell cmd
-macOS:  zsh bash sh pwsh
-Linux:  zsh bash sh pwsh
+macOS:  zsh bash fish sh pwsh
+Linux:  zsh bash fish sh pwsh
 ```
 
 Agent profile keys remain available on every platform: `codex`, `claude`,

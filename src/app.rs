@@ -43,7 +43,7 @@ use crate::{
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
     usage::{self, UsageEvent, UsageTarget},
-    voice::{VoiceInput, VoiceOutcome},
+    voice::{VoiceInput, VoiceOutcome, VoiceStart},
     worktrees::ManagedWorktreeOptions,
 };
 
@@ -2136,7 +2136,7 @@ impl App {
     }
 
     fn sync_mouse_capture(&self, terminal: &mut Tui, enabled: &mut bool) -> Result<()> {
-        let should_enable = self.mouse_enabled || !self.sleeping.is_empty();
+        let should_enable = self.mouse_enabled;
         if should_enable == *enabled {
             return Ok(());
         }
@@ -4709,11 +4709,23 @@ impl App {
         };
 
         self.voice_destination = Some(destination);
-        self.voice.start();
-        self.status = format!(
-            "voice listening for {} (Alt+Shift+V cancels; speech is not submitted)",
-            self.input_scope_label()
-        );
+        self.status = match self.voice.start() {
+            VoiceStart::Listening => format!(
+                "voice listening for {} (Alt+Shift+V cancels; speech is not submitted)",
+                self.input_scope_label()
+            ),
+            VoiceStart::DownloadingModel(display_size) => format!(
+                "downloading the {} offline voice model, then listening (Alt+Shift+V cancels)",
+                display_size
+            ),
+            VoiceStart::DownloadApprovalRequired(display_size) => {
+                self.voice_destination = None;
+                format!(
+                    "Linux voice needs a one-time {} offline model download; press Alt+Shift+V again to approve",
+                    display_size
+                )
+            }
+        };
     }
 
     fn route_input(&mut self, bytes: &[u8]) -> Result<bool> {

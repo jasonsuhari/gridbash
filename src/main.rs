@@ -16,6 +16,8 @@ mod setup;
 mod ui;
 mod usage;
 mod voice;
+#[cfg(target_os = "linux")]
+mod voice_model;
 mod worktrees;
 
 use anyhow::Result;

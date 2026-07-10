@@ -6,11 +6,14 @@ use std::{
     time::Duration,
 };
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 use std::process::Stdio;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::{env, path::PathBuf};
+
+#[cfg(target_os = "linux")]
+use crate::voice_model;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -97,6 +100,13 @@ pub enum VoiceOutcome {
     Error(String),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoiceStart {
+    Listening,
+    DownloadApprovalRequired(&'static str),
+    DownloadingModel(&'static str),
+}
+
 #[derive(Debug)]
 struct VoiceEvent {
     request_id: u64,
@@ -109,6 +119,7 @@ pub struct VoiceInput {
     cancel_tx: Option<Sender<()>>,
     active_request: Option<u64>,
     next_request: u64,
+    model_download_armed: bool,
 }
 
 impl VoiceInput {
@@ -120,13 +131,25 @@ impl VoiceInput {
             cancel_tx: None,
             active_request: None,
             next_request: 0,
+            model_download_armed: false,
         }
     }
 
-    pub fn start(&mut self) {
+    pub fn start(&mut self) -> VoiceStart {
         if self.is_listening() {
-            return;
+            return VoiceStart::Listening;
         }
+
+        #[cfg(target_os = "linux")]
+        let needs_model_download = !voice_model::model_ready();
+        #[cfg(not(target_os = "linux"))]
+        let needs_model_download = false;
+
+        if needs_model_download && !self.model_download_armed {
+            self.model_download_armed = true;
+            return VoiceStart::DownloadApprovalRequired(voice_model_display_size());
+        }
+        self.model_download_armed = false;
 
         let request_id = self.next_request;
         self.next_request = self.next_request.wrapping_add(1);
@@ -144,6 +167,11 @@ impl VoiceInput {
 
         self.cancel_tx = Some(cancel_tx);
         self.active_request = Some(request_id);
+        if needs_model_download {
+            VoiceStart::DownloadingModel(voice_model_display_size())
+        } else {
+            VoiceStart::Listening
+        }
     }
 
     pub fn cancel(&mut self) -> bool {
@@ -184,6 +212,11 @@ impl Drop for VoiceInput {
 }
 
 fn recognize(cancel_rx: Receiver<()>) -> Option<VoiceOutcome> {
+    #[cfg(target_os = "linux")]
+    if let Err(error) = voice_model::ensure_model(&cancel_rx) {
+        return Some(VoiceOutcome::Error(error.to_string()));
+    }
+
     let mut command = match recognition_command() {
         Ok(command) => command,
         Err(error) => return Some(VoiceOutcome::Error(error)),
@@ -275,7 +308,42 @@ fn macos_speech_helper() -> Option<PathBuf> {
     bundled.is_file().then_some(bundled)
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(target_os = "linux")]
+fn recognition_command() -> Result<Command, String> {
+    let helper = linux_speech_helper().ok_or_else(|| {
+        "Linux speech helper is missing; reinstall the GridBash package".to_string()
+    })?;
+    let model = voice_model::configured_model_path().map_err(|error| error.to_string())?;
+    let mut command = Command::new(helper);
+    command
+        .arg("--model")
+        .arg(model)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    Ok(command)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_speech_helper() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("GRIDBASH_SPEECH_HELPER").map(PathBuf::from) {
+        return path.is_file().then_some(path);
+    }
+    let helper = env::current_exe().ok()?.with_file_name("gridbash-voice");
+    helper.is_file().then_some(helper)
+}
+
+#[cfg(target_os = "linux")]
+fn voice_model_display_size() -> &'static str {
+    voice_model::MODEL_DISPLAY_SIZE
+}
+
+#[cfg(not(target_os = "linux"))]
+fn voice_model_display_size() -> &'static str {
+    ""
+}
+
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 fn recognition_command() -> Result<Command, String> {
     Err("voice input is not supported on this platform yet".into())
 }

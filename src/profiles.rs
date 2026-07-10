@@ -29,7 +29,7 @@ pub struct LaunchCommand {
 #[cfg(windows)]
 const TERMINAL_PROFILE_NAMES: &[&str] = &["git-bash", "pwsh", "powershell", "cmd"];
 #[cfg(not(windows))]
-const TERMINAL_PROFILE_NAMES: &[&str] = &["zsh", "bash", "sh", "pwsh"];
+const TERMINAL_PROFILE_NAMES: &[&str] = &["zsh", "bash", "fish", "sh", "pwsh"];
 pub const AGENT_PROFILE_NAMES: &[&str] = &[
     "codex", "claude", "gemini", "opencode", "aider", "amp", "goose", "copilot", "cursor",
 ];
@@ -255,6 +255,15 @@ fn insert_terminal_profiles(profiles: &mut BTreeMap<String, Profile>) {
             command: "sh".into(),
             args: vec!["-i".into()],
             title: Some("POSIX shell".into()),
+            agent_kind: None,
+        },
+    );
+    profiles.insert(
+        "fish".into(),
+        Profile {
+            command: "fish".into(),
+            args: vec!["--interactive".into()],
+            title: Some("fish".into()),
             agent_kind: None,
         },
     );

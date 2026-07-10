@@ -39,15 +39,23 @@ jobs:
         with:
           node-version: 24
 
+      - name: Install Linux voice build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake clang
+
       - run: cargo fmt --check
 
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings
 
       - run: cargo test
 
       - run: node --test npm/scripts/gridbash-launcher.test.js
 
       - run: node npm/scripts/prepare.js
+
+      - name: Verify packaged Linux voice helper
+        if: runner.os == 'Linux'
+        run: test -x npm/platforms/${{ matrix.platform_key }}/bin/gridbash-voice
 
       - run: npm pack --dry-run --ignore-scripts
 

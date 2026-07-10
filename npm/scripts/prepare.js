@@ -44,6 +44,12 @@ function prepareBinary(packageDir) {
   if (process.platform !== "win32") {
     fs.chmodSync(packagedBinary, 0o755);
   }
+  if (process.platform === "linux") {
+    const helperSource = path.join(root, "target", "release", "gridbash-voice");
+    const helperTarget = path.join(binDir, "gridbash-voice");
+    fs.copyFileSync(helperSource, helperTarget);
+    fs.chmodSync(helperTarget, 0o755);
+  }
 }
 
 function prepareMacos(packageDir) {
@@ -92,12 +98,13 @@ if (!fs.existsSync(path.join(packageDir, "package.json"))) {
   fail(`missing native package manifest for ${platformTarget.directory}`);
 }
 
-run(process.platform === "win32" ? "cargo.exe" : "cargo", [
-  "build",
-  "--release",
-  "--bin",
-  "gridbash",
-]);
+const cargoArgs = ["build", "--release"];
+if (process.platform === "linux") {
+  cargoArgs.push("--bins");
+} else {
+  cargoArgs.push("--bin", "gridbash");
+}
+run(process.platform === "win32" ? "cargo.exe" : "cargo", cargoArgs);
 
 if (process.platform === "darwin") {
   prepareMacos(packageDir);

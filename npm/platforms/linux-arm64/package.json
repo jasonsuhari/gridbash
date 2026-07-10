@@ -6,5 +6,6 @@
   "repository": "github:jasonsuhari/gridbash",
   "os": ["linux"],
   "cpu": ["arm64"],
+  "libc": ["glibc"],
   "files": ["bin/"]
 }
