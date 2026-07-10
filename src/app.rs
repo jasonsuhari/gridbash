@@ -5715,9 +5715,24 @@ fn uses_direct_launch(cli: &Cli) -> bool {
 }
 
 fn resolve_profile_name(cli: &Cli, config: &Config) -> String {
+    resolve_profile_name_from(
+        cli,
+        config,
+        env::var("GRIDBASH_PROFILE").ok(),
+        env::var("GRIDBASH_INVOKING_PROFILE").ok(),
+    )
+}
+
+fn resolve_profile_name_from(
+    cli: &Cli,
+    config: &Config,
+    environment_profile: Option<String>,
+    invoking_profile: Option<String>,
+) -> String {
     cli.profile
         .clone()
-        .or_else(|| env::var("GRIDBASH_PROFILE").ok())
+        .or(environment_profile)
+        .or(invoking_profile)
         .or_else(|| config.defaults.profile.clone())
         .unwrap_or_else(|| "git-bash".into())
 }
@@ -6563,6 +6578,8 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use clap::Parser as ClapParser;
+
     use super::*;
     use crate::profiles::Profile;
     use vt100::Parser;
@@ -6597,6 +6614,44 @@ mod tests {
 
     fn selected(indices: &[usize]) -> BTreeSet<usize> {
         indices.iter().copied().collect()
+    }
+
+    #[test]
+    fn invoking_profile_precedes_saved_fallback() {
+        let cli = Cli::parse_from(["gridbash"]);
+        let mut config = Config::default();
+        config.set_default_profile("git-bash");
+
+        assert_eq!(
+            resolve_profile_name_from(&cli, &config, None, Some("powershell".into())),
+            "powershell"
+        );
+    }
+
+    #[test]
+    fn explicit_profiles_precede_invoking_profile() {
+        let cli = Cli::parse_from(["gridbash", "--profile", "cmd"]);
+        let config = Config::default();
+        assert_eq!(
+            resolve_profile_name_from(
+                &cli,
+                &config,
+                Some("codex".into()),
+                Some("powershell".into()),
+            ),
+            "cmd"
+        );
+
+        let cli = Cli::parse_from(["gridbash"]);
+        assert_eq!(
+            resolve_profile_name_from(
+                &cli,
+                &config,
+                Some("codex".into()),
+                Some("powershell".into()),
+            ),
+            "codex"
+        );
     }
 
     fn mouse_event(kind: MouseEventKind, modifiers: KeyModifiers) -> MouseEvent {
