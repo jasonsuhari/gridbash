@@ -88,6 +88,23 @@ test("platform target selection covers all shipped native builds", () => {
   );
 });
 
+test("root optional dependencies match every native target version", () => {
+  const root = path.resolve(__dirname, "..", "..");
+  const rootPackage = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+
+  for (const target of supportedTargets()) {
+    const nativePackage = JSON.parse(
+      fs.readFileSync(
+        path.join(root, "npm", "platforms", target.directory, "package.json"),
+        "utf8",
+      ),
+    );
+    assert.equal(nativePackage.name, target.packageName);
+    assert.equal(nativePackage.version, rootPackage.version);
+    assert.equal(rootPackage.optionalDependencies[target.packageName], rootPackage.version);
+  }
+});
+
 test("shouldSkipUpdateCheck preserves help, version, MCP, and non-TTY paths", () => {
   assert.equal(shouldSkipUpdateCheck(["--version"], {}, { isTTY: true }), true);
   assert.equal(shouldSkipUpdateCheck(["--mcp"], {}, { isTTY: true }), true);
