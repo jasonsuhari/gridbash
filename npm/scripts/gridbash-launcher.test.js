@@ -105,6 +105,9 @@ test("root optional dependencies match every native target version", () => {
     assert.equal(nativePackage.name, target.packageName);
     assert.equal(nativePackage.version, rootPackage.version);
     assert.equal(rootPackage.optionalDependencies[target.packageName], rootPackage.version);
+    if (target.platform === "linux") {
+      assert.deepEqual(nativePackage.libc, ["glibc"]);
+    }
   }
 });
 

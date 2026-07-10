@@ -53,6 +53,10 @@ jobs:
 
       - run: node npm/scripts/prepare.js
 
+      - name: Verify packaged Linux voice helper
+        if: runner.os == 'Linux'
+        run: test -x npm/platforms/${{ matrix.platform_key }}/bin/gridbash-voice
+
       - run: npm pack --dry-run --ignore-scripts
 
       - name: Pack native platform package

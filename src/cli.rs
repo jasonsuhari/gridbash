@@ -46,7 +46,7 @@ pub struct Cli {
     pub theme: String,
 
     /// Compatibility flag. Leave mouse selection to the host terminal instead of GridBash.
-    #[arg(long, hide = true)]
+    #[arg(long)]
     pub no_mouse: bool,
 
     /// Enable the local agent control API for child agent tools.

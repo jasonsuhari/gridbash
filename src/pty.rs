@@ -378,7 +378,7 @@ impl Drop for PtyPane {
 
 fn configure_cwd_reporting(profile_name: &str, command_builder: &mut CommandBuilder) -> Result<()> {
     match profile_name {
-        "git-bash" => configure_bash_cwd_reporting(command_builder),
+        "git-bash" | "bash" => configure_bash_cwd_reporting(command_builder),
         "cmd" => command_builder.env("PROMPT", "$E]7;file:///$P$E\\$P$G"),
         "zsh" => configure_zsh_cwd_reporting(command_builder)?,
         _ => {}
