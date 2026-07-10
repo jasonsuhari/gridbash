@@ -1998,6 +1998,7 @@ impl App {
             &spec.env,
             &spec.cwd,
             &extra_env,
+            self.config.defaults.pane_priority,
             self.event_tx.clone(),
         )
     }

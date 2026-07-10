@@ -83,6 +83,16 @@ impl ManagerConfig {
 pub struct Defaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "PaneProcessPriority::is_default")]
+    pub pane_priority: PaneProcessPriority,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PaneProcessPriority {
+    Normal,
+    #[default]
+    BelowNormal,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,7 +168,13 @@ impl Config {
 
 impl Defaults {
     fn is_empty(&self) -> bool {
-        self.profile.is_none()
+        self.profile.is_none() && self.pane_priority.is_default()
+    }
+}
+
+impl PaneProcessPriority {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
     }
 }
 
@@ -210,6 +226,32 @@ mod tests {
         .expect("parse config");
 
         assert_eq!(config.defaults.profile.as_deref(), Some("powershell"));
+        assert_eq!(
+            config.defaults.pane_priority,
+            PaneProcessPriority::BelowNormal
+        );
+    }
+
+    #[test]
+    fn parses_normal_pane_process_priority() {
+        let config: Config = toml::from_str(
+            r#"
+            [defaults]
+            pane_priority = "normal"
+            "#,
+        )
+        .expect("parse config");
+
+        assert_eq!(config.defaults.pane_priority, PaneProcessPriority::Normal);
+        let serialized = toml::to_string(&config).expect("serialize config");
+        assert!(serialized.contains("pane_priority = \"normal\""));
+    }
+
+    #[test]
+    fn omits_default_pane_process_priority_from_saved_config() {
+        let serialized = toml::to_string(&Config::default()).expect("serialize config");
+
+        assert!(!serialized.contains("pane_priority"));
     }
 
     #[test]
