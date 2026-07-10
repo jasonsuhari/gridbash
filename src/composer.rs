@@ -503,7 +503,8 @@ mod tests {
         }
 
         let mut config = Config::default();
-        config.set_default_profile("powershell");
+        let profile = default_profile_name();
+        config.set_default_profile(profile);
         let current_dir = env::current_dir().expect("current dir");
 
         let composer = Composer::new(current_dir.clone(), None);
@@ -517,7 +518,7 @@ mod tests {
         assert!(
             plan.panes
                 .iter()
-                .all(|pane| { pane.profile_name == "powershell" && pane.cwd == current_dir })
+                .all(|pane| { pane.profile_name == profile && pane.cwd == current_dir })
         );
     }
 
