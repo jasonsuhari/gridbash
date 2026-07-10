@@ -1,6 +1,7 @@
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { targetFor, targetKey } = require("../bin/platforms.js");
 
 const root = path.resolve(__dirname, "..", "..");
 const packageJson = require(path.join(root, "package.json"));
@@ -73,8 +74,8 @@ function assertNotLinked() {
   console.log(`install-local: installed copy at ${packagePath}`);
 }
 
-if (process.platform !== "win32" || process.arch !== "x64") {
-  fail("local packaged install currently supports win32-x64 only");
+if (!targetFor()) {
+  fail(`unsupported platform: ${targetKey(process.platform, process.arch)}`);
 }
 
 run("node", ["npm/scripts/prepare.js"]);

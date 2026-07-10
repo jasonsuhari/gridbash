@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const http = require("node:http");
 const { test } = require("node:test");
+const { supportedTargets, targetFor, targetKey } = require("../bin/platforms.js");
 
 const {
   checkForUpdate,
@@ -37,6 +38,22 @@ test("compareVersions handles newer, older, and prerelease versions", () => {
   assert.equal(compareVersions("0.1.4", "0.1.5"), -1);
   assert.equal(compareVersions("0.2.0", "0.1.99"), 1);
   assert.equal(compareVersions("1.0.0", "1.0.0-beta.1"), 1);
+});
+
+test("platform target selection covers shipped Windows and Linux builds", () => {
+  assert.equal(targetKey("linux", "arm64"), "linux-arm64");
+  assert.deepEqual(targetFor("win32", "x64"), {
+    platform: "win32",
+    arch: "x64",
+    directory: "win32-x64",
+    executable: "gridbash.exe",
+    cargoTarget: "x86_64-pc-windows-msvc",
+  });
+  assert.equal(targetFor("linux", "ia32"), undefined);
+  assert.deepEqual(
+    supportedTargets().map((target) => `${target.platform}-${target.arch}`),
+    ["win32-x64", "linux-x64", "linux-arm64"],
+  );
 });
 
 test("shouldSkipUpdateCheck preserves help, version, MCP, and non-TTY paths", () => {

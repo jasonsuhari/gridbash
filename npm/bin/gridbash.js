@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const https = require("node:https");
 const path = require("node:path");
+const { targetFor, targetKey } = require("./platforms.js");
 
 const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 900;
 const DEFAULT_UPDATE_CHECK_URL =
@@ -299,16 +300,12 @@ async function maybePrintUpdateNotice(args, env = process.env, stderr = process.
 
 async function main() {
   const args = process.argv.slice(2);
-
-  if (process.platform !== "win32") {
-    fail("this npm package currently ships the Windows x64 build only");
+  const target = targetFor();
+  if (!target) {
+    fail(`unsupported platform: ${targetKey(process.platform, process.arch)}`);
   }
 
-  if (process.arch !== "x64") {
-    fail(`unsupported architecture: ${process.arch}`);
-  }
-
-  const exe = path.join(__dirname, "win32-x64", "gridbash.exe");
+  const exe = path.join(__dirname, target.directory, target.executable);
   const normalizedBinDir = path.resolve(__dirname).toLowerCase();
   const sourceManifest = path.resolve(__dirname, "..", "..", "Cargo.toml");
 
