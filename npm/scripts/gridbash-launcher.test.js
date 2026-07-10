@@ -1,5 +1,8 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const http = require("node:http");
+const os = require("node:os");
+const path = require("node:path");
 const { test } = require("node:test");
 const { supportedTargets, targetFor, targetKey } = require("../bin/platforms.js");
 
@@ -9,11 +12,41 @@ const {
   detectInvokingProfile,
   environmentForLaunch,
   formatUpdateNotice,
+  resolveNativeExecutable,
   profileForProcessName,
   shouldSkipUpdateCheck,
   tasklistImageName,
   updateCheckTimeoutMs,
 } = require("../bin/gridbash.js");
+
+test("resolveNativeExecutable finds the installed optional package", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gridbash-launcher-"));
+  const packageDir = path.join(root, "node_modules", "gridbash-darwin-arm64");
+  const executable = path.join(packageDir, "GridBash.app", "Contents", "MacOS", "gridbash");
+  fs.mkdirSync(path.dirname(executable), { recursive: true });
+  fs.writeFileSync(path.join(packageDir, "package.json"), '{"name":"gridbash-darwin-arm64"}');
+  fs.writeFileSync(executable, "test");
+
+  try {
+    assert.equal(
+      fs.realpathSync(resolveNativeExecutable(root, "darwin", "arm64")),
+      fs.realpathSync(executable),
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveNativeExecutable explains unsupported and omitted targets", () => {
+  assert.throws(
+    () => resolveNativeExecutable(process.cwd(), "freebsd", "x64"),
+    /unsupported platform: freebsd-x64/,
+  );
+  assert.throws(
+    () => resolveNativeExecutable(process.cwd(), "darwin", "x64"),
+    /missing optional native package gridbash-darwin-x64/,
+  );
+});
 
 function serveJson(payload) {
   const server = http.createServer((_request, response) => {
@@ -40,20 +73,39 @@ test("compareVersions handles newer, older, and prerelease versions", () => {
   assert.equal(compareVersions("1.0.0", "1.0.0-beta.1"), 1);
 });
 
-test("platform target selection covers shipped Windows and Linux builds", () => {
+test("platform target selection covers all shipped native builds", () => {
   assert.equal(targetKey("linux", "arm64"), "linux-arm64");
-  assert.deepEqual(targetFor("win32", "x64"), {
-    platform: "win32",
-    arch: "x64",
-    directory: "win32-x64",
-    executable: "gridbash.exe",
-    cargoTarget: "x86_64-pc-windows-msvc",
-  });
+  assert.equal(targetFor("win32", "x64").packageName, "gridbash-win32-x64");
+  assert.equal(targetFor("linux", "x64").packageName, "gridbash-linux-x64");
+  assert.equal(targetFor("darwin", "arm64").packageName, "gridbash-darwin-arm64");
+  assert.deepEqual(targetFor("darwin", "x64").executablePath, [
+    "GridBash.app",
+    "Contents",
+    "MacOS",
+    "gridbash",
+  ]);
   assert.equal(targetFor("linux", "ia32"), undefined);
   assert.deepEqual(
     supportedTargets().map((target) => `${target.platform}-${target.arch}`),
-    ["win32-x64", "linux-x64", "linux-arm64"],
+    ["win32-x64", "linux-x64", "linux-arm64", "darwin-arm64", "darwin-x64"],
   );
+});
+
+test("root optional dependencies match every native target version", () => {
+  const root = path.resolve(__dirname, "..", "..");
+  const rootPackage = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+
+  for (const target of supportedTargets()) {
+    const nativePackage = JSON.parse(
+      fs.readFileSync(
+        path.join(root, "npm", "platforms", target.directory, "package.json"),
+        "utf8",
+      ),
+    );
+    assert.equal(nativePackage.name, target.packageName);
+    assert.equal(nativePackage.version, rootPackage.version);
+    assert.equal(rootPackage.optionalDependencies[target.packageName], rootPackage.version);
+  }
 });
 
 test("shouldSkipUpdateCheck preserves help, version, MCP, and non-TTY paths", () => {

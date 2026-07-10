@@ -128,6 +128,22 @@ function updateCargoVersion(version) {
   }
 }
 
+function updateNativePackageVersions(version) {
+  const platformRoot = path.join(root, "npm", "platforms");
+  const manifests = fs
+    .readdirSync(platformRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(platformRoot, entry.name, "package.json"))
+    .filter((manifest) => fs.existsSync(manifest));
+
+  for (const manifest of manifests) {
+    const value = JSON.parse(fs.readFileSync(manifest, "utf8"));
+    value.version = version;
+    fs.writeFileSync(manifest, `${JSON.stringify(value, null, 2)}\n`);
+  }
+  return manifests;
+}
+
 function latestDevlog() {
   const dir = path.join(root, "docs", "devlogs");
   if (!fs.existsSync(dir)) {
@@ -324,8 +340,12 @@ assertTagFree(tag);
 console.log(`release: ${packageJson.version} -> ${version}`);
 
 packageJson.version = version;
+for (const dependency of Object.keys(packageJson.optionalDependencies || {})) {
+  packageJson.optionalDependencies[dependency] = version;
+}
 writeJson("package.json", packageJson);
 updateCargoVersion(version);
+const nativeManifests = updateNativePackageVersions(version);
 const notesPath = releaseNotesPath(version);
 
 run("cargo", ["check"]);
@@ -343,6 +363,7 @@ run("git", [
   "Cargo.toml",
   "Cargo.lock",
   "package.json",
+  ...nativeManifests.map((manifest) => path.relative(root, manifest)),
   path.relative(root, notesPath),
 ]);
 run("git", ["commit", "-m", `chore: release ${tag}`]);

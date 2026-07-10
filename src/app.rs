@@ -11,6 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
+
 use anyhow::{Context, Result, anyhow};
 use crossterm::{
     event::{
@@ -34,7 +37,7 @@ use crate::{
     image_preview::{self, ImagePreview},
     layout::{GridLayout, GridSize, PaneId, pane_at},
     manager::{self, ManagerDecision},
-    profiles::find_profile,
+    profiles::{default_profile_name, find_profile},
     pty::{PtyEvent, PtyPane, plain_terminal_text},
     session::{SavedPaneHistory, SessionRecord, SessionRecorder},
     setup::{LaunchPlan, PaneLaunchSpec},
@@ -1622,10 +1625,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
             .into()
     } else {
-        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
+        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
             .into()
     }
 }
@@ -1998,6 +2001,7 @@ impl App {
             &spec.env,
             &spec.cwd,
             &extra_env,
+            self.config.defaults.pane_priority,
             self.event_tx.clone(),
         )
     }
@@ -2445,7 +2449,7 @@ impl App {
                 }
             },
             VoiceOutcome::NoSpeech => {
-                self.status = "voice heard no speech; press Alt+v to try again".into();
+                self.status = "voice heard no speech; press Alt+Shift+V to try again".into();
             }
             VoiceOutcome::Error(error) => {
                 self.status = format!("voice unavailable: {error}");
@@ -2792,7 +2796,7 @@ impl App {
                 self.status = self.focus_status();
                 Ok(Some(false))
             }
-            'v' => {
+            'v' if is_voice_shortcut(ch, modifiers) => {
                 self.toggle_voice_input();
                 Ok(Some(false))
             }
@@ -4707,7 +4711,7 @@ impl App {
         self.voice_destination = Some(destination);
         self.voice.start();
         self.status = format!(
-            "voice listening for {} (Alt+v cancels; speech is not submitted)",
+            "voice listening for {} (Alt+Shift+V cancels; speech is not submitted)",
             self.input_scope_label()
         );
     }
@@ -5734,7 +5738,7 @@ fn resolve_profile_name_from(
         .or(environment_profile)
         .or(invoking_profile)
         .or_else(|| config.defaults.profile.clone())
-        .unwrap_or_else(|| "git-bash".into())
+        .unwrap_or_else(|| default_profile_name().into())
 }
 fn resolved_current_dir() -> Result<std::path::PathBuf> {
     let current = env::current_dir().context("failed to resolve current directory")?;
@@ -6291,6 +6295,11 @@ fn extract_selection_text(screen: &vt100::Screen, selection: PaneSelection, widt
 }
 
 fn copy_to_clipboard(terminal: &mut Tui, text: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if copy_with_pbcopy(text) {
+        return Ok(());
+    }
+
     write!(
         terminal.backend_mut(),
         "\x1b]52;c;{}\x07",
@@ -6302,6 +6311,24 @@ fn copy_to_clipboard(terminal: &mut Tui, text: &str) -> Result<()> {
         .flush()
         .context("failed to flush terminal clipboard sequence")?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn copy_with_pbcopy(text: &str) -> bool {
+    let Ok(mut child) = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+
+    let wrote = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+    wrote && child.wait().is_ok_and(|status| status.success())
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -6397,6 +6424,13 @@ fn pane_number_list(indices: &[usize]) -> String {
         .map(|index| (index + 1).to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn is_voice_shortcut(ch: char, modifiers: KeyModifiers) -> bool {
+    ch.eq_ignore_ascii_case(&'v')
+        && modifiers.contains(KeyModifiers::ALT)
+        && modifiers.contains(KeyModifiers::SHIFT)
+        && !modifiers.contains(KeyModifiers::CONTROL)
 }
 
 fn control_byte(ch: char) -> Option<u8> {
@@ -7123,6 +7157,16 @@ mod tests {
         assert_eq!(command.cursor_chars(), 3);
         assert!(command.backspace());
         assert_eq!(command.input, "abc");
+    }
+
+    #[test]
+    fn voice_shortcut_preserves_plain_alt_v_for_agent_image_paste() {
+        let image_paste = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
+        assert!(!is_voice_shortcut('v', KeyModifiers::ALT));
+        assert_eq!(terminal_key_bytes(image_paste), Some(b"\x1bv".to_vec()));
+
+        let voice_modifiers = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        assert!(is_voice_shortcut('V', voice_modifiers));
     }
 
     #[test]

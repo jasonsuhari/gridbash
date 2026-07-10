@@ -5,11 +5,11 @@
 [![npm downloads](https://img.shields.io/npm/dm/gridbash?label=npm%20downloads)](https://www.npmjs.com/package/gridbash)
 [![GitHub release](https://img.shields.io/github/v/release/jasonsuhari/gridbash?label=github)](https://github.com/jasonsuhari/gridbash/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Platform: Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D4.svg)](https://github.com/jasonsuhari/gridbash)
+[![Platforms: Windows, Linux, macOS](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D4.svg)](https://github.com/jasonsuhari/gridbash)
 
-**Run every CLI coding agent in one fast terminal grid.**
+**The sexiest way to tokenmaxx.**
 
-GridBash by Jason Suhari is a Windows-native Rust TUI for agent-heavy development. Launch Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, Git Bash, PowerShell, or any custom command into a real PTY grid, then select exactly which panes receive your prompt.
+GridBash by Jason Suhari is a cross-platform Rust TUI for agent-heavy development. Launch Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, your native shell, or any custom command into a real PTY grid, then select exactly which panes receive your prompt. Spawn manager agents that can do the prompting for you, or talk to your agents via Voice Mode.
 
 Official site: [jasonsuhari.github.io/gridbash](https://jasonsuhari.github.io/gridbash/)
 
@@ -21,7 +21,8 @@ GridBash is built for developers who want parallel CLI-agent work without juggli
 
 ## Quickstart
 
-Install the published Windows x64 npm package:
+Install the published package on Windows x64, Linux x64/arm64, or macOS 13+
+(Apple Silicon or Intel):
 
 ```powershell
 npm install -g gridbash
@@ -52,7 +53,10 @@ gridbash 2x3 --profile codex --worktrees
 
 GridBash is for CLI agent orchestration in the terminal: compare ideas from multiple coding agents, run review/build/test loops in parallel, keep shells visible, and send a prompt only to the panes that should receive it.
 
-Its niche is Windows-native, PTY-backed, agent-first terminal grids. Traditional terminal multiplexers are still great; GridBash focuses on the workflows that appear when Codex, Claude, Gemini, Aider, and other CLI agents are all part of the same development session.
+Its niche is PTY-backed, agent-first terminal grids on Windows, Linux, and
+macOS. Traditional terminal multiplexers are still great; GridBash focuses on
+the workflows that appear when Codex, Claude, Gemini, Aider, and other CLI
+agents are all part of the same development session.
 
 ## Release Status & Devlogs
 
@@ -64,7 +68,7 @@ Its niche is Windows-native, PTY-backed, agent-first terminal grids. Traditional
 
 ## Highlights
 
-- Real PTY-backed panes through Windows ConPTY via `portable-pty`.
+- Real PTY-backed panes through Windows ConPTY or Unix PTYs via `portable-pty`.
 - Up to 100 panes in one terminal process.
 - Multiple tabbed grids in one terminal process.
 - Configurable default terminal profile: Git Bash, PowerShell, cmd, agents, or custom.
@@ -106,7 +110,7 @@ Build a publishable npm tarball:
 npm pack
 ```
 
-The package ships a Node command shim that launches the bundled Windows x64 `gridbash.exe`.
+The package ships a small Node command shim and downloads only the native package for the current OS and architecture.
 
 Release automation and devlog workflow are documented in `docs/RELEASING.md`.
 
@@ -118,10 +122,17 @@ Pull requests can be merged directly after they have been reviewed. Before mergi
 
 ## Install From Source
 
-Install Rust first:
+Install Rust first. On Windows:
 
 ```powershell
 winget install --id Rustlang.Rustup -e
+```
+
+On macOS:
+
+```bash
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 Build GridBash:
@@ -132,7 +143,8 @@ cd gridbash
 cargo build --release
 ```
 
-The executable will be:
+The executable is `target\release\gridbash.exe` on Windows or
+`target/release/gridbash` on macOS. On Windows:
 
 ```text
 target\release\gridbash.exe
@@ -269,7 +281,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+c | Focus or unfocus the command bar |
-| Alt+v | Listen for one dictated utterance; press again to cancel |
+| Alt+Shift+V | Listen for one dictated utterance; press again to cancel |
 | Alt+p | Open settings for the focused pane; use Reload past history to refresh its visible conversation snapshot |
 | Alt+Shift+p | Open the previous panes list |
 | Alt+r | Rename the focused pane |
@@ -301,17 +313,21 @@ The grid resizer uses the same row-and-column picker as startup, with active cel
 shown in blue. Shrinking removes live panes outside the retained upper-left
 rectangle. For example, changing 3x3 to 3x2 deactivates the full rightmost column.
 
-Voice mode uses modern Windows online dictation and the default microphone. Press
-`Alt+v` to listen for one utterance; GridBash waits up to 15 seconds for speech.
+Voice mode uses modern Windows dictation on Windows and Apple Speech on macOS.
+`Alt+Shift+V` to listen for one utterance; GridBash waits up to 15 seconds for speech.
 The transcript is inserted into the command bar or the panes that were targeted
 when listening started. GridBash never presses Enter for dictated text, so you can
-review or edit it before submitting. Press `Alt+v` while listening to cancel.
+review or edit it before submitting. Press `Alt+Shift+V` while listening to cancel.
 
 Voice audio is processed by Microsoft's online speech service. Enable **Online
 speech recognition** in Windows Settings under **Privacy & security > Speech**,
 allow desktop apps to access the microphone, and install the Windows speech
 language pack matching the desired dictation language. If any requirement is
 missing, GridBash reports the Windows dictation error instead of inserting text.
+
+On macOS, GridBash asks for Speech Recognition and Microphone permission on
+first use. It prefers on-device recognition and uses Apple's authorized speech
+service when the current locale does not support local recognition.
 
 Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
 
@@ -350,15 +366,20 @@ Auth settings controls:
 
 For a Claude or Codex pane, open Pane Settings with `Alt+P`, use Left/Right to choose a compatible auth profile, and press Enter to apply it and restart that pane. Press `r` there to refresh the pane's history snapshot.
 
-Usage status is best-effort. GridBash reads local auth metadata, masks account emails, and uses short-timeout `curl.exe` requests only while the Auth settings view is refreshed.
+Usage status is best-effort. GridBash reads local auth metadata, masks account emails, and uses short-timeout `curl.exe` (Windows) or `curl` (macOS) requests only while the Auth settings view is refreshed.
 
 ## Profiles
 
-Built-in profile keys:
+Built-in terminal profile keys are platform-specific:
 
 ```text
-git-bash pwsh powershell cmd codex claude gemini opencode aider amp goose copilot cursor
+Windows: git-bash pwsh powershell cmd
+macOS:  zsh bash sh pwsh
+Linux:  zsh bash sh pwsh
 ```
+
+Agent profile keys remain available on every platform: `codex`, `claude`,
+`gemini`, `opencode`, `aider`, `amp`, `goose`, `copilot`, and `cursor`.
 
 GridBash resolves Windows `.exe` and `.cmd` shims before extensionless npm shims, so common Node-based CLIs launch correctly.
 
@@ -373,6 +394,8 @@ Example:
 ```toml
 [defaults]
 profile = "powershell"
+# Use "normal" to opt out of GridBash's desktop-responsiveness safeguard.
+pane_priority = "below-normal"
 
 [manager]
 endpoint = "https://api.openai.com/v1/chat/completions"
@@ -404,8 +427,17 @@ gridbash 2x4 --profile review
 Default profile resolution order:
 
 ```text
---profile > GRIDBASH_PROFILE > [defaults].profile > git-bash
+--profile > GRIDBASH_PROFILE > [defaults].profile > platform default
 ```
+
+The platform default is Git Bash on Windows, zsh on macOS, and bash on other
+Unix systems. In Apple Terminal or iTerm2, configure Option as the Meta/Alt key
+so GridBash's Alt shortcuts reach the TUI.
+
+GridBash keeps its own interface at normal Windows process priority, while pane
+processes default to `below-normal`. Child workloads such as parallel compilers
+normally inherit that priority, which keeps input and other desktop apps responsive
+when many panes are busy. Set `[defaults].pane_priority = "normal"` to opt out.
 
 Pane managers use the OpenAI-compatible chat-completions endpoint, model, and API
 key under `[manager]`. These values can also be edited from the Manager tab in
@@ -416,7 +448,7 @@ moved between tabs.
 
 ## Design Goals
 
-GridBash is inspired by agent-first multiplexers such as Mato and terminal workspaces such as Zellij, but V1 takes a different path: Windows-native, single binary, visual selection, scoped multi-pane input, and a hard bias toward fast multi-agent grids.
+GridBash is inspired by agent-first multiplexers such as Mato and terminal workspaces such as Zellij, but takes a different path: native PTYs, visual selection, scoped multi-pane input, and a hard bias toward fast multi-agent grids.
 
 ## Community
 

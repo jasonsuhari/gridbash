@@ -17,7 +17,12 @@ use ratatui::{
 };
 
 use crate::worktrees::ManagedWorktreeOptions;
-use crate::{config::Config, layout::GridSize, profiles::find_profile, setup::LaunchPlan};
+use crate::{
+    config::Config,
+    layout::GridSize,
+    profiles::{default_profile_name, find_profile},
+    setup::LaunchPlan,
+};
 
 type ComposerTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -374,7 +379,7 @@ fn startup_profile_name(config: &Config) -> String {
     env::var("GRIDBASH_PROFILE")
         .ok()
         .or_else(|| config.defaults.profile.clone())
-        .unwrap_or_else(|| "git-bash".into())
+        .unwrap_or_else(|| default_profile_name().into())
 }
 
 fn control_box(active: bool, value: usize) -> Span<'static> {
@@ -498,7 +503,8 @@ mod tests {
         }
 
         let mut config = Config::default();
-        config.set_default_profile("powershell");
+        let profile = default_profile_name();
+        config.set_default_profile(profile);
         let current_dir = env::current_dir().expect("current dir");
 
         let composer = Composer::new(current_dir.clone(), None);
@@ -512,7 +518,7 @@ mod tests {
         assert!(
             plan.panes
                 .iter()
-                .all(|pane| { pane.profile_name == "powershell" && pane.cwd == current_dir })
+                .all(|pane| { pane.profile_name == profile && pane.cwd == current_dir })
         );
     }
 

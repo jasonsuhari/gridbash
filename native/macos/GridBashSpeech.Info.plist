@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDisplayName</key>
+  <string>GridBash Speech</string>
+  <key>CFBundleExecutable</key>
+  <string>gridbash-speech</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.jasonsuhari.gridbash.speech</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>GridBash Speech</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>__GRIDBASH_VERSION__</string>
+  <key>CFBundleVersion</key>
+  <string>__GRIDBASH_VERSION__</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>GridBash uses the microphone only while you dictate text with Alt+V.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>GridBash converts an Alt+V voice utterance into editable terminal text.</string>
+</dict>
+</plist>
