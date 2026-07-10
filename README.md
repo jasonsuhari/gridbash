@@ -291,12 +291,17 @@ exited target panes directly.
 
 Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane. When the one-line command bar is focused, typing stays in that bar; Enter runs the command from the cwd shown in the prompt and keeps output hidden until expanded.
 
-Voice mode uses the installed Windows speech recognizer and the default microphone.
-Press `Alt+v` to listen for one utterance (up to 15 seconds). The transcript is
-inserted into the command bar or the panes that were targeted when listening
-started. GridBash never presses Enter for dictated text, so you can review or edit
-it before submitting. Press `Alt+v` while listening to cancel. A Windows speech
-language pack matching the desired dictation language must be installed.
+Voice mode uses modern Windows online dictation and the default microphone. Press
+`Alt+v` to listen for one utterance; GridBash waits up to 15 seconds for speech.
+The transcript is inserted into the command bar or the panes that were targeted
+when listening started. GridBash never presses Enter for dictated text, so you can
+review or edit it before submitting. Press `Alt+v` while listening to cancel.
+
+Voice audio is processed by Microsoft's online speech service. Enable **Online
+speech recognition** in Windows Settings under **Privacy & security > Speech**,
+allow desktop apps to access the microphone, and install the Windows speech
+language pack matching the desired dictation language. If any requirement is
+missing, GridBash reports the Windows dictation error instead of inserting text.
 
 Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
 
