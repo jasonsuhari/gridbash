@@ -28,7 +28,10 @@ test("resolveNativeExecutable finds the installed optional package", () => {
   fs.writeFileSync(executable, "test");
 
   try {
-    assert.equal(resolveNativeExecutable(root, "darwin", "arm64"), fs.realpathSync(executable));
+    assert.equal(
+      fs.realpathSync(resolveNativeExecutable(root, "darwin", "arm64")),
+      fs.realpathSync(executable),
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
