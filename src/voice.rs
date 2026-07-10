@@ -1,10 +1,13 @@
 use std::{
     io::Read,
-    process::{Child, Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus},
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
     thread,
     time::Duration,
 };
+
+#[cfg(any(windows, target_os = "macos"))]
+use std::process::Stdio;
 
 #[cfg(target_os = "macos")]
 use std::{env, path::PathBuf};
