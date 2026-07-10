@@ -661,7 +661,7 @@ fn history_replay_text(output_tail: &str, input_history: &[String]) -> String {
     replay
 }
 
-fn plain_terminal_text(bytes: &[u8]) -> String {
+pub(crate) fn plain_terminal_text(bytes: &[u8]) -> String {
     let raw = String::from_utf8_lossy(bytes);
     let mut plain = String::new();
     let chars = raw.chars().collect::<Vec<_>>();

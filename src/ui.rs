@@ -10,9 +10,9 @@ use vt100::Cell;
 
 use crate::{
     app::{
-        App, ExitedPaneRecoveryView, FollowUpDialog, GridPalette, PaneGroupView, PaneSelection,
-        PaneSettingsView, PreviousPaneView, PreviousPanesView, PromptView, RenamePaneView,
-        RenameTabView, SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
+        App, ExitedPaneRecoveryView, FollowUpDialog, GoalEditorView, GridPalette, PaneSelection,
+        PaneSettingsView, PreviousPaneView, PreviousPanesView, RenamePaneView, RenameTabView,
+        SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
     },
     auth::{AgentKind, AuthProfile},
     image_preview::ImagePreview,
@@ -35,6 +35,9 @@ pub struct DrawState {
     pub pane_settings_button: Option<Rect>,
     pub pane_settings_rename_button: Option<Rect>,
     pub pane_settings_reload_button: Option<Rect>,
+    pub pane_settings_sleep_button: Option<Rect>,
+    pub pane_settings_goal_button: Option<Rect>,
+    pub pane_settings_stop_goal_button: Option<Rect>,
 }
 
 const QUIET_MARKER: &str = " *";
@@ -71,7 +74,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let tab_rename_view = app.rename_tab_view();
     let previous_panes_view = app.previous_panes_view();
     let follow_up_dialog = app.follow_up_dialog();
-    let prompt_view = app.prompt_view();
+    let goal_editor_view = app.goal_editor_view();
     let pane_settings_open = app.pane_settings_open();
     let image_overlay = app.image_overlay_view();
     let exited_recovery = if app.settings_open()
@@ -80,7 +83,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || rename_view.is_some()
         || tab_rename_view.is_some()
         || follow_up_dialog.is_some()
-        || prompt_view.is_some()
+        || goal_editor_view.is_some()
         || image_overlay.is_some()
     {
         None
@@ -93,11 +96,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || rename_view.is_some()
         || tab_rename_view.is_some()
         || follow_up_dialog.is_some()
-        || prompt_view.is_some()
+        || goal_editor_view.is_some()
         || image_overlay.is_some()
         || exited_recovery.is_some();
     let mut pane_settings_rename_button = None;
     let mut pane_settings_reload_button = None;
+    let mut pane_settings_sleep_button = None;
+    let mut pane_settings_goal_button = None;
+    let mut pane_settings_stop_goal_button = None;
     render_tabs(frame, tab_area, &app.tab_labels(), palette);
 
     for (index, pane) in app.panes().iter().enumerate() {
@@ -108,14 +114,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         let focused = app.focused_pane() == Some(index);
         let selected = app.selected().contains(&index);
         let sleeping = app.pane_sleeping(index);
-        let group = app.pane_group(index);
         let quiet = app.activity_badges_enabled() && pane.output_quiet();
         let chrome = pane_chrome(
             selected,
             focused,
             pane.exited,
             sleeping,
-            group.map(|group| group.color.rgb),
+            None,
             quiet,
             palette,
         );
@@ -152,13 +157,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             let buttons = render_pane_settings(frame, inner, &view, palette);
             pane_settings_rename_button = buttons.rename;
             pane_settings_reload_button = buttons.reload;
+            pane_settings_sleep_button = buttons.sleep;
+            pane_settings_goal_button = buttons.goal;
+            pane_settings_stop_goal_button = buttons.stop_goal;
         } else if sleeping {
             render_sleeping_screen(frame, inner);
         } else {
             render_screen(frame, inner, pane.screen(), app.selection_for_pane(index));
-        }
-        if let Some(group) = group {
-            render_group_badge(frame, rect, group);
         }
 
         if focused && !sleeping && !modal_open && pane.screen().scrollback() == 0 {
@@ -243,8 +248,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     if let Some(rename) = tab_rename_view.as_ref() {
         render_rename_tab(frame, area, rename);
     }
-    if let Some(prompt) = prompt_view.as_ref() {
-        render_manager_prompt(frame, area, prompt);
+    if let Some(editor) = goal_editor_view.as_ref() {
+        render_goal_editor(frame, area, editor);
     }
     if let Some(image) = image_overlay {
         render_image_overlay(frame, area, image);
@@ -261,6 +266,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         pane_settings_button,
         pane_settings_rename_button,
         pane_settings_reload_button,
+        pane_settings_sleep_button,
+        pane_settings_goal_button,
+        pane_settings_stop_goal_button,
     }
 }
 
@@ -353,73 +361,6 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel], palette: &G
         area,
     );
 }
-
-fn render_group_badge(frame: &mut Frame<'_>, rect: Rect, group: PaneGroupView) {
-    let label = format!(" G{} ", group.label);
-    let width = label.len() as u16;
-    if rect.width <= width.saturating_add(2) {
-        return;
-    }
-
-    let area = Rect {
-        x: rect.x + rect.width - width - 1,
-        y: rect.y,
-        width,
-        height: 1,
-    };
-    frame.render_widget(
-        Paragraph::new(label).style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(rgb_color(group.color.rgb))
-                .add_modifier(Modifier::BOLD),
-        ),
-        area,
-    );
-}
-
-fn render_manager_prompt(frame: &mut Frame<'_>, area: Rect, prompt: &PromptView) {
-    let width = area.width.saturating_sub(4).max(24);
-    let prompt_area = Rect {
-        x: area.x.saturating_add(2),
-        y: area.y.saturating_add(area.height.saturating_sub(5)),
-        width: width.min(area.width),
-        height: 3,
-    };
-    frame.render_widget(Clear, prompt_area);
-
-    let input = if prompt.input.is_empty() {
-        Span::styled(
-            "type instruction, Enter sends, Esc cancels",
-            Style::default().fg(Color::DarkGray),
-        )
-    } else {
-        Span::raw(prompt.input.as_str())
-    };
-    let line = Line::from(vec![
-        Span::styled(
-            format!(" G{} ", prompt.label),
-            Style::default()
-                .fg(Color::Black)
-                .bg(rgb_color(prompt.color.rgb))
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        input,
-    ]);
-
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(rgb_color(prompt.color.rgb)))
-        .title(" Manager ");
-    frame.render_widget(
-        Paragraph::new(line)
-            .block(block)
-            .style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
-        prompt_area,
-    );
-}
-
 fn command_output_height(total_height: u16, line_count: usize) -> u16 {
     let available = total_height.saturating_sub(3);
     if available < 3 {
@@ -697,6 +638,13 @@ fn render_pane_settings(
     PaneSettingsButtons {
         rename: pane_settings_rename_rect(area, view.auth_kind.is_some()),
         reload: pane_settings_reload_rect(area, view.auth_kind.is_some()),
+        sleep: pane_settings_sleep_rect(area, view.auth_kind.is_some(), view.goal.is_some()),
+        goal: pane_settings_goal_rect(area, view.auth_kind.is_some(), view.goal.is_some()),
+        stop_goal: pane_settings_stop_goal_rect(
+            area,
+            view.auth_kind.is_some(),
+            view.goal.is_some(),
+        ),
     }
 }
 
@@ -704,6 +652,9 @@ fn render_pane_settings(
 struct PaneSettingsButtons {
     rename: Option<Rect>,
     reload: Option<Rect>,
+    sleep: Option<Rect>,
+    goal: Option<Rect>,
+    stop_goal: Option<Rect>,
 }
 
 fn pane_settings_state(view: &PaneSettingsView) -> (&'static str, Color) {
@@ -757,6 +708,11 @@ fn pane_settings_lines(
         }
         lines.push(pane_settings_rename_line(width, palette));
         lines.push(pane_settings_reload_line(width, palette));
+        lines.push(pane_settings_sleep_line(width, view.sleeping, palette));
+        lines.push(pane_settings_goal_line(width, view.goal.is_some(), palette));
+        if view.goal.is_some() {
+            lines.push(pane_settings_stop_goal_line(width, palette));
+        }
         lines.push(pane_settings_command_bar(width, view.auth_kind.is_some()));
         return lines;
     }
@@ -844,6 +800,32 @@ fn pane_settings_lines(
     }
     lines.push(pane_settings_rename_line(width, palette));
     lines.push(pane_settings_reload_line(width, palette));
+    lines.push(settings_section(
+        "PANE CONTROLS",
+        if view.manager_configured {
+            "manager API ready"
+        } else {
+            "configure Manager in global settings"
+        },
+        width,
+    ));
+    if let Some(goal) = &view.goal {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                truncate_text(
+                    &format!("goal: {} | {}", goal.objective, goal.status),
+                    width.saturating_sub(2) as usize,
+                ),
+                Style::default().fg(Color::LightCyan),
+            ),
+        ]));
+    }
+    lines.push(pane_settings_sleep_line(width, view.sleeping, palette));
+    lines.push(pane_settings_goal_line(width, view.goal.is_some(), palette));
+    if view.goal.is_some() {
+        lines.push(pane_settings_stop_goal_line(width, palette));
+    }
     if view.auth_kind.is_none() {
         lines.push(Line::from(""));
     }
@@ -858,6 +840,76 @@ fn pane_settings_rename_line(width: u16, palette: &GridPalette) -> Line<'static>
 
 fn pane_settings_reload_line(width: u16, palette: &GridPalette) -> Line<'static> {
     pane_settings_action_line("[ Reload past history ]", width, palette.focus())
+}
+
+fn render_goal_editor(frame: &mut Frame<'_>, area: Rect, editor: &GoalEditorView) {
+    let width = area.width.saturating_sub(8).clamp(32, 88).min(area.width);
+    let prompt_area = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(5) / 2,
+        width,
+        height: 5.min(area.height),
+    };
+    frame.render_widget(Clear, prompt_area);
+    let input = if editor.input.is_empty() {
+        "Describe the goal for this pane...".into()
+    } else {
+        format!("{}_", editor.input)
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            truncate_text(&input, width.saturating_sub(4) as usize),
+            Style::default().fg(if editor.input.is_empty() {
+                Color::DarkGray
+            } else {
+                SETTINGS_TEXT
+            }),
+        )),
+        Line::from(vec![
+            command_key("Enter"),
+            Span::styled(" start/update  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" cancel", Style::default().fg(Color::Gray)),
+        ]),
+    ];
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::LightCyan))
+        .title(format!(" Pane {} manager goal ", editor.pane_number));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .style(Style::default().fg(SETTINGS_TEXT).bg(APP_BG)),
+        prompt_area,
+    );
+}
+
+fn pane_settings_sleep_line(width: u16, sleeping: bool, palette: &GridPalette) -> Line<'static> {
+    pane_settings_action_line(
+        if sleeping {
+            "[ Wake pane ]"
+        } else {
+            "[ Sleep pane ]"
+        },
+        width,
+        palette.quiet(),
+    )
+}
+
+fn pane_settings_goal_line(width: u16, has_goal: bool, palette: &GridPalette) -> Line<'static> {
+    pane_settings_action_line(
+        if has_goal {
+            "[ Edit manager goal ]"
+        } else {
+            "[ Set manager goal ]"
+        },
+        width,
+        palette.accent(),
+    )
+}
+
+fn pane_settings_stop_goal_line(width: u16, palette: &GridPalette) -> Line<'static> {
+    pane_settings_action_line("[ Stop manager goal ]", width, palette.exited())
 }
 
 fn pane_settings_action_line(label: &str, width: u16, background: Color) -> Line<'static> {
@@ -879,53 +931,42 @@ fn pane_settings_action_line(label: &str, width: u16, background: Color) -> Line
 }
 
 fn pane_settings_command_bar(width: u16, has_auth: bool) -> Line<'static> {
-    if has_auth {
-        if width < 50 {
-            return Line::from(vec![
-                Span::raw("  "),
-                command_key("Left/Right"),
-                Span::styled(" auth  ", Style::default().fg(Color::Gray)),
-                command_key("Enter"),
-                Span::styled(" apply", Style::default().fg(Color::Gray)),
-            ]);
-        }
-
+    if width < 58 {
         return Line::from(vec![
             Span::raw("  "),
-            command_key("Left/Right"),
-            Span::styled(" account  ", Style::default().fg(Color::Gray)),
-            command_key("Enter"),
-            Span::styled(" apply + restart  ", Style::default().fg(Color::Gray)),
-            command_key("r"),
-            Span::styled(" history  ", Style::default().fg(Color::Gray)),
+            command_key("z"),
+            Span::styled(" sleep  ", Style::default().fg(Color::Gray)),
+            command_key("g"),
+            Span::styled(" goal  ", Style::default().fg(Color::Gray)),
+            command_key("u"),
+            Span::styled(" stop  ", Style::default().fg(Color::Gray)),
             command_key("Esc"),
             Span::styled(" close", Style::default().fg(Color::Gray)),
         ]);
     }
 
-    if width < 50 {
-        return Line::from(vec![
-            Span::raw("  "),
-            command_key("N"),
-            Span::styled(" rename  ", Style::default().fg(Color::Gray)),
-            command_key("R"),
-            Span::styled(" reload  ", Style::default().fg(Color::Gray)),
-            command_key("Esc"),
-            Span::styled(" close", Style::default().fg(Color::Gray)),
-        ]);
-    }
-
-    Line::from(vec![
+    let mut spans = vec![
         Span::raw("  "),
-        command_key("N"),
+        command_key("n"),
         Span::styled(" rename  ", Style::default().fg(Color::Gray)),
-        command_key("R/Enter"),
+        command_key("r"),
         Span::styled(" reload  ", Style::default().fg(Color::Gray)),
-        command_key("Alt+o"),
-        Span::styled(" global settings  ", Style::default().fg(Color::Gray)),
+        command_key("z"),
+        Span::styled(" sleep/wake  ", Style::default().fg(Color::Gray)),
+        command_key("g"),
+        Span::styled(" goal  ", Style::default().fg(Color::Gray)),
+        command_key("u"),
+        Span::styled(" stop  ", Style::default().fg(Color::Gray)),
+    ];
+    if has_auth {
+        spans.push(command_key("Left/Right"));
+        spans.push(Span::styled(" auth  ", Style::default().fg(Color::Gray)));
+    }
+    spans.extend([
         command_key("Esc"),
         Span::styled(" close", Style::default().fg(Color::Gray)),
-    ])
+    ]);
+    Line::from(spans)
 }
 
 fn pane_settings_rename_rect(area: Rect, has_auth: bool) -> Option<Rect> {
@@ -946,6 +987,40 @@ fn pane_settings_reload_rect(area: Rect, has_auth: bool) -> Option<Rect> {
         2
     } else {
         7
+    };
+    pane_settings_action_rect(area, row)
+}
+
+fn pane_settings_sleep_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
+    let row = if area.width < 36 {
+        if has_auth { 4 } else { 3 }
+    } else if has_goal {
+        10
+    } else {
+        9
+    };
+    pane_settings_action_rect(area, row)
+}
+
+fn pane_settings_goal_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
+    let row = if area.width < 36 {
+        if has_auth { 5 } else { 4 }
+    } else if has_goal {
+        11
+    } else {
+        10
+    };
+    pane_settings_action_rect(area, row)
+}
+
+fn pane_settings_stop_goal_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
+    if !has_goal {
+        return None;
+    }
+    let row = if area.width < 36 {
+        if has_auth { 6 } else { 5 }
+    } else {
+        12
     };
     pane_settings_action_rect(area, row)
 }
@@ -1452,6 +1527,7 @@ fn settings_content_row_count(app: &App) -> usize {
         SettingsTab::Auth => {
             app.auth_profiles().len().max(1) + usize::from(app.auth_create().is_some()) * 3 + 3
         }
+        SettingsTab::Manager => app.manager_settings_rows().len() + 5,
     }
 }
 
@@ -1459,6 +1535,7 @@ fn settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     match app.settings_tab() {
         SettingsTab::General => general_settings_lines(&app.settings_rows(), width),
         SettingsTab::Auth => auth_settings_lines(app, width),
+        SettingsTab::Manager => manager_settings_lines(app, width),
     }
 }
 
@@ -1468,6 +1545,8 @@ fn settings_tabs(active: SettingsTab) -> Line<'static> {
         settings_tab("General", active == SettingsTab::General),
         Span::raw("  "),
         settings_tab("Auth", active == SettingsTab::Auth),
+        Span::raw("  "),
+        settings_tab("Manager", active == SettingsTab::Manager),
         Span::raw("  "),
         Span::styled("Tab switches", Style::default().fg(SETTINGS_MUTED)),
     ])
@@ -1827,6 +1906,41 @@ fn auth_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
 
     lines.push(Line::from(""));
     lines.push(auth_command_bar(width));
+    lines
+}
+
+fn manager_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
+    let rows = app.manager_settings_rows();
+    let mut lines = vec![
+        settings_tabs(SettingsTab::Manager),
+        Line::from(""),
+        settings_section(
+            "PANE MANAGER API",
+            "one isolated goal manager per pane",
+            width,
+        ),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "Uses an OpenAI-compatible chat-completions endpoint. The key is masked here and saved only in your local config.",
+                Style::default().fg(SETTINGS_MUTED),
+            ),
+        ]),
+        Line::from(""),
+    ];
+    for row in &rows {
+        lines.push(settings_row(row, width));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        command_key("Up/Down"),
+        Span::styled(" move  ", Style::default().fg(Color::Gray)),
+        command_key("Enter"),
+        Span::styled(" edit/save  ", Style::default().fg(Color::Gray)),
+        command_key("Esc"),
+        Span::styled(" cancel/close", Style::default().fg(Color::Gray)),
+    ]));
     lines
 }
 
@@ -2729,6 +2843,22 @@ mod tests {
         );
         assert_eq!(
             pane_settings_reload_rect(Rect::new(5, 10, 40, 6), false),
+            None
+        );
+        assert_eq!(
+            pane_settings_sleep_rect(Rect::new(5, 10, 40, 14), false, false),
+            Some(Rect::new(5, 19, 40, 1))
+        );
+        assert_eq!(
+            pane_settings_goal_rect(Rect::new(5, 10, 40, 14), false, true),
+            Some(Rect::new(5, 21, 40, 1))
+        );
+        assert_eq!(
+            pane_settings_stop_goal_rect(Rect::new(5, 10, 40, 14), false, true),
+            Some(Rect::new(5, 22, 40, 1))
+        );
+        assert_eq!(
+            pane_settings_stop_goal_rect(Rect::new(5, 10, 40, 14), false, false),
             None
         );
     }

@@ -71,8 +71,8 @@ Its niche is Windows-native, PTY-backed, agent-first terminal grids. Traditional
 - Pane-contained drag selection that copies selected terminal text without crossing into sibling panes.
 - Sleeping panes stay visually hidden until hovered, then wake without crossing input into other panes.
 - Normal terminal keys pass through to the focused pane, or to selected panes when multiple panes are selected.
-- Modeless Alt shortcuts for pane focus, selection, rename, settings, grouping, and quit.
-- Hidden manager agent groups let a manager profile coordinate selected worker panes without taking a visible grid slot.
+- Modeless Alt shortcuts for pane focus, selection, rename, settings, pane-local goals, and quit.
+- Pane-local manager goals can review and follow up in one pane without observing or routing work across sibling panes.
 - Compact dark theme with focus, selection, sleep, exit, usage, and quiet-output cues.
 - Claude, Codex, and other agent panes show a compact conversation summary in the footer line.
 - Built-in launch profiles for common CLI coding agents.
@@ -258,6 +258,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | --- | --- |
 | Drag mouse | Select/copy terminal text within the source pane |
 | Right-click pane | Toggle that pane in or out of the selected set |
+| Mouse wheel | Scroll only the pane under the pointer; selected panes use GridBash scrollback |
 | Alt+Left / Alt+Right | Focus previous / next pane in the row, wrapping at row edges |
 | Alt+Up / Alt+Down | Focus pane above / below in the column, wrapping at column edges |
 | Alt+Shift+Up / Alt+Shift+Down | Remove / add a row when safe |
@@ -274,12 +275,16 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+Shift+r | Rename the current tab |
 | Alt+Shift+t | Restart exited focused pane; when multiple panes are selected, restart exited selected panes |
 | Alt+z | Put the focused pane to sleep; when multiple panes are selected, sleep the selected panes |
-| Alt+g | Group selected panes under a hidden manager; with no selection, open the focused group's manager prompt |
-| Alt+u | Dissolve the focused pane's manager group |
+| Alt+g | Create or edit the focused pane's manager goal |
+| Alt+u | Stop the focused pane's manager goal |
 | Hover sleeping pane | Wake the pane and make its terminal contents visible again |
 | Alt+e | Expand or hide command output |
 | Alt+o | Open settings |
 | Alt+q | Quit |
+
+Focused-pane settings include sleep/wake and manager-goal controls. Press `z` to
+sleep or wake that pane, `g` to create or edit its manager goal, and `u` to stop
+the goal. A pane manager only reads and writes the pane that owns its goal.
 
 In focused-pane settings, press `Enter`, `Space`, or `r` to reload the visible
 conversation history snapshot. Press `Esc`, `q`, or `Alt+p` to close it, or
@@ -363,7 +368,11 @@ Example:
 ```toml
 [defaults]
 profile = "powershell"
-manager_profile = "claude-1"
+
+[manager]
+endpoint = "https://api.openai.com/v1/chat/completions"
+model = "gpt-4o-mini"
+api_key = "sk-..."
 
 [auth]
 home = "C:\\Users\\Jason\\.gridbash-auth"
@@ -393,13 +402,12 @@ Default profile resolution order:
 --profile > GRIDBASH_PROFILE > [defaults].profile > git-bash
 ```
 
-Hidden manager groups use this manager profile resolution order:
-
-```text
---manager-profile > GRIDBASH_MANAGER_PROFILE > [defaults].manager_profile
-```
-
-The manager profile can be a normal GridBash profile or a ready Vibe profile. To create a group, select one or more awake panes and press `Alt+g`. GridBash launches the manager as a hidden PTY, marks the grouped panes with a `G<letter>` badge, relays worker output snapshots to the manager, and forwards manager `gridbash send` blocks back to awake workers in that group.
+Pane managers use the OpenAI-compatible chat-completions endpoint, model, and API
+key under `[manager]`. These values can also be edited from the Manager tab in
+GridBash settings; the key is masked in the UI and stored in the local GridBash
+config. Press `Alt+g` or use focused-pane settings to create a goal. Reviews and
+follow-ups remain bound to that pane even when panes are selected, reordered, or
+moved between tabs.
 
 ## Design Goals
 

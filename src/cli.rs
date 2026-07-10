@@ -21,10 +21,6 @@ pub struct Cli {
     #[arg(long)]
     pub profile: Option<String>,
 
-    /// Profile for hidden manager agents attached to worker groups.
-    #[arg(long)]
-    pub manager_profile: Option<String>,
-
     /// Persist the default profile to the GridBash config file and exit.
     #[arg(long, visible_alias = "set-default")]
     pub set_default_profile: Option<String>,
