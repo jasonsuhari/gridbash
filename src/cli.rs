@@ -17,7 +17,7 @@ pub struct Cli {
     #[arg(long)]
     pub count: Option<usize>,
 
-    /// Profile to launch in every pane. Overrides GRIDBASH_PROFILE and config defaults.
+    /// Profile to launch in every pane. Overrides GRIDBASH_PROFILE, shell inheritance, and config defaults.
     #[arg(long)]
     pub profile: Option<String>,
 

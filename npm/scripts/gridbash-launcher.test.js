@@ -5,8 +5,12 @@ const { test } = require("node:test");
 const {
   checkForUpdate,
   compareVersions,
+  detectInvokingProfile,
+  environmentForLaunch,
   formatUpdateNotice,
+  profileForProcessName,
   shouldSkipUpdateCheck,
+  tasklistImageName,
   updateCheckTimeoutMs,
 } = require("../bin/gridbash.js");
 
@@ -46,6 +50,50 @@ test("shouldSkipUpdateCheck preserves help, version, MCP, and non-TTY paths", ()
 test("updateCheckTimeoutMs clamps overrides", () => {
   assert.equal(updateCheckTimeoutMs({ GRIDBASH_UPDATE_CHECK_TIMEOUT_MS: "25" }), 25);
   assert.equal(updateCheckTimeoutMs({ GRIDBASH_UPDATE_CHECK_TIMEOUT_MS: "10000" }), 5000);
+});
+
+test("profileForProcessName maps supported Windows shells", () => {
+  assert.equal(profileForProcessName("powershell.exe"), "powershell");
+  assert.equal(profileForProcessName("C:\\Program Files\\PowerShell\\7\\pwsh.exe"), "pwsh");
+  assert.equal(profileForProcessName("cmd.exe"), "cmd");
+  assert.equal(profileForProcessName("bash.exe"), "git-bash");
+  assert.equal(profileForProcessName("node.exe"), undefined);
+});
+
+test("detectInvokingProfile reads the parent process from tasklist", () => {
+  const run = (command, args, options) => {
+    assert.equal(command, "tasklist.exe");
+    assert.deepEqual(args, ["/FI", "PID eq 4242", "/FO", "CSV", "/NH"]);
+    assert.equal(options.encoding, "utf8");
+    return {
+      status: 0,
+      stdout: '"powershell.exe","4242","Console","1","75,000 K"\r\n',
+    };
+  };
+
+  assert.equal(detectInvokingProfile({ parentPid: 4242, platform: "win32", run }), "powershell");
+  assert.equal(detectInvokingProfile({ platform: "darwin", run }), undefined);
+  assert.equal(
+    detectInvokingProfile({
+      platform: "win32",
+      run: () => {
+        throw new Error("tasklist unavailable");
+      },
+    }),
+    undefined,
+  );
+  assert.equal(tasklistImageName("INFO: No tasks are running"), undefined);
+});
+
+test("environmentForLaunch preserves explicit profile overrides", () => {
+  assert.deepEqual(environmentForLaunch({ HOME: "home" }, "powershell"), {
+    HOME: "home",
+    GRIDBASH_INVOKING_PROFILE: "powershell",
+  });
+  assert.deepEqual(
+    environmentForLaunch({ GRIDBASH_PROFILE: "codex" }, "powershell"),
+    { GRIDBASH_PROFILE: "codex" },
+  );
 });
 
 test("checkForUpdate returns latest release only when it is newer", async () => {

@@ -146,7 +146,9 @@ Open the startup grid picker:
 gridbash
 ```
 
-On first launch, if no default profile is configured, GridBash opens an animated setup screen and asks you to choose from the detected terminal profiles. The choice is saved to:
+When launched through the npm command, GridBash inherits the invoking shell for new panes: PowerShell launches PowerShell, PowerShell 7 launches `pwsh`, cmd launches cmd, and Git Bash launches Git Bash. Use `--profile` or `GRIDBASH_PROFILE` to override shell inheritance.
+
+If the invoking shell cannot be detected and no default profile is configured, GridBash opens an animated setup screen and asks you to choose from the detected terminal profiles. The choice is saved to:
 
 ```text
 %APPDATA%\GridBash\config.toml
@@ -154,7 +156,7 @@ On first launch, if no default profile is configured, GridBash opens an animated
 
 The startup picker asks for rows and columns, updates the preview grid as you change them, and launches every pane in the directory where you started `gridbash`.
 
-Set the default terminal profile:
+Set the fallback terminal profile used when shell inheritance is unavailable:
 
 ```powershell
 gridbash --set-default powershell

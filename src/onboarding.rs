@@ -59,6 +59,7 @@ pub fn should_run(cli: &Cli, config: &Config) -> bool {
     cli.command.is_none()
         && cli.profile.is_none()
         && env::var_os("GRIDBASH_PROFILE").is_none()
+        && env::var_os("GRIDBASH_INVOKING_PROFILE").is_none()
         && config.defaults.profile.is_none()
 }
 

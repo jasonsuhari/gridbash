@@ -27,6 +27,70 @@ function readPackageVersion(root = packageRoot()) {
   }
 }
 
+function tasklistImageName(output) {
+  const match = /^\s*"([^"]+)"/m.exec(String(output || ""));
+  return match?.[1];
+}
+
+function profileForProcessName(processName) {
+  const name = path.win32.basename(String(processName || "").trim()).toLowerCase();
+  switch (name) {
+    case "powershell.exe":
+      return "powershell";
+    case "pwsh.exe":
+      return "pwsh";
+    case "cmd.exe":
+      return "cmd";
+    case "bash.exe":
+    case "sh.exe":
+    case "git-bash.exe":
+      return "git-bash";
+    default:
+      return undefined;
+  }
+}
+
+function detectInvokingProfile({
+  platform = process.platform,
+  parentPid = process.ppid,
+  run = spawnSync,
+} = {}) {
+  if (platform !== "win32") {
+    return undefined;
+  }
+
+  let result;
+  try {
+    result = run(
+      "tasklist.exe",
+      ["/FI", `PID eq ${parentPid}`, "/FO", "CSV", "/NH"],
+      {
+        encoding: "utf8",
+        windowsHide: true,
+      },
+    );
+  } catch {
+    return undefined;
+  }
+  if (result.error || result.status !== 0) {
+    return undefined;
+  }
+
+  return profileForProcessName(tasklistImageName(result.stdout));
+}
+
+function environmentForLaunch(env = process.env, invokingProfile = detectInvokingProfile()) {
+  const childEnv = { ...env };
+  if (
+    invokingProfile &&
+    !childEnv.GRIDBASH_PROFILE &&
+    !childEnv.GRIDBASH_INVOKING_PROFILE
+  ) {
+    childEnv.GRIDBASH_INVOKING_PROFILE = invokingProfile;
+  }
+  return childEnv;
+}
+
 function parseVersion(value) {
   const match = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/.exec(value || "");
   if (!match) {
@@ -266,6 +330,7 @@ async function main() {
 
   const result = spawnSync(exe, args, {
     cwd: process.cwd(),
+    env: environmentForLaunch(),
     stdio: "inherit",
     windowsHide: false,
   });
@@ -287,9 +352,13 @@ if (require.main === module) {
   module.exports = {
     checkForUpdate,
     compareVersions,
+    detectInvokingProfile,
+    environmentForLaunch,
     fetchLatestRelease,
     formatUpdateNotice,
+    profileForProcessName,
     shouldSkipUpdateCheck,
+    tasklistImageName,
     updateCheckTimeoutMs,
   };
 }
