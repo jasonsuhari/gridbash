@@ -16,6 +16,7 @@ mod ui;
 mod usage;
 mod voice;
 #[cfg(target_os = "linux")]
+#[allow(dead_code)] // Used by the Linux voice flow once the shared Unix backend lands.
 mod voice_model;
 mod worktrees;
 

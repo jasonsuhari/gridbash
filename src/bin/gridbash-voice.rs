@@ -181,7 +181,7 @@ mod linux {
         let error_capture = Arc::clone(state);
         device
             .build_input_stream(
-                config,
+                config.clone(),
                 move |data: &[T], _| append_input(data, channels, &capture),
                 move |error| {
                     if let Ok(mut state) = error_capture.lock() {

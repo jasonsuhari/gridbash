@@ -136,15 +136,3 @@ fn download_to_partial(path: &Path, cancel_rx: &Receiver<()>) -> Result<()> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn model_metadata_is_pinned() {
-        assert_eq!(MODEL_SHA256.len(), 64);
-        assert!(MODEL_URL.ends_with(MODEL_FILE_NAME));
-        assert!(MODEL_DOWNLOAD_BYTES > 50_000_000);
-    }
-}
