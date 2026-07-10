@@ -9,7 +9,7 @@ Release target: unreleased
 
 ## What Changed
 
-- Added `Alt+v` to listen for one utterance with the installed Windows speech recognizer.
+- Added `Alt+Shift+V` to listen for one utterance with the installed Windows speech recognizer.
 - Preserved the command bar or pane targets selected when listening starts and never auto-submitted dictated text.
 - Added cancellation, no-speech, unavailable-recognizer, microphone-error, and changed-tab status handling.
 - Added a visible `MIC` state plus shortcut and setup documentation.
@@ -28,4 +28,4 @@ Release target: unreleased
 
 ## Release Notes
 
-- Press `Alt+v` to dictate into the current command bar or pane targets. Press it again to cancel; review the inserted text and submit it normally when ready.
+- Press `Alt+Shift+V` to dictate into the current command bar or pane targets. Press it again to cancel; review the inserted text and submit it normally when ready.
