@@ -5,24 +5,11 @@ const fs = require("node:fs");
 const http = require("node:http");
 const https = require("node:https");
 const path = require("node:path");
+const { targetFor, targetKey } = require("./platforms.js");
 
 const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 900;
 const DEFAULT_UPDATE_CHECK_URL =
   "https://api.github.com/repos/jasonsuhari/gridbash/releases/latest";
-const NATIVE_TARGETS = {
-  "win32-x64": {
-    packageName: "gridbash-win32-x64",
-    executable: ["bin", "gridbash.exe"],
-  },
-  "darwin-arm64": {
-    packageName: "gridbash-darwin-arm64",
-    executable: ["GridBash.app", "Contents", "MacOS", "gridbash"],
-  },
-  "darwin-x64": {
-    packageName: "gridbash-darwin-x64",
-    executable: ["GridBash.app", "Contents", "MacOS", "gridbash"],
-  },
-};
 
 function fail(message) {
   console.error(`gridbash: ${message}`);
@@ -33,18 +20,14 @@ function packageRoot() {
   return path.resolve(__dirname, "..", "..");
 }
 
-function nativeTarget(platform = process.platform, arch = process.arch) {
-  return NATIVE_TARGETS[`${platform}-${arch}`];
-}
-
 function resolveNativeExecutable(
   root = packageRoot(),
   platform = process.platform,
   arch = process.arch,
 ) {
-  const target = nativeTarget(platform, arch);
+  const target = targetFor(platform, arch);
   if (!target) {
-    throw new Error(`unsupported platform: ${platform}-${arch}`);
+    throw new Error(`unsupported platform: ${targetKey(platform, arch)}`);
   }
 
   let manifest;
@@ -56,9 +39,11 @@ function resolveNativeExecutable(
     );
   }
 
-  const executable = path.join(path.dirname(manifest), ...target.executable);
+  const executable = path.join(path.dirname(manifest), ...target.executablePath);
   if (!fs.existsSync(executable)) {
-    throw new Error(`native package ${target.packageName} is missing ${target.executable.join("/")}`);
+    throw new Error(
+      `native package ${target.packageName} is missing ${target.executablePath.join("/")}`,
+    );
   }
   return executable;
 }
@@ -69,6 +54,70 @@ function readPackageVersion(root = packageRoot()) {
   } catch {
     return undefined;
   }
+}
+
+function tasklistImageName(output) {
+  const match = /^\s*"([^"]+)"/m.exec(String(output || ""));
+  return match?.[1];
+}
+
+function profileForProcessName(processName) {
+  const name = path.win32.basename(String(processName || "").trim()).toLowerCase();
+  switch (name) {
+    case "powershell.exe":
+      return "powershell";
+    case "pwsh.exe":
+      return "pwsh";
+    case "cmd.exe":
+      return "cmd";
+    case "bash.exe":
+    case "sh.exe":
+    case "git-bash.exe":
+      return "git-bash";
+    default:
+      return undefined;
+  }
+}
+
+function detectInvokingProfile({
+  platform = process.platform,
+  parentPid = process.ppid,
+  run = spawnSync,
+} = {}) {
+  if (platform !== "win32") {
+    return undefined;
+  }
+
+  let result;
+  try {
+    result = run(
+      "tasklist.exe",
+      ["/FI", `PID eq ${parentPid}`, "/FO", "CSV", "/NH"],
+      {
+        encoding: "utf8",
+        windowsHide: true,
+      },
+    );
+  } catch {
+    return undefined;
+  }
+  if (result.error || result.status !== 0) {
+    return undefined;
+  }
+
+  return profileForProcessName(tasklistImageName(result.stdout));
+}
+
+function environmentForLaunch(env = process.env, invokingProfile = detectInvokingProfile()) {
+  const childEnv = { ...env };
+  if (
+    invokingProfile &&
+    !childEnv.GRIDBASH_PROFILE &&
+    !childEnv.GRIDBASH_INVOKING_PROFILE
+  ) {
+    childEnv.GRIDBASH_INVOKING_PROFILE = invokingProfile;
+  }
+  return childEnv;
 }
 
 function parseVersion(value) {
@@ -297,6 +346,7 @@ async function main() {
 
   const result = spawnSync(exe, args, {
     cwd: process.cwd(),
+    env: environmentForLaunch(),
     stdio: "inherit",
     windowsHide: false,
   });
@@ -318,11 +368,14 @@ if (require.main === module) {
   module.exports = {
     checkForUpdate,
     compareVersions,
+    detectInvokingProfile,
+    environmentForLaunch,
     fetchLatestRelease,
     formatUpdateNotice,
-    nativeTarget,
     resolveNativeExecutable,
+    profileForProcessName,
     shouldSkipUpdateCheck,
+    tasklistImageName,
     updateCheckTimeoutMs,
   };
 }

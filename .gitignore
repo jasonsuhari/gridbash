@@ -7,3 +7,5 @@ npm-debug.log*
 /npm/platforms/**/*.tgz
 /*.tgz
 npm/bin/win32-x64/gridbash.exe
+npm/bin/linux-x64/gridbash
+npm/bin/linux-arm64/gridbash

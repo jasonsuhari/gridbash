@@ -4,23 +4,20 @@ const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
 const { test } = require("node:test");
+const { supportedTargets, targetFor, targetKey } = require("../bin/platforms.js");
 
 const {
   checkForUpdate,
   compareVersions,
+  detectInvokingProfile,
+  environmentForLaunch,
   formatUpdateNotice,
-  nativeTarget,
   resolveNativeExecutable,
+  profileForProcessName,
   shouldSkipUpdateCheck,
+  tasklistImageName,
   updateCheckTimeoutMs,
 } = require("../bin/gridbash.js");
-
-test("nativeTarget maps supported platform architectures", () => {
-  assert.equal(nativeTarget("win32", "x64").packageName, "gridbash-win32-x64");
-  assert.equal(nativeTarget("darwin", "arm64").packageName, "gridbash-darwin-arm64");
-  assert.equal(nativeTarget("darwin", "x64").packageName, "gridbash-darwin-x64");
-  assert.equal(nativeTarget("linux", "x64"), undefined);
-});
 
 test("resolveNativeExecutable finds the installed optional package", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "gridbash-launcher-"));
@@ -73,6 +70,24 @@ test("compareVersions handles newer, older, and prerelease versions", () => {
   assert.equal(compareVersions("1.0.0", "1.0.0-beta.1"), 1);
 });
 
+test("platform target selection covers all shipped native builds", () => {
+  assert.equal(targetKey("linux", "arm64"), "linux-arm64");
+  assert.equal(targetFor("win32", "x64").packageName, "gridbash-win32-x64");
+  assert.equal(targetFor("linux", "x64").packageName, "gridbash-linux-x64");
+  assert.equal(targetFor("darwin", "arm64").packageName, "gridbash-darwin-arm64");
+  assert.deepEqual(targetFor("darwin", "x64").executablePath, [
+    "GridBash.app",
+    "Contents",
+    "MacOS",
+    "gridbash",
+  ]);
+  assert.equal(targetFor("linux", "ia32"), undefined);
+  assert.deepEqual(
+    supportedTargets().map((target) => `${target.platform}-${target.arch}`),
+    ["win32-x64", "linux-x64", "linux-arm64", "darwin-arm64", "darwin-x64"],
+  );
+});
+
 test("shouldSkipUpdateCheck preserves help, version, MCP, and non-TTY paths", () => {
   assert.equal(shouldSkipUpdateCheck(["--version"], {}, { isTTY: true }), true);
   assert.equal(shouldSkipUpdateCheck(["--mcp"], {}, { isTTY: true }), true);
@@ -84,6 +99,50 @@ test("shouldSkipUpdateCheck preserves help, version, MCP, and non-TTY paths", ()
 test("updateCheckTimeoutMs clamps overrides", () => {
   assert.equal(updateCheckTimeoutMs({ GRIDBASH_UPDATE_CHECK_TIMEOUT_MS: "25" }), 25);
   assert.equal(updateCheckTimeoutMs({ GRIDBASH_UPDATE_CHECK_TIMEOUT_MS: "10000" }), 5000);
+});
+
+test("profileForProcessName maps supported Windows shells", () => {
+  assert.equal(profileForProcessName("powershell.exe"), "powershell");
+  assert.equal(profileForProcessName("C:\\Program Files\\PowerShell\\7\\pwsh.exe"), "pwsh");
+  assert.equal(profileForProcessName("cmd.exe"), "cmd");
+  assert.equal(profileForProcessName("bash.exe"), "git-bash");
+  assert.equal(profileForProcessName("node.exe"), undefined);
+});
+
+test("detectInvokingProfile reads the parent process from tasklist", () => {
+  const run = (command, args, options) => {
+    assert.equal(command, "tasklist.exe");
+    assert.deepEqual(args, ["/FI", "PID eq 4242", "/FO", "CSV", "/NH"]);
+    assert.equal(options.encoding, "utf8");
+    return {
+      status: 0,
+      stdout: '"powershell.exe","4242","Console","1","75,000 K"\r\n',
+    };
+  };
+
+  assert.equal(detectInvokingProfile({ parentPid: 4242, platform: "win32", run }), "powershell");
+  assert.equal(detectInvokingProfile({ platform: "darwin", run }), undefined);
+  assert.equal(
+    detectInvokingProfile({
+      platform: "win32",
+      run: () => {
+        throw new Error("tasklist unavailable");
+      },
+    }),
+    undefined,
+  );
+  assert.equal(tasklistImageName("INFO: No tasks are running"), undefined);
+});
+
+test("environmentForLaunch preserves explicit profile overrides", () => {
+  assert.deepEqual(environmentForLaunch({ HOME: "home" }, "powershell"), {
+    HOME: "home",
+    GRIDBASH_INVOKING_PROFILE: "powershell",
+  });
+  assert.deepEqual(
+    environmentForLaunch({ GRIDBASH_PROFILE: "codex" }, "powershell"),
+    { GRIDBASH_PROFILE: "codex" },
+  );
 });
 
 test("checkForUpdate returns latest release only when it is newer", async () => {

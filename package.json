@@ -56,6 +56,7 @@
     "conpty",
     "windows",
     "macos",
+    "linux",
     "powershell",
     "git-bash",
     "developer-tools"
@@ -65,6 +66,8 @@
   },
   "optionalDependencies": {
     "gridbash-win32-x64": "0.1.6",
+    "gridbash-linux-x64": "0.1.6",
+    "gridbash-linux-arm64": "0.1.6",
     "gridbash-darwin-arm64": "0.1.6",
     "gridbash-darwin-x64": "0.1.6"
   }

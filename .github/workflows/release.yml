@@ -92,6 +92,10 @@ jobs:
         include:
           - runner: windows-latest
             platform_key: win32-x64
+          - runner: ubuntu-latest
+            platform_key: linux-x64
+          - runner: ubuntu-24.04-arm
+            platform_key: linux-arm64
           - runner: macos-latest
             platform_key: darwin-arm64
           - runner: macos-15-intel

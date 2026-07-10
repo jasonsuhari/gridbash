@@ -228,7 +228,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(
-            " | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+v voice | Alt+e output | Alt+p panes | Alt+P pane | Alt+x swap | Alt+z sleep | Alt+q quit",
+            " | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+e output | Alt+p panes | Alt+P pane | Alt+x swap | Alt+z sleep | Alt+q quit",
         ),
     ]);
     frame.render_widget(

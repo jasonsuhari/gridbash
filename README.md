@@ -5,7 +5,7 @@
 [![npm downloads](https://img.shields.io/npm/dm/gridbash?label=npm%20downloads)](https://www.npmjs.com/package/gridbash)
 [![GitHub release](https://img.shields.io/github/v/release/jasonsuhari/gridbash?label=github)](https://github.com/jasonsuhari/gridbash/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Platforms: Windows and macOS](https://img.shields.io/badge/platform-Windows%20x64%20%7C%20macOS-0078D4.svg)](https://github.com/jasonsuhari/gridbash)
+[![Platforms: Windows, Linux, macOS](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D4.svg)](https://github.com/jasonsuhari/gridbash)
 
 **Run every CLI coding agent in one fast terminal grid.**
 
@@ -21,7 +21,8 @@ GridBash is built for developers who want parallel CLI-agent work without juggli
 
 ## Quickstart
 
-Install the published package on Windows x64 or macOS 13+ (Apple Silicon or Intel):
+Install the published package on Windows x64, Linux x64/arm64, or macOS 13+
+(Apple Silicon or Intel):
 
 ```powershell
 npm install -g gridbash
@@ -52,7 +53,10 @@ gridbash 2x3 --profile codex --worktrees
 
 GridBash is for CLI agent orchestration in the terminal: compare ideas from multiple coding agents, run review/build/test loops in parallel, keep shells visible, and send a prompt only to the panes that should receive it.
 
-Its niche is PTY-backed, agent-first terminal grids on Windows and macOS. Traditional terminal multiplexers are still great; GridBash focuses on the workflows that appear when Codex, Claude, Gemini, Aider, and other CLI agents are all part of the same development session.
+Its niche is PTY-backed, agent-first terminal grids on Windows, Linux, and
+macOS. Traditional terminal multiplexers are still great; GridBash focuses on
+the workflows that appear when Codex, Claude, Gemini, Aider, and other CLI
+agents are all part of the same development session.
 
 ## Release Status & Devlogs
 
@@ -154,7 +158,9 @@ Open the startup grid picker:
 gridbash
 ```
 
-On first launch, if no default profile is configured, GridBash opens an animated setup screen and asks you to choose from the detected terminal profiles. The choice is saved to:
+When launched through the npm command, GridBash inherits the invoking shell for new panes: PowerShell launches PowerShell, PowerShell 7 launches `pwsh`, cmd launches cmd, and Git Bash launches Git Bash. Use `--profile` or `GRIDBASH_PROFILE` to override shell inheritance.
+
+If the invoking shell cannot be detected and no default profile is configured, GridBash opens an animated setup screen and asks you to choose from the detected terminal profiles. The choice is saved to:
 
 ```text
 %APPDATA%\GridBash\config.toml
@@ -162,7 +168,7 @@ On first launch, if no default profile is configured, GridBash opens an animated
 
 The startup picker asks for rows and columns, updates the preview grid as you change them, and launches every pane in the directory where you started `gridbash`.
 
-Set the default terminal profile:
+Set the fallback terminal profile used when shell inheritance is unavailable:
 
 ```powershell
 gridbash --set-default powershell
@@ -275,7 +281,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+c | Focus or unfocus the command bar |
-| Alt+v | Listen for one dictated utterance; press again to cancel |
+| Alt+Shift+V | Listen for one dictated utterance; press again to cancel |
 | Alt+p | Open settings for the focused pane; use Reload past history to refresh its visible conversation snapshot |
 | Alt+Shift+p | Open the previous panes list |
 | Alt+r | Rename the focused pane |
@@ -308,10 +314,10 @@ shown in blue. Shrinking removes live panes outside the retained upper-left
 rectangle. For example, changing 3x3 to 3x2 deactivates the full rightmost column.
 
 Voice mode uses modern Windows dictation on Windows and Apple Speech on macOS.
-Press `Alt+v` to listen for one utterance; GridBash waits up to 15 seconds for speech.
+`Alt+Shift+V` to listen for one utterance; GridBash waits up to 15 seconds for speech.
 The transcript is inserted into the command bar or the panes that were targeted
 when listening started. GridBash never presses Enter for dictated text, so you can
-review or edit it before submitting. Press `Alt+v` while listening to cancel.
+review or edit it before submitting. Press `Alt+Shift+V` while listening to cancel.
 
 Voice audio is processed by Microsoft's online speech service. Enable **Online
 speech recognition** in Windows Settings under **Privacy & security > Speech**,
@@ -369,9 +375,10 @@ Built-in terminal profile keys are platform-specific:
 ```text
 Windows: git-bash pwsh powershell cmd
 macOS:  zsh bash sh pwsh
+Linux:  zsh bash sh pwsh
 ```
 
-Agent profile keys remain available on both platforms: `codex`, `claude`,
+Agent profile keys remain available on every platform: `codex`, `claude`,
 `gemini`, `opencode`, `aider`, `amp`, `goose`, `copilot`, and `cursor`.
 
 GridBash resolves Windows `.exe` and `.cmd` shims before extensionless npm shims, so common Node-based CLIs launch correctly.

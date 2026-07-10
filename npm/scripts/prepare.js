@@ -1,22 +1,18 @@
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { targetFor, targetKey } = require("../bin/platforms.js");
 
 const root = path.resolve(__dirname, "..", "..");
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-const platformKey = `${process.platform}-${process.arch}`;
-const packageDir = path.join(root, "npm", "platforms", platformKey);
+const platformTarget = targetFor();
 
 function fail(message) {
   throw new Error(`gridbash prepare: ${message}`);
 }
 
 function run(command, args) {
-  const result = spawnSync(command, args, {
-    cwd: root,
-    stdio: "inherit",
-  });
-
+  const result = spawnSync(command, args, { cwd: root, stdio: "inherit" });
   if (result.error) {
     throw result.error;
   }
@@ -39,14 +35,18 @@ function resetDirectory(target) {
   fs.mkdirSync(target, { recursive: true });
 }
 
-function prepareWindows() {
-  const source = path.join(root, "target", "release", "gridbash.exe");
+function prepareBinary(packageDir) {
+  const source = path.join(root, "target", "release", platformTarget.executable);
   const binDir = path.join(packageDir, "bin");
+  const packagedBinary = path.join(binDir, platformTarget.executable);
   resetDirectory(binDir);
-  fs.copyFileSync(source, path.join(binDir, "gridbash.exe"));
+  fs.copyFileSync(source, packagedBinary);
+  if (process.platform !== "win32") {
+    fs.chmodSync(packagedBinary, 0o755);
+  }
 }
 
-function prepareMacos() {
+function prepareMacos(packageDir) {
   const source = path.join(root, "target", "release", "gridbash");
   const app = path.join(packageDir, "GridBash.app");
   const contents = path.join(app, "Contents");
@@ -66,7 +66,6 @@ function prepareMacos() {
     path.join(nativeSource, "GridBashSpeech.Info.plist"),
     path.join(helperContents, "Info.plist"),
   );
-
   run("xcrun", [
     "swiftc",
     path.join(nativeSource, "GridBashSpeech.swift"),
@@ -84,18 +83,26 @@ function prepareMacos() {
   fs.chmodSync(helper, 0o755);
 }
 
-if (!fs.existsSync(path.join(packageDir, "package.json"))) {
-  fail(`unsupported platform architecture: ${platformKey}`);
+if (!platformTarget) {
+  fail(`unsupported platform architecture: ${targetKey(process.platform, process.arch)}`);
 }
 
-run(process.platform === "win32" ? "cargo.exe" : "cargo", ["build", "--release"]);
+const packageDir = path.join(root, "npm", "platforms", platformTarget.directory);
+if (!fs.existsSync(path.join(packageDir, "package.json"))) {
+  fail(`missing native package manifest for ${platformTarget.directory}`);
+}
 
-if (process.platform === "win32" && process.arch === "x64") {
-  prepareWindows();
-} else if (process.platform === "darwin" && ["arm64", "x64"].includes(process.arch)) {
-  prepareMacos();
+run(process.platform === "win32" ? "cargo.exe" : "cargo", [
+  "build",
+  "--release",
+  "--bin",
+  "gridbash",
+]);
+
+if (process.platform === "darwin") {
+  prepareMacos(packageDir);
 } else {
-  fail(`unsupported platform architecture: ${platformKey}`);
+  prepareBinary(packageDir);
 }
 
 console.log(`gridbash prepare: assembled ${path.relative(root, packageDir)}`);

@@ -53,9 +53,9 @@ After the change is merged to `main`:
 
 The workflow runs `node npm/scripts/release.js` on `main`. That script creates
 and pushes the release commit and `vX.Y.Z` tag. A separate publish job in the
-same workflow run then builds Windows x64 plus macOS arm64/x64 native packages,
-publishes those packages before the platform-neutral npm launcher, and creates
-or updates one GitHub release.
+same workflow run then builds Windows x64, Linux x64/arm64, and macOS arm64/x64
+native packages, publishes those packages before the platform-neutral npm
+launcher, and creates or updates one GitHub release.
 
 macOS releases are preview-only until real-hardware testing and Developer ID
 signing/notarization are complete. Dispatch an exact prerelease such as

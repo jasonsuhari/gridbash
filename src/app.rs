@@ -1625,10 +1625,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
             .into()
     } else {
-        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
+        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
             .into()
     }
 }
@@ -2448,7 +2448,7 @@ impl App {
                 }
             },
             VoiceOutcome::NoSpeech => {
-                self.status = "voice heard no speech; press Alt+v to try again".into();
+                self.status = "voice heard no speech; press Alt+Shift+V to try again".into();
             }
             VoiceOutcome::Error(error) => {
                 self.status = format!("voice unavailable: {error}");
@@ -2795,7 +2795,7 @@ impl App {
                 self.status = self.focus_status();
                 Ok(Some(false))
             }
-            'v' => {
+            'v' if is_voice_shortcut(ch, modifiers) => {
                 self.toggle_voice_input();
                 Ok(Some(false))
             }
@@ -4710,7 +4710,7 @@ impl App {
         self.voice_destination = Some(destination);
         self.voice.start();
         self.status = format!(
-            "voice listening for {} (Alt+v cancels; speech is not submitted)",
+            "voice listening for {} (Alt+Shift+V cancels; speech is not submitted)",
             self.input_scope_label()
         );
     }
@@ -5718,9 +5718,24 @@ fn uses_direct_launch(cli: &Cli) -> bool {
 }
 
 fn resolve_profile_name(cli: &Cli, config: &Config) -> String {
+    resolve_profile_name_from(
+        cli,
+        config,
+        env::var("GRIDBASH_PROFILE").ok(),
+        env::var("GRIDBASH_INVOKING_PROFILE").ok(),
+    )
+}
+
+fn resolve_profile_name_from(
+    cli: &Cli,
+    config: &Config,
+    environment_profile: Option<String>,
+    invoking_profile: Option<String>,
+) -> String {
     cli.profile
         .clone()
-        .or_else(|| env::var("GRIDBASH_PROFILE").ok())
+        .or(environment_profile)
+        .or(invoking_profile)
         .or_else(|| config.defaults.profile.clone())
         .unwrap_or_else(|| default_profile_name().into())
 }
@@ -6410,6 +6425,13 @@ fn pane_number_list(indices: &[usize]) -> String {
         .join(", ")
 }
 
+fn is_voice_shortcut(ch: char, modifiers: KeyModifiers) -> bool {
+    ch.eq_ignore_ascii_case(&'v')
+        && modifiers.contains(KeyModifiers::ALT)
+        && modifiers.contains(KeyModifiers::SHIFT)
+        && !modifiers.contains(KeyModifiers::CONTROL)
+}
+
 fn control_byte(ch: char) -> Option<u8> {
     let lower = ch.to_ascii_lowercase();
     if lower.is_ascii_lowercase() {
@@ -6589,6 +6611,8 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use clap::Parser as ClapParser;
+
     use super::*;
     use crate::profiles::Profile;
     use vt100::Parser;
@@ -6623,6 +6647,44 @@ mod tests {
 
     fn selected(indices: &[usize]) -> BTreeSet<usize> {
         indices.iter().copied().collect()
+    }
+
+    #[test]
+    fn invoking_profile_precedes_saved_fallback() {
+        let cli = Cli::parse_from(["gridbash"]);
+        let mut config = Config::default();
+        config.set_default_profile("git-bash");
+
+        assert_eq!(
+            resolve_profile_name_from(&cli, &config, None, Some("powershell".into())),
+            "powershell"
+        );
+    }
+
+    #[test]
+    fn explicit_profiles_precede_invoking_profile() {
+        let cli = Cli::parse_from(["gridbash", "--profile", "cmd"]);
+        let config = Config::default();
+        assert_eq!(
+            resolve_profile_name_from(
+                &cli,
+                &config,
+                Some("codex".into()),
+                Some("powershell".into()),
+            ),
+            "cmd"
+        );
+
+        let cli = Cli::parse_from(["gridbash"]);
+        assert_eq!(
+            resolve_profile_name_from(
+                &cli,
+                &config,
+                Some("codex".into()),
+                Some("powershell".into()),
+            ),
+            "codex"
+        );
     }
 
     fn mouse_event(kind: MouseEventKind, modifiers: KeyModifiers) -> MouseEvent {
@@ -7094,6 +7156,16 @@ mod tests {
         assert_eq!(command.cursor_chars(), 3);
         assert!(command.backspace());
         assert_eq!(command.input, "abc");
+    }
+
+    #[test]
+    fn voice_shortcut_preserves_plain_alt_v_for_agent_image_paste() {
+        let image_paste = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
+        assert!(!is_voice_shortcut('v', KeyModifiers::ALT));
+        assert_eq!(terminal_key_bytes(image_paste), Some(b"\x1bv".to_vec()));
+
+        let voice_modifiers = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        assert!(is_voice_shortcut('V', voice_modifiers));
     }
 
     #[test]
