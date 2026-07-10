@@ -6,15 +6,14 @@ mod config;
 mod control;
 mod image_preview;
 mod layout;
+mod manager;
 mod onboarding;
-mod orchestrator;
 mod profiles;
 mod pty;
 mod session;
 mod setup;
 mod ui;
 mod usage;
-mod vibe;
 mod voice;
 mod worktrees;
 
