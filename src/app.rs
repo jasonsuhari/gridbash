@@ -28,7 +28,7 @@ use vt100::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 use crate::{
     auth::{self, AgentKind, AuthProfile},
     cli::{Cli, GridMode},
-    composer::Composer,
+    composer::{Composer, GridPicker, GridPickerAction},
     config::Config,
     control::{self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse},
     image_preview::{self, ImagePreview},
@@ -97,6 +97,7 @@ pub struct App {
     control_handle: Option<ControlHandle>,
     control_rx: Option<std_mpsc::Receiver<ControlEnvelope>>,
     image_overlay: Option<ImagePreview>,
+    grid_resizer: Option<GridPicker>,
     settings: SettingsState,
     rename: RenamePaneState,
     tab_rename: RenameTabState,
@@ -246,12 +247,6 @@ impl PaneSelection {
         }
         true
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GridAxis {
-    Rows,
-    Columns,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1482,10 +1477,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        "Drag copies within pane | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
             .into()
     } else {
-        "Alt+arrows move | Alt+Shift+arrows resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
+        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g group | Alt+u ungroup | Alt+o settings"
             .into()
     }
 }
@@ -1618,6 +1613,7 @@ impl App {
             control_handle: init.control_handle,
             control_rx: init.control_rx,
             image_overlay: None,
+            grid_resizer: None,
             settings: init.settings,
             rename: RenamePaneState::default(),
             tab_rename: RenameTabState::default(),
@@ -1778,6 +1774,7 @@ impl App {
         self.prompt = None;
         self.text_selection = None;
         self.command_line.focused = false;
+        self.grid_resizer = None;
     }
 
     fn activate_plan_as_tab(&mut self, title: String, mut plan: LaunchPlan) -> Result<()> {
@@ -1946,6 +1943,7 @@ impl App {
                     }
                     Event::Paste(text)
                         if !self.settings.open
+                            && self.grid_resizer.is_none()
                             && !self.rename.open
                             && !self.previous_panes.open
                             && !self.pane_settings.open
@@ -1963,6 +1961,7 @@ impl App {
                     Event::Mouse(mouse)
                         if (self.mouse_enabled || !self.sleeping.is_empty())
                             && !self.settings.open
+                            && self.grid_resizer.is_none()
                             && self.follow_up.is_none()
                             && self.prompt.is_none() =>
                     {
@@ -2571,6 +2570,10 @@ impl App {
     }
 
     fn handle_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<KeyOutcome> {
+        if self.grid_resizer.is_some() {
+            return self.handle_grid_resizer_key(key);
+        }
+
         if self.image_overlay.is_some() {
             return Ok(self.handle_image_overlay_key(key));
         }
@@ -2668,22 +2671,6 @@ impl App {
     fn handle_app_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<Option<bool>> {
         match key.code {
             KeyCode::Char(ch) => self.handle_alt_char(terminal, ch, key.modifiers),
-            KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.adjust_grid(GridAxis::Columns, -1)?;
-                Ok(Some(false))
-            }
-            KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.adjust_grid(GridAxis::Columns, 1)?;
-                Ok(Some(false))
-            }
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.adjust_grid(GridAxis::Rows, -1)?;
-                Ok(Some(false))
-            }
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.adjust_grid(GridAxis::Rows, 1)?;
-                Ok(Some(false))
-            }
             KeyCode::Left => {
                 self.focus_previous();
                 self.status = self.focus_status();
@@ -2748,6 +2735,10 @@ impl App {
             }
             'n' => {
                 self.open_new_tab(terminal)?;
+                Ok(Some(false))
+            }
+            'l' => {
+                self.open_grid_resizer();
                 Ok(Some(false))
             }
             'x' => {
@@ -2823,6 +2814,38 @@ impl App {
                 Some(KeyOutcome::Render)
             }
             ExitedRecoveryAction::HoldAltPrefix => Some(KeyOutcome::Render),
+        }
+    }
+
+    fn open_grid_resizer(&mut self) {
+        self.close_tab_modals();
+        self.grid_resizer = Some(GridPicker::new(self.layout.size()));
+        self.status = "grid resizer open".into();
+    }
+
+    fn handle_grid_resizer_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return Ok(KeyOutcome::Quit);
+        }
+
+        let action = self
+            .grid_resizer
+            .as_mut()
+            .map(|picker| picker.handle_key(key))
+            .unwrap_or(GridPickerAction::Cancel);
+        match action {
+            GridPickerAction::Continue => Ok(KeyOutcome::Render),
+            GridPickerAction::Cancel => {
+                self.grid_resizer = None;
+                self.status = "grid resize canceled".into();
+                Ok(KeyOutcome::Render)
+            }
+            GridPickerAction::Confirm(next) => {
+                self.apply_grid_resize(next)?;
+                self.grid_resizer = None;
+                self.save_session_snapshot()?;
+                Ok(KeyOutcome::Render)
+            }
         }
     }
 
@@ -4172,157 +4195,160 @@ impl App {
         );
     }
 
-    fn adjust_grid(&mut self, axis: GridAxis, delta: isize) -> Result<()> {
+    fn apply_grid_resize(&mut self, next: GridSize) -> Result<()> {
         let current = self.layout.size();
-        let Some(rows) =
-            adjust_dimension(current.rows, if axis == GridAxis::Rows { delta } else { 0 })
-        else {
-            self.status = "grid is capped at 100 cells".into();
-            return Ok(());
-        };
-        let Some(columns) = adjust_dimension(
-            current.columns,
-            if axis == GridAxis::Columns { delta } else { 0 },
-        ) else {
-            self.status = "grid is capped at 100 cells".into();
-            return Ok(());
-        };
-        let Some(next) = GridSize::new(rows, columns) else {
-            self.status = invalid_grid_status(rows, columns);
-            return Ok(());
-        };
-
-        if next == current {
+        if next == current && self.panes.len() == next.count() {
+            self.status = format!("grid remains {}x{}", next.rows, next.columns);
             return Ok(());
         }
 
         let before = self.panes.len();
-        if next.count() > self.panes.len() {
-            self.spawn_panes_to_fill(next.count())?;
-        } else if next.count() < self.panes.len() && !self.remove_overflow_panes(next.count(), next)
-        {
-            return Ok(());
+        let slots = grid_resize_slots(current, next, before);
+        let old_to_new = slots
+            .iter()
+            .enumerate()
+            .filter_map(|(new, old)| old.map(|old| (old, new)))
+            .collect::<BTreeMap<_, _>>();
+        let retained = old_to_new.len();
+        let removed = before.saturating_sub(retained);
+        let added = slots.iter().filter(|slot| slot.is_none()).count();
+
+        let plan = self
+            .launch_plan
+            .as_ref()
+            .ok_or_else(|| anyhow!("no launch plan selected"))?;
+        let templates = plan.panes.clone();
+        if templates.is_empty() {
+            return Err(anyhow!("no pane template available"));
         }
+
+        let mut next_plan = LaunchPlan {
+            panes: slots
+                .iter()
+                .enumerate()
+                .map(|(new_index, old_index)| {
+                    let mut spec = old_index
+                        .and_then(|old_index| plan.panes.get(old_index))
+                        .cloned()
+                        .unwrap_or_else(|| templates[new_index % templates.len()].clone());
+                    if old_index.is_none() && self.config.auth.auto_cycle {
+                        clear_spec_auth(&mut spec);
+                    }
+                    spec
+                })
+                .collect(),
+            grid: next,
+        };
+        apply_auth_defaults(&mut next_plan, &self.config)?;
+
+        // Spawn every new cell before touching the live vectors. If a launch fails,
+        // the current grid remains intact.
+        let mut spawned = BTreeMap::new();
+        for (new_index, old_index) in slots.iter().enumerate() {
+            if old_index.is_none() {
+                let pane = self.spawn_pane_instance(&next_plan.panes[new_index], new_index)?;
+                spawned.insert(new_index, pane);
+            }
+        }
+
+        let mut old_panes = mem::take(&mut self.panes)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        let mut old_idle = mem::take(&mut self.pane_idle)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+        let mut old_names = mem::take(&mut self.pane_names)
+            .into_iter()
+            .map(Some)
+            .collect::<Vec<_>>();
+
+        self.panes = Vec::with_capacity(next.count());
+        self.pane_idle = Vec::with_capacity(next.count());
+        self.pane_names = Vec::with_capacity(next.count());
+        for (new_index, old_index) in slots.iter().copied().enumerate() {
+            if let Some(old_index) = old_index {
+                self.panes.push(
+                    old_panes
+                        .get_mut(old_index)
+                        .and_then(Option::take)
+                        .expect("retained pane index"),
+                );
+                self.pane_idle.push(
+                    old_idle
+                        .get_mut(old_index)
+                        .and_then(Option::take)
+                        .unwrap_or_else(|| PaneIdleState::new(Instant::now())),
+                );
+                self.pane_names.push(
+                    old_names
+                        .get_mut(old_index)
+                        .and_then(Option::take)
+                        .unwrap_or(None),
+                );
+            } else {
+                self.panes
+                    .push(spawned.remove(&new_index).expect("spawned resize pane"));
+                self.pane_idle.push(PaneIdleState::new(Instant::now()));
+                self.pane_names.push(None);
+            }
+        }
+
+        let old_focus = self.focus;
+        self.focus = resized_focus_index(old_focus, current, next, &old_to_new);
+        self.selected = remap_index_set(&self.selected, &old_to_new);
+        self.sleeping = remap_index_set(&self.sleeping, &old_to_new);
+        self.text_selection = self.text_selection.and_then(|selection| {
+            old_to_new
+                .get(&selection.pane)
+                .copied()
+                .map(|pane| MouseSelection { pane, ..selection })
+        });
+        self.follow_up = self.follow_up.and_then(|prompt| {
+            old_to_new
+                .get(&prompt.pane_index)
+                .copied()
+                .map(|pane_index| FollowUpPromptState {
+                    pane_index,
+                    ..prompt
+                })
+        });
+        self.remap_groups(&old_to_new);
 
         self.layout.set_size(next);
-        if let Some(plan) = &mut self.launch_plan {
-            plan.grid = next;
-        }
+        self.launch_plan = Some(next_plan.clone());
+        self.start_usage_monitor(&next_plan);
 
-        let added = self.panes.len().saturating_sub(before);
-        let removed = before.saturating_sub(self.panes.len());
-        self.status = if added > 0 {
+        self.status = if added > 0 && removed > 0 {
+            format!(
+                "grid resized to {}x{}; deactivated {removed} and spawned {added} pane(s)",
+                next.rows, next.columns
+            )
+        } else if added > 0 {
             format!(
                 "grid resized to {}x{}; spawned {added} pane(s)",
                 next.rows, next.columns
             )
         } else if removed > 0 {
             format!(
-                "grid resized to {}x{}; removed {removed} exited pane(s)",
+                "grid resized to {}x{}; deactivated {removed} pane(s)",
                 next.rows, next.columns
             )
         } else {
-            format!(
-                "grid resized to {}x{}; {} pane(s)",
-                next.rows,
-                next.columns,
-                self.panes.len()
-            )
+            format!("grid resized to {}x{}", next.rows, next.columns)
         };
 
         Ok(())
     }
 
-    fn spawn_panes_to_fill(&mut self, target_count: usize) -> Result<()> {
-        let specs = self.pane_specs_to_fill(target_count)?;
-        for spec in specs {
-            let index = self.panes.len();
-            self.spawn_pane_spec(index, &spec)?;
-        }
-        self.pane_names.resize(self.panes.len(), None);
-        Ok(())
-    }
-
-    fn pane_specs_to_fill(&mut self, target_count: usize) -> Result<Vec<PaneLaunchSpec>> {
-        let plan = self
-            .launch_plan
-            .as_mut()
-            .ok_or_else(|| anyhow!("no launch plan selected"))?;
-        if plan.panes.is_empty() {
-            return Err(anyhow!("no pane template available"));
-        }
-
-        let templates = plan.panes.clone();
-        while plan.panes.len() < target_count {
-            let mut spec = templates[plan.panes.len() % templates.len()].clone();
-            if self.config.auth.auto_cycle {
-                clear_spec_auth(&mut spec);
-            }
-            plan.panes.push(spec);
-        }
-        apply_auth_defaults(plan, &self.config)?;
-
-        Ok(plan.panes[self.panes.len()..target_count].to_vec())
-    }
-
-    fn remove_overflow_panes(&mut self, target_count: usize, next: GridSize) -> bool {
-        let running = self
-            .panes
-            .iter()
-            .skip(target_count)
-            .filter(|pane| !pane.exited)
-            .count();
-        if running > 0 {
-            self.status = format!(
-                "cannot shrink to {}x{}; {running} running pane(s) would be removed",
-                next.rows, next.columns
-            );
-            return false;
-        }
-
-        self.panes.truncate(target_count);
-        if let Some(plan) = &mut self.launch_plan {
-            plan.panes.truncate(target_count);
-        }
-        self.selected = self
-            .selected
-            .iter()
-            .copied()
-            .filter(|index| *index < target_count)
-            .collect();
-        if self.focus >= target_count {
-            self.focus = target_count.saturating_sub(1);
-        }
-        self.pane_names.truncate(target_count);
-        self.pane_idle.truncate(target_count);
-        if self
-            .follow_up
-            .is_some_and(|prompt| prompt.pane_index >= target_count)
-        {
-            self.follow_up = None;
-        }
-        self.sleeping = self
-            .sleeping
-            .iter()
-            .copied()
-            .filter(|index| *index < target_count)
-            .collect();
-        if self
-            .text_selection
-            .is_some_and(|selection| selection.pane >= target_count)
-        {
-            self.text_selection = None;
-        }
-        self.truncate_groups(target_count);
-        true
-    }
-
-    fn truncate_groups(&mut self, target_count: usize) {
+    fn remap_groups(&mut self, old_to_new: &BTreeMap<usize, usize>) {
         self.groups.retain_mut(|group| {
-            group.workers.retain(|index| *index < target_count);
-            group
-                .relay_buffers
-                .retain(|pane_index, _| *pane_index < target_count);
+            group.workers = remap_index_set(&group.workers, old_to_new);
+            group.relay_buffers = mem::take(&mut group.relay_buffers)
+                .into_iter()
+                .filter_map(|(old, buffer)| old_to_new.get(&old).copied().map(|new| (new, buffer)))
+                .collect();
             !group.workers.is_empty()
         });
 
@@ -4971,6 +4997,10 @@ impl App {
 
     pub fn status(&self) -> &str {
         &self.status
+    }
+
+    pub fn grid_resizer(&self) -> Option<&GridPicker> {
+        self.grid_resizer.as_ref()
     }
 
     pub fn settings_open(&self) -> bool {
@@ -6257,20 +6287,44 @@ fn base64_encode(bytes: &[u8]) -> String {
     output
 }
 
-fn adjust_dimension(value: usize, delta: isize) -> Option<usize> {
-    if delta < 0 {
-        value.checked_sub((-delta) as usize)
-    } else {
-        value.checked_add(delta as usize)
+fn grid_resize_slots(current: GridSize, next: GridSize, pane_count: usize) -> Vec<Option<usize>> {
+    let mut slots = Vec::with_capacity(next.count());
+    for row in 0..next.rows {
+        for column in 0..next.columns {
+            let old_index = (row < current.rows && column < current.columns)
+                .then_some(row * current.columns + column)
+                .filter(|index| *index < pane_count);
+            slots.push(old_index);
+        }
     }
+    slots
 }
 
-fn invalid_grid_status(rows: usize, columns: usize) -> String {
-    if rows == 0 || columns == 0 {
-        "grid needs at least 1 row and 1 column".into()
-    } else {
-        "grid is capped at 100 cells".into()
+fn remap_index_set(
+    indices: &BTreeSet<usize>,
+    old_to_new: &BTreeMap<usize, usize>,
+) -> BTreeSet<usize> {
+    indices
+        .iter()
+        .filter_map(|old| old_to_new.get(old).copied())
+        .collect()
+}
+
+fn resized_focus_index(
+    old_focus: usize,
+    current: GridSize,
+    next: GridSize,
+    old_to_new: &BTreeMap<usize, usize>,
+) -> usize {
+    if let Some(new_focus) = old_to_new.get(&old_focus) {
+        return *new_focus;
     }
+
+    let old_row = old_focus / current.columns;
+    let old_column = old_focus % current.columns;
+    let row = old_row.min(next.rows.saturating_sub(1));
+    let column = old_column.min(next.columns.saturating_sub(1));
+    row * next.columns + column
 }
 
 fn awake_input_targets_for(
@@ -6503,6 +6557,92 @@ mod tests {
             row: 0,
             modifiers,
         }
+    }
+
+    #[test]
+    fn shrinking_columns_deactivates_the_rightmost_column() {
+        let slots = grid_resize_slots(
+            GridSize {
+                rows: 3,
+                columns: 3,
+            },
+            GridSize {
+                rows: 3,
+                columns: 2,
+            },
+            9,
+        );
+
+        assert_eq!(
+            slots,
+            vec![Some(0), Some(1), Some(3), Some(4), Some(6), Some(7)]
+        );
+    }
+
+    #[test]
+    fn expanding_columns_preserves_rows_and_inserts_new_cells() {
+        let slots = grid_resize_slots(
+            GridSize {
+                rows: 3,
+                columns: 2,
+            },
+            GridSize {
+                rows: 3,
+                columns: 3,
+            },
+            6,
+        );
+
+        assert_eq!(
+            slots,
+            vec![
+                Some(0),
+                Some(1),
+                None,
+                Some(2),
+                Some(3),
+                None,
+                Some(4),
+                Some(5),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn equal_count_reshape_removes_and_adds_by_coordinate() {
+        let slots = grid_resize_slots(
+            GridSize {
+                rows: 2,
+                columns: 3,
+            },
+            GridSize {
+                rows: 3,
+                columns: 2,
+            },
+            6,
+        );
+
+        assert_eq!(slots, vec![Some(0), Some(1), Some(3), Some(4), None, None]);
+    }
+
+    #[test]
+    fn focus_moves_to_nearest_retained_cell_when_its_column_is_removed() {
+        let current = GridSize {
+            rows: 3,
+            columns: 3,
+        };
+        let next = GridSize {
+            rows: 3,
+            columns: 2,
+        };
+        let old_to_new = grid_resize_slots(current, next, 9)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(new, old)| old.map(|old| (old, new)))
+            .collect();
+
+        assert_eq!(resized_focus_index(5, current, next, &old_to_new), 3);
     }
 
     #[test]
