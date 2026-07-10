@@ -1065,6 +1065,7 @@ mod tests {
             &BTreeMap::new(),
             &cwd,
             &[],
+            PaneProcessPriority::BelowNormal,
             event_tx,
         )
         .expect("spawn Unix PTY");
