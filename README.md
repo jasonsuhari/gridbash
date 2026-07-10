@@ -7,9 +7,9 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platforms: Windows, Linux, macOS](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-0078D4.svg)](https://github.com/jasonsuhari/gridbash)
 
-**Run every CLI coding agent in one fast terminal grid.**
+**The sexiest way to tokenmaxx.**
 
-GridBash by Jason Suhari is a cross-platform Rust TUI for agent-heavy development. Launch Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, your native shell, or any custom command into a real PTY grid, then select exactly which panes receive your prompt.
+GridBash by Jason Suhari is a cross-platform Rust TUI for agent-heavy development. Launch Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, your native shell, or any custom command into a real PTY grid, then select exactly which panes receive your prompt. Spawn manager agents that can do the prompting for you, or talk to your agents via Voice Mode.
 
 Official site: [jasonsuhari.github.io/gridbash](https://jasonsuhari.github.io/gridbash/)
 
