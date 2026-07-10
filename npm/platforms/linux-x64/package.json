@@ -1,0 +1,10 @@
+{
+  "name": "gridbash-linux-x64",
+  "version": "0.1.6",
+  "description": "GridBash native binary for Linux x64.",
+  "license": "MIT",
+  "repository": "github:jasonsuhari/gridbash",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": ["bin/"]
+}

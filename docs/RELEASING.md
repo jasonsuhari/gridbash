@@ -53,8 +53,14 @@ After the change is merged to `main`:
 
 The workflow runs `node npm/scripts/release.js` on `main`. That script creates
 and pushes the release commit and `vX.Y.Z` tag. A separate publish job in the
-same workflow run then builds the Windows package, publishes npm, and creates
-or updates the GitHub release.
+same workflow run then builds Windows x64, Linux x64/arm64, and macOS arm64/x64
+native packages, publishes those packages before the platform-neutral npm
+launcher, and creates or updates one GitHub release.
+
+macOS releases are preview-only until real-hardware testing and Developer ID
+signing/notarization are complete. Dispatch an exact prerelease such as
+`0.2.0-macos.1`; prereleases publish under npm's `next` dist-tag. Stable release
+requests fail before creating a tag while this gate is active.
 
 Before creating the release commit, the script fetches origin branch refs and
 fails if any unmerged task branches remain under `chore/`, `docs/`, `feat/`,
@@ -104,7 +110,9 @@ The script will:
 - create tag `vX.Y.Z`
 - push the commit and tag when `--push --yes` is passed
 
-When the tag reaches GitHub, `.github/workflows/release.yml` builds the Windows package, publishes npm, and creates or updates a GitHub release with the release notes.
+When the tag reaches GitHub, `.github/workflows/release.yml` builds each native
+package, publishes the native packages before `gridbash`, and creates or updates
+one GitHub release with all artifacts and the release notes.
 
 ## Local Release Without Push
 
@@ -125,7 +133,10 @@ Only do that for a local release experiment that has not been pushed.
 
 ## Common Blocker
 
-`node npm/scripts/prepare.js` copies the freshly built exe into `npm/bin/win32-x64/gridbash.exe`. Close any running GridBash window before releasing, otherwise Windows can lock the target exe and the copy step will fail with `EBUSY`.
+`node npm/scripts/prepare.js` assembles the native package for the current host.
+On macOS it builds `GridBash.app` and the nested Apple Speech helper. On Windows,
+close running GridBash windows before a local reinstall; Windows can lock the
+currently installed executable and make npm fail with `EBUSY`.
 
 For local testing, use:
 

@@ -6,12 +6,51 @@ on:
   pull_request:
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  platform:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            runner: windows-latest
+            platform_key: win32-x64
+          - name: Linux x64
+            runner: ubuntu-latest
+            platform_key: linux-x64
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+            platform_key: linux-arm64
+          - name: macOS arm64
+            runner: macos-latest
+            platform_key: darwin-arm64
+          - name: macOS x64
+            runner: macos-15-intel
+            platform_key: darwin-x64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - run: cargo fmt --check
+
       - run: cargo clippy -- -D warnings
+
       - run: cargo test
-      - run: cargo build --release
+
+      - run: node --test npm/scripts/gridbash-launcher.test.js
+
+      - run: node npm/scripts/prepare.js
+
+      - run: npm pack --dry-run --ignore-scripts
+
+      - name: Pack native platform package
+        working-directory: npm/platforms/${{ matrix.platform_key }}
+        run: npm pack --dry-run --ignore-scripts

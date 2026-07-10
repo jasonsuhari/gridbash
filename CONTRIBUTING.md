@@ -2,7 +2,7 @@
 
 Thanks for helping improve GridBash. This guide is meant to get a useful pull request from idea to review with as little guessing as possible.
 
-GridBash is a Windows-native Rust TUI, so changes should be tested on Windows whenever they affect terminal behavior, process handling, keyboard input, PTY IO, packaging, or user-facing commands.
+GridBash is a cross-platform Rust TUI. Changes affecting terminal behavior, process handling, keyboard input, PTY IO, packaging, or user-facing commands should be tested on Windows, Linux, and macOS when relevant.
 
 ## Fast Path
 
@@ -20,15 +20,22 @@ Small fixes, documentation improvements, and focused tests can go straight to a 
 
 Prerequisites:
 
-- Windows 10 or newer.
+- Windows 10 or newer, a supported Linux distribution, or macOS 13 or newer.
 - Rust stable through `rustup`.
 - Node.js 18 or newer for npm packaging checks.
-- A terminal that supports normal Windows console behavior, such as Windows Terminal, PowerShell, Git Bash, or `cmd`.
+- A compatible terminal such as Windows Terminal, Apple Terminal, iTerm2, PowerShell, Git Bash, zsh, or bash.
 
-Install Rust:
+Install Rust on Windows:
 
 ```powershell
 winget install --id Rustlang.Rustup -e
+```
+
+On macOS, install the Xcode command-line tools and Rust:
+
+```bash
+xcode-select --install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
 Clone and build:
@@ -123,7 +130,7 @@ Before opening a pull request:
 - Match the existing Rust style and module boundaries.
 - Prefer simple, legible code over speculative abstractions.
 - Avoid new dependencies unless the problem clearly needs one.
-- Keep Windows behavior first-class.
+- Keep Windows, Linux, and macOS behavior first-class.
 - Treat existing config files and user workflows as compatibility surfaces.
 - Put important behavior in tests when the logic can be tested without a real terminal session.
 

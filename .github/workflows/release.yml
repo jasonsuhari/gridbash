@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "patch, minor, major, or an explicit x.y.z version"
+        description: "patch, minor, major, or an exact version; macOS previews use x.y.z-macos.N"
         required: true
         default: "patch"
       notes:
@@ -42,6 +42,14 @@ jobs:
         with:
           node-version: 24
 
+      - name: Require a prerelease until macOS signing is configured
+        shell: pwsh
+        run: |
+          $requested = "${{ inputs.version }}"
+          if ($requested -notmatch "^\d+\.\d+\.\d+-.+$") {
+            throw "macOS is preview-only. Use an exact prerelease such as 0.2.0-macos.1 until Developer ID signing and notarization are configured."
+          }
+
       - name: Create release commit and tag
         id: release
         shell: pwsh
@@ -50,23 +58,21 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           $requested = "${{ inputs.version }}"
-          if ($requested -match "^\d+\.\d+\.\d+(?:-.+)?$") {
-            $existingTag = "v$requested"
-            git fetch origin "refs/tags/${existingTag}:refs/tags/${existingTag}" --force 2>$null
+          $existingTag = "v$requested"
+          git fetch origin "refs/tags/${existingTag}:refs/tags/${existingTag}" --force 2>$null
+          $tagExists = $LASTEXITCODE -eq 0
+          if (-not $tagExists) {
+            git rev-parse --verify $existingTag *> $null
             $tagExists = $LASTEXITCODE -eq 0
-            if (-not $tagExists) {
-              git rev-parse --verify $existingTag *> $null
-              $tagExists = $LASTEXITCODE -eq 0
-            }
-
-            if ($tagExists) {
-              Write-Output "$existingTag already exists; skipping release preparation and publishing that tag."
-              "tag=$existingTag" >> $env:GITHUB_OUTPUT
-              exit 0
-            }
           }
 
-          $releaseArgs = @("${{ inputs.version }}", "--push", "--yes")
+          if ($tagExists) {
+            Write-Output "$existingTag already exists; publishing that tag."
+            "tag=$existingTag" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+
+          $releaseArgs = @($requested, "--push", "--yes")
           if ("${{ inputs.notes }}") {
             $releaseArgs += @("--notes", "${{ inputs.notes }}")
           }
@@ -75,18 +81,33 @@ jobs:
           }
 
           node npm/scripts/release.js @releaseArgs
+          "tag=v$requested" >> $env:GITHUB_OUTPUT
 
-          $version = (Get-Content package.json | ConvertFrom-Json).version
-          "tag=v$version" >> $env:GITHUB_OUTPUT
-
-  publish-manual:
-    if: github.event_name == 'workflow_dispatch'
+  build-native:
     needs: prepare
-    runs-on: windows-latest
+    if: ${{ always() && (github.event_name == 'push' || needs.prepare.result == 'success') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            platform_key: win32-x64
+          - runner: ubuntu-latest
+            platform_key: linux-x64
+          - runner: ubuntu-24.04-arm
+            platform_key: linux-arm64
+          - runner: macos-latest
+            platform_key: darwin-arm64
+          - runner: macos-15-intel
+            platform_key: darwin-x64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.outputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prepare.outputs.tag }}
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -94,212 +115,119 @@ jobs:
         with:
           node-version: 24
 
+      - name: Block unsigned stable macOS artifacts
+        if: startsWith(matrix.platform_key, 'darwin-') && !contains(env.RELEASE_TAG, '-')
+        run: |
+          echo "Stable macOS artifacts require Developer ID signing and notarization."
+          exit 1
+
       - run: cargo fmt --check
 
       - run: cargo clippy -- -D warnings
 
       - run: cargo test
 
+      - run: node --test npm/scripts/gridbash-launcher.test.js
+
       - run: node npm/scripts/prepare.js
 
-      - name: Pack npm package
-        id: pack
-        shell: pwsh
-        run: |
-          $raw = npm pack --json --ignore-scripts 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            $raw | Write-Output
-            exit $LASTEXITCODE
-          }
+      - name: Pack native npm package
+        working-directory: npm/platforms/${{ matrix.platform_key }}
+        run: npm pack --ignore-scripts
 
-          $text = $raw | Out-String
-          $parsed = $text | ConvertFrom-Json
-          if ($parsed -is [array]) {
-            $pack = $parsed[0].filename
-          } elseif ($parsed.filename) {
-            $pack = $parsed.filename
-          } else {
-            foreach ($property in $parsed.PSObject.Properties) {
-              if ($property.Value.filename) {
-                $pack = $property.Value.filename
-                break
-              }
-            }
-          }
-
-          if (-not $pack) {
-            $text | Write-Output
-            throw "Could not parse npm pack filename."
-          }
-          "tarball=$pack" >> $env:GITHUB_OUTPUT
-
-      - name: Publish npm package
-        shell: pwsh
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          $package = Get-Content package.json | ConvertFrom-Json
-          $spec = "$($package.name)@$($package.version)"
-          $published = npm view $spec version 2>$null
-          if ($LASTEXITCODE -eq 0 -and $published.Trim() -eq $package.version) {
-            Write-Output "$spec is already published; skipping npm publish."
-            exit 0
-          }
-
-          if ($env:NODE_AUTH_TOKEN) {
-            "//registry.npmjs.org/:_authToken=$env:NODE_AUTH_TOKEN" | Set-Content -Path .npmrc
-            Write-Output "Publishing with NPM_TOKEN secret."
-            npm publish --access public --provenance
-          } else {
-            Remove-Item Env:\NODE_AUTH_TOKEN -ErrorAction SilentlyContinue
-            Write-Output "Publishing with npm trusted publishing/OIDC. Configure the package on npmjs.com if this fails with ENEEDAUTH."
-            npm publish --access public
-          }
-
-      - name: Create GitHub release
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $tag = "${{ needs.prepare.outputs.tag }}"
-          $notes = "docs/releases/$tag.md"
-          if (-not (Test-Path $notes)) {
-            "# $tag`n`nAutomated release for $tag." | Set-Content -Path RELEASE_NOTES.md
-            $notes = "RELEASE_NOTES.md"
-          }
-
-          $releaseExists = $false
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            $releaseExists = $true
-          }
-
-          if ($releaseExists) {
-            gh release upload $tag `
-              "target/release/gridbash.exe" `
-              "${{ steps.pack.outputs.tarball }}" `
-              --clobber
-            gh release edit $tag --title $tag --notes-file $notes --latest
-          } else {
-            gh release create $tag `
-              "target/release/gridbash.exe" `
-              "${{ steps.pack.outputs.tarball }}" `
-              --title $tag `
-              --notes-file $notes `
-              --verify-tag `
-              --latest
-          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.platform_key }}
+          path: npm/platforms/${{ matrix.platform_key }}/*.tgz
+          if-no-files-found: error
 
   publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: windows-latest
+    needs: [prepare, build-native]
+    if: ${{ always() && needs.build-native.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.outputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: actions/setup-node@v4
         with:
           node-version: 24
 
-      - run: cargo fmt --check
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: artifacts
+          merge-multiple: true
 
-      - run: cargo clippy -- -D warnings
-
-      - run: cargo test
-
-      - run: node npm/scripts/prepare.js
-
-      - name: Pack npm package
-        id: pack
-        shell: pwsh
+      - name: Pack root npm launcher
+        id: root-pack
+        shell: bash
         run: |
-          $raw = npm pack --json --ignore-scripts 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            $raw | Write-Output
-            exit $LASTEXITCODE
-          }
+          tarball="$(npm pack --ignore-scripts | tail -n 1)"
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
 
-          $text = $raw | Out-String
-          $parsed = $text | ConvertFrom-Json
-          if ($parsed -is [array]) {
-            $pack = $parsed[0].filename
-          } elseif ($parsed.filename) {
-            $pack = $parsed.filename
-          } else {
-            foreach ($property in $parsed.PSObject.Properties) {
-              if ($property.Value.filename) {
-                $pack = $property.Value.filename
-                break
-              }
-            }
-          }
-
-          if (-not $pack) {
-            $text | Write-Output
-            throw "Could not parse npm pack filename."
-          }
-          "tarball=$pack" >> $env:GITHUB_OUTPUT
-
-      - name: Resolve release notes
-        id: notes
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $notes = "docs/releases/$tag.md"
-          if (-not (Test-Path $notes)) {
-            "# $tag`n`nAutomated release for $tag." | Set-Content -Path RELEASE_NOTES.md
-            $notes = "RELEASE_NOTES.md"
-          }
-          "path=$notes" >> $env:GITHUB_OUTPUT
-
-      - name: Publish npm package
-        shell: pwsh
+      - name: Publish native packages, then launcher
+        shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          ROOT_TARBALL: ${{ steps.root-pack.outputs.tarball }}
         run: |
-          $package = Get-Content package.json | ConvertFrom-Json
-          $spec = "$($package.name)@$($package.version)"
-          $published = npm view $spec version 2>$null
-          if ($LASTEXITCODE -eq 0 -and $published.Trim() -eq $package.version) {
-            Write-Output "$spec is already published; skipping npm publish."
-            exit 0
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          dist_tag="latest"
+          if [[ "$version" == *-* ]]; then
+            dist_tag="next"
+          fi
+
+          if [[ -n "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "//registry.npmjs.org/:_authToken=$NODE_AUTH_TOKEN" > .npmrc
+          else
+            unset NODE_AUTH_TOKEN
+          fi
+
+          publish_if_missing() {
+            local tarball="$1"
+            local manifest name package_version published
+            manifest="$(tar -xOf "$tarball" package/package.json)"
+            name="$(node -e 'const fs=require("fs"); console.log(JSON.parse(fs.readFileSync(0,"utf8")).name)' <<<"$manifest")"
+            package_version="$(node -e 'const fs=require("fs"); console.log(JSON.parse(fs.readFileSync(0,"utf8")).version)' <<<"$manifest")"
+            published="$(npm view "$name@$package_version" version 2>/dev/null || true)"
+            if [[ "$published" == "$package_version" ]]; then
+              echo "$name@$package_version already published; skipping."
+              return
+            fi
+            npm publish "$tarball" --access public --provenance --tag "$dist_tag"
           }
 
-          if ($env:NODE_AUTH_TOKEN) {
-            "//registry.npmjs.org/:_authToken=$env:NODE_AUTH_TOKEN" | Set-Content -Path .npmrc
-            Write-Output "Publishing with NPM_TOKEN secret."
-            npm publish --access public --provenance
-          } else {
-            Remove-Item Env:\NODE_AUTH_TOKEN -ErrorAction SilentlyContinue
-            Write-Output "Publishing with npm trusted publishing/OIDC. Configure the package on npmjs.com if this fails with ENEEDAUTH."
-            npm publish --access public
-          }
+          for tarball in artifacts/*.tgz; do
+            publish_if_missing "$tarball"
+          done
+          publish_if_missing "$ROOT_TARBALL"
 
-      - name: Create GitHub release
-        shell: pwsh
+      - name: Create or update GitHub release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          ROOT_TARBALL: ${{ steps.root-pack.outputs.tarball }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          $releaseExists = $false
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
-            $releaseExists = $true
-          }
+          set -euo pipefail
+          notes="docs/releases/$RELEASE_TAG.md"
+          if [[ ! -f "$notes" ]]; then
+            printf '# %s\n\nAutomated release for %s.\n' "$RELEASE_TAG" "$RELEASE_TAG" > RELEASE_NOTES.md
+            notes="RELEASE_NOTES.md"
+          fi
 
-          if ($releaseExists) {
-            gh release upload $tag `
-              "target/release/gridbash.exe" `
-              "${{ steps.pack.outputs.tarball }}" `
-              --clobber
-            gh release edit $tag --title $tag --notes-file "${{ steps.notes.outputs.path }}" --latest
-          } else {
-            gh release create $tag `
-              "target/release/gridbash.exe" `
-              "${{ steps.pack.outputs.tarball }}" `
-              --title $tag `
-              --notes-file "${{ steps.notes.outputs.path }}" `
-              --verify-tag `
-              --latest
-          }
+          assets=(artifacts/*.tgz "$ROOT_TARBALL")
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$notes" --prerelease
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --title "$RELEASE_TAG" \
+              --notes-file "$notes" \
+              --verify-tag \
+              --prerelease
+          fi

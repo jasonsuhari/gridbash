@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    env,
+    env, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -119,7 +119,7 @@ impl PtyPane {
             .context("failed to open PTY")?;
 
         let mut command_builder = CommandBuilder::new(command);
-        configure_cwd_reporting(profile_name, &mut command_builder);
+        configure_cwd_reporting(profile_name, &mut command_builder)?;
         let args = args_with_cwd_reporting(profile_name, args);
         for arg in &args {
             command_builder.arg(arg);
@@ -376,12 +376,14 @@ impl Drop for PtyPane {
     }
 }
 
-fn configure_cwd_reporting(profile_name: &str, command_builder: &mut CommandBuilder) {
+fn configure_cwd_reporting(profile_name: &str, command_builder: &mut CommandBuilder) -> Result<()> {
     match profile_name {
         "git-bash" => configure_bash_cwd_reporting(command_builder),
         "cmd" => command_builder.env("PROMPT", "$E]7;file:///$P$E\\$P$G"),
+        "zsh" => configure_zsh_cwd_reporting(command_builder)?,
         _ => {}
     }
+    Ok(())
 }
 
 fn configure_bash_cwd_reporting(command_builder: &mut CommandBuilder) {
@@ -391,6 +393,36 @@ fn configure_bash_cwd_reporting(command_builder: &mut CommandBuilder) {
         _ => hook.to_string(),
     };
     command_builder.env("PROMPT_COMMAND", prompt_command);
+}
+
+fn configure_zsh_cwd_reporting(command_builder: &mut CommandBuilder) -> Result<()> {
+    const ZSHRC: &str = r#"if [[ -n "$GRIDBASH_ORIGINAL_ZDOTDIR" && -r "$GRIDBASH_ORIGINAL_ZDOTDIR/.zshrc" ]]; then
+  _gridbash_zdotdir="$ZDOTDIR"
+  ZDOTDIR="$GRIDBASH_ORIGINAL_ZDOTDIR"
+  source "$GRIDBASH_ORIGINAL_ZDOTDIR/.zshrc"
+  ZDOTDIR="$_gridbash_zdotdir"
+  unset _gridbash_zdotdir
+fi
+
+function _gridbash_report_cwd() {
+  printf '\033]7;file://%s%s\007' "${HOST:-localhost}" "$PWD"
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _gridbash_report_cwd
+"#;
+
+    let integration_dir = env::temp_dir().join("gridbash-zsh-integration-v1");
+    fs::create_dir_all(&integration_dir)
+        .context("failed to create GridBash zsh integration directory")?;
+    fs::write(integration_dir.join(".zshrc"), ZSHRC)
+        .context("failed to write GridBash zsh integration")?;
+
+    let original_zdotdir = env::var_os("ZDOTDIR")
+        .or_else(|| env::var_os("HOME"))
+        .unwrap_or_default();
+    command_builder.env("GRIDBASH_ORIGINAL_ZDOTDIR", original_zdotdir);
+    command_builder.env("ZDOTDIR", integration_dir);
+    Ok(())
 }
 
 fn args_with_cwd_reporting(profile_name: &str, args: &[String]) -> Vec<String> {
@@ -514,10 +546,12 @@ fn cwd_from_osc7_payload(payload: &[u8]) -> Option<PathBuf> {
     };
 
     let decoded = percent_decode(uri_path);
-    let path = windows_path_from_uri_path(&decoded);
-    Some(PathBuf::from(path))
+    #[cfg(windows)]
+    let decoded = windows_path_from_uri_path(&decoded);
+    Some(PathBuf::from(decoded))
 }
 
+#[cfg(windows)]
 fn windows_path_from_uri_path(path: &str) -> String {
     let path = path.replace('\\', "/");
 
@@ -853,6 +887,7 @@ mod tests {
         assert_eq!(count_sequence(&scan, CURSOR_POSITION_QUERY), 0);
     }
 
+    #[cfg(windows)]
     #[test]
     fn parses_osc7_windows_cwd() {
         let payload = b"7;file://localhost/C:/Users/Jason/My%20Repo";
@@ -862,12 +897,23 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn parses_osc7_msys_cwd() {
         let payload = b"7;file://host/c/Users/Jason/gridbash";
         assert_eq!(
             cwd_from_osc7_payload(payload),
             Some(PathBuf::from("C:/Users/Jason/gridbash"))
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn parses_osc7_unix_cwd() {
+        let payload = b"7;file://localhost/Users/Jason/My%20Repo";
+        assert_eq!(
+            cwd_from_osc7_payload(payload),
+            Some(PathBuf::from("/Users/Jason/My Repo"))
         );
     }
 
@@ -939,6 +985,7 @@ mod tests {
         assert_eq!(plain, "red\nok");
     }
 
+    #[cfg(windows)]
     #[test]
     #[ignore = "Windows ConPTY smoke test requires an interactive console; run manually when debugging PTY I/O"]
     fn spawned_pty_receives_output_and_input() {
@@ -999,5 +1046,58 @@ mod tests {
             String::from_utf8_lossy(&raw_output),
             pane.screen().contents()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawned_unix_pty_receives_output_and_input() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let cwd = env::current_dir().expect("current dir");
+        let mut pane = PtyPane::spawn(
+            "sh",
+            PaneId(0),
+            0,
+            Path::new("/bin/sh"),
+            &[
+                "-c".into(),
+                "read value; printf 'GRIDBASH_READY:%s\\n' \"$value\"".into(),
+            ],
+            &BTreeMap::new(),
+            &cwd,
+            &[],
+            PaneProcessPriority::BelowNormal,
+            event_tx,
+        )
+        .expect("spawn Unix PTY");
+
+        pane.write(b"typed-input\n").expect("write input to PTY");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut raw_output = Vec::new();
+        while Instant::now() < deadline {
+            while let Ok(event) = event_rx.try_recv() {
+                match event {
+                    PtyEvent::Output { bytes, .. } => {
+                        pane.process_output(&bytes);
+                        raw_output.extend(bytes);
+                    }
+                    PtyEvent::Exited { .. } => pane.exited = true,
+                }
+            }
+
+            if String::from_utf8_lossy(&raw_output).contains("GRIDBASH_READY:typed-input")
+                && pane
+                    .screen()
+                    .contents()
+                    .contains("GRIDBASH_READY:typed-input")
+            {
+                pane.terminate();
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        pane.terminate();
+        panic!("Unix PTY did not round-trip input/output");
     }
 }

@@ -20,6 +20,34 @@ function packageRoot() {
   return path.resolve(__dirname, "..", "..");
 }
 
+function resolveNativeExecutable(
+  root = packageRoot(),
+  platform = process.platform,
+  arch = process.arch,
+) {
+  const target = targetFor(platform, arch);
+  if (!target) {
+    throw new Error(`unsupported platform: ${targetKey(platform, arch)}`);
+  }
+
+  let manifest;
+  try {
+    manifest = require.resolve(`${target.packageName}/package.json`, { paths: [root] });
+  } catch {
+    throw new Error(
+      `missing optional native package ${target.packageName}; reinstall gridbash without omitting optional dependencies`,
+    );
+  }
+
+  const executable = path.join(path.dirname(manifest), ...target.executablePath);
+  if (!fs.existsSync(executable)) {
+    throw new Error(
+      `native package ${target.packageName} is missing ${target.executablePath.join("/")}`,
+    );
+  }
+  return executable;
+}
+
 function readPackageVersion(root = packageRoot()) {
   try {
     return JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).version;
@@ -300,12 +328,7 @@ async function maybePrintUpdateNotice(args, env = process.env, stderr = process.
 
 async function main() {
   const args = process.argv.slice(2);
-  const target = targetFor();
-  if (!target) {
-    fail(`unsupported platform: ${targetKey(process.platform, process.arch)}`);
-  }
-
-  const exe = path.join(__dirname, target.directory, target.executable);
+  const exe = resolveNativeExecutable();
   const normalizedBinDir = path.resolve(__dirname).toLowerCase();
   const sourceManifest = path.resolve(__dirname, "..", "..", "Cargo.toml");
 
@@ -317,10 +340,6 @@ async function main() {
     fail(
       'global command resolves to a source checkout. Run "npm run install:local" from the intended checkout, or set GRIDBASH_ALLOW_WORKTREE_LINK=1 to override.',
     );
-  }
-
-  if (!fs.existsSync(exe)) {
-    fail(`missing packaged binary at ${exe}. Run "npm run build" from the gridbash repo.`);
   }
 
   await maybePrintUpdateNotice(args);
@@ -353,6 +372,7 @@ if (require.main === module) {
     environmentForLaunch,
     fetchLatestRelease,
     formatUpdateNotice,
+    resolveNativeExecutable,
     profileForProcessName,
     shouldSkipUpdateCheck,
     tasklistImageName,

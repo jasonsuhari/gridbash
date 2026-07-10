@@ -537,10 +537,11 @@ fn curl_json(url: &str, headers: &[(&str, String)]) -> Result<Value> {
     }
     args.push(url.to_string());
 
-    let output = Command::new("curl.exe")
+    let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
+    let output = Command::new(curl)
         .args(args)
         .output()
-        .context("failed to run curl.exe for usage status")?;
+        .with_context(|| format!("failed to run {curl} for usage status"))?;
     if !output.status.success() {
         return Ok(Value::Null);
     }
