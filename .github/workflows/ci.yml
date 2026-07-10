@@ -15,3 +15,19 @@ jobs:
       - run: cargo clippy -- -D warnings
       - run: cargo test
       - run: cargo build --release
+
+  linux-x64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install Linux voice build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake clang
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release --bins
+      - run: npm run test:launcher
