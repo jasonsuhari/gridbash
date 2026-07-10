@@ -131,7 +131,7 @@ mod linux {
         }
 
         let state = Arc::new(Mutex::new(CaptureState::new(sample_rate)));
-        let stream_config: StreamConfig = supported.clone().into();
+        let stream_config: StreamConfig = supported.into();
         let stream = match supported.sample_format() {
             SampleFormat::I8 => build_stream::<i8>(&device, &stream_config, channels, &state)?,
             SampleFormat::I16 => build_stream::<i16>(&device, &stream_config, channels, &state)?,
@@ -181,7 +181,7 @@ mod linux {
         let error_capture = Arc::clone(state);
         device
             .build_input_stream(
-                config.clone(),
+                *config,
                 move |data: &[T], _| append_input(data, channels, &capture),
                 move |error| {
                     if let Ok(mut state) = error_capture.lock() {
