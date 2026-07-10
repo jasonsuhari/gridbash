@@ -52,6 +52,7 @@ mod linux {
         max_frames: usize,
         end_silence_frames: usize,
         done: bool,
+        error: Option<String>,
     }
 
     impl CaptureState {
@@ -64,6 +65,7 @@ mod linux {
                 max_frames: sample_rate as usize * MAX_CAPTURE_SECONDS,
                 end_silence_frames: (sample_rate as f32 * END_SILENCE_SECONDS) as usize,
                 done: false,
+                error: None,
             }
         }
 
@@ -155,10 +157,14 @@ mod linux {
         }
         drop(stream);
 
-        Arc::try_unwrap(state)
+        let state = Arc::try_unwrap(state)
             .map_err(|_| anyhow!("microphone capture did not stop cleanly"))?
             .into_inner()
-            .map_err(|_| anyhow!("microphone capture state was poisoned"))
+            .map_err(|_| anyhow!("microphone capture state was poisoned"))?;
+        if let Some(error) = &state.error {
+            bail!("microphone stream failed: {error}");
+        }
+        Ok(state)
     }
 
     fn build_stream<T>(
@@ -178,8 +184,8 @@ mod linux {
                 config,
                 move |data: &[T], _| append_input(data, channels, &capture),
                 move |error| {
-                    eprintln!("microphone stream error: {error}");
                     if let Ok(mut state) = error_capture.lock() {
+                        state.error = Some(error.to_string());
                         state.done = true;
                     }
                 },
