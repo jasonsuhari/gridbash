@@ -394,6 +394,8 @@ Example:
 ```toml
 [defaults]
 profile = "powershell"
+# Use "normal" to opt out of GridBash's desktop-responsiveness safeguard.
+pane_priority = "below-normal"
 
 [manager]
 endpoint = "https://api.openai.com/v1/chat/completions"
@@ -431,6 +433,11 @@ Default profile resolution order:
 The platform default is Git Bash on Windows, zsh on macOS, and bash on other
 Unix systems. In Apple Terminal or iTerm2, configure Option as the Meta/Alt key
 so GridBash's Alt shortcuts reach the TUI.
+
+GridBash keeps its own interface at normal Windows process priority, while pane
+processes default to `below-normal`. Child workloads such as parallel compilers
+normally inherit that priority, which keeps input and other desktop apps responsive
+when many panes are busy. Set `[defaults].pane_priority = "normal"` to opt out.
 
 Pane managers use the OpenAI-compatible chat-completions endpoint, model, and API
 key under `[manager]`. These values can also be edited from the Manager tab in

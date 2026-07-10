@@ -13,7 +13,7 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 use tokio::sync::mpsc;
 use vt100::{Parser, Screen};
 
-use crate::layout::PaneId;
+use crate::{config::PaneProcessPriority, layout::PaneId, process_priority::set_process_priority};
 
 const DEVICE_STATUS_QUERY: &[u8] = b"\x1b[5n";
 const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
@@ -105,6 +105,7 @@ impl PtyPane {
         env: &BTreeMap<String, String>,
         cwd: &Path,
         extra_env: &[(String, String)],
+        process_priority: PaneProcessPriority,
         event_tx: mpsc::UnboundedSender<PtyEvent>,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
@@ -137,6 +138,11 @@ impl PtyPane {
             .slave
             .spawn_command(command_builder)
             .with_context(|| format!("failed to spawn {}", command.display()))?;
+        if let Some(process_id) = child.process_id() {
+            // A pane should still launch if Windows refuses a priority change.
+            // The root process normally passes this priority to its descendants.
+            let _ = set_process_priority(process_id, process_priority);
+        }
         drop(pair.slave);
 
         let reader = pair
@@ -1000,6 +1006,7 @@ mod tests {
             &BTreeMap::new(),
             &cwd,
             &[],
+            PaneProcessPriority::BelowNormal,
             event_tx,
         )
         .expect("spawn cmd pty");
