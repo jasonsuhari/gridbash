@@ -6517,6 +6517,7 @@ fn utf8_mouse_bytes(button: u8, column: u16, row: u16) -> Option<Vec<u8>> {
 mod tests {
     use std::{
         fs,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -6528,13 +6529,19 @@ mod tests {
         path: PathBuf,
     }
 
+    static NEXT_TEMP_HOME_ID: AtomicU64 = AtomicU64::new(0);
+
     impl TempHome {
         fn new() -> Self {
             let nonce = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("clock")
                 .as_nanos();
-            let path = env::temp_dir().join(format!("gridbash-app-auth-test-{nonce}"));
+            let sequence = NEXT_TEMP_HOME_ID.fetch_add(1, Ordering::Relaxed);
+            let path = env::temp_dir().join(format!(
+                "gridbash-app-auth-test-{}-{nonce}-{sequence}",
+                std::process::id()
+            ));
             fs::create_dir_all(&path).expect("temp home");
             Self { path }
         }
