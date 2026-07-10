@@ -14,7 +14,7 @@ Release target: unreleased
 - The live-grid picker renders active cells in blue and applies changes with Enter.
 - Shrinking now terminates panes outside the retained upper-left rectangle, including an entire rightmost column when changing 3x3 to 3x2.
 - Expanding inserts newly spawned panes into new coordinates without shifting existing rows or columns.
-- Focus, selection, sleeping state, pane names, follow-ups, group membership, and launch specs follow retained panes to their new indices.
+- Focus, selection, sleeping state, pane names, follow-ups, pane-local manager goals, and launch specs follow retained panes to their new indices.
 - Removed the Alt+Shift+Arrow resize handlers and documentation.
 
 ## Why It Matters

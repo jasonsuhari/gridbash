@@ -1,6 +1,10 @@
 [defaults]
 profile = "git-bash"
-manager_profile = "claude-1"
+
+[manager]
+endpoint = "https://api.openai.com/v1/chat/completions"
+model = "gpt-4o-mini"
+api_key = ""
 
 [todos]
 idle_seconds = 90
