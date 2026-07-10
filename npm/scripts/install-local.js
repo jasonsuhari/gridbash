@@ -4,6 +4,9 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..", "..");
 const packageJson = require(path.join(root, "package.json"));
+const platformKey = `${process.platform}-${process.arch}`;
+const nativePackageName = `gridbash-${platformKey}`;
+const nativePackageDir = path.join(root, "npm", "platforms", platformKey);
 
 function fail(message) {
   console.error(`install-local: ${message}`);
@@ -13,7 +16,7 @@ function fail(message) {
 function run(command, args, options = {}) {
   const invocation = commandInvocation(command, args);
   const result = spawnSync(invocation.command, invocation.args, {
-    cwd: root,
+    cwd: options.cwd || root,
     stdio: options.capture ? "pipe" : "inherit",
     encoding: "utf8",
     shell: false,
@@ -70,23 +73,47 @@ function assertNotLinked() {
     fail(`global install still points at a source checkout: ${packagePath}`);
   }
 
-  console.log(`install-local: installed copy at ${packagePath}`);
+
+  const nativePackagePath = path.join(globalRoot, nativePackageName);
+  if (!fs.existsSync(path.join(nativePackagePath, "package.json"))) {
+    fail(`native package was not installed at ${nativePackagePath}`);
+  }
+
+  console.log(`install-local: installed ${packageJson.name} and ${nativePackageName}`);
 }
 
-if (process.platform !== "win32" || process.arch !== "x64") {
-  fail("local packaged install currently supports win32-x64 only");
+if (!fs.existsSync(path.join(nativePackageDir, "package.json"))) {
+  fail(`local packaged install does not support ${platformKey}`);
 }
 
 run("node", ["npm/scripts/prepare.js"]);
 
-const packOutput = run(npmCommand(), ["pack", "--json", "--ignore-scripts"], { capture: true });
-const pack = JSON.parse(packOutput)[0];
-const tarball = path.join(root, pack.filename);
+const rootPack = JSON.parse(
+  run(npmCommand(), ["pack", "--json", "--ignore-scripts"], { capture: true }),
+)[0];
+const nativePack = JSON.parse(
+  run(npmCommand(), ["pack", "--json", "--ignore-scripts"], {
+    capture: true,
+    cwd: nativePackageDir,
+  }),
+)[0];
+const rootTarball = path.join(root, rootPack.filename);
+const nativeTarball = path.join(nativePackageDir, nativePack.filename);
 
 try {
   run(npmCommand(), ["uninstall", "-g", packageJson.name], { allowFailure: true });
-  run(npmCommand(), ["install", "-g", tarball, "--no-audit", "--no-fund"]);
+  run(npmCommand(), ["uninstall", "-g", nativePackageName], { allowFailure: true });
+  run(npmCommand(), [
+    "install",
+    "-g",
+    nativeTarball,
+    rootTarball,
+    "--omit=optional",
+    "--no-audit",
+    "--no-fund",
+  ]);
   assertNotLinked();
 } finally {
-  fs.rmSync(tarball, { force: true });
+  fs.rmSync(rootTarball, { force: true });
+  fs.rmSync(nativeTarball, { force: true });
 }

@@ -11,6 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
+
 use anyhow::{Context, Result, anyhow};
 use crossterm::{
     event::{
@@ -34,7 +37,7 @@ use crate::{
     image_preview::{self, ImagePreview},
     layout::{GridLayout, GridSize, PaneId, pane_at},
     manager::{self, ManagerDecision},
-    profiles::find_profile,
+    profiles::{default_profile_name, find_profile},
     pty::{PtyEvent, PtyPane, plain_terminal_text},
     session::{SavedPaneHistory, SessionRecord, SessionRecorder},
     setup::{LaunchPlan, PaneLaunchSpec},
@@ -5719,7 +5722,7 @@ fn resolve_profile_name(cli: &Cli, config: &Config) -> String {
         .clone()
         .or_else(|| env::var("GRIDBASH_PROFILE").ok())
         .or_else(|| config.defaults.profile.clone())
-        .unwrap_or_else(|| "git-bash".into())
+        .unwrap_or_else(|| default_profile_name().into())
 }
 fn resolved_current_dir() -> Result<std::path::PathBuf> {
     let current = env::current_dir().context("failed to resolve current directory")?;
@@ -6276,6 +6279,11 @@ fn extract_selection_text(screen: &vt100::Screen, selection: PaneSelection, widt
 }
 
 fn copy_to_clipboard(terminal: &mut Tui, text: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    if copy_with_pbcopy(text) {
+        return Ok(());
+    }
+
     write!(
         terminal.backend_mut(),
         "\x1b]52;c;{}\x07",
@@ -6287,6 +6295,24 @@ fn copy_to_clipboard(terminal: &mut Tui, text: &str) -> Result<()> {
         .flush()
         .context("failed to flush terminal clipboard sequence")?;
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn copy_with_pbcopy(text: &str) -> bool {
+    let Ok(mut child) = Command::new("pbcopy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+
+    let wrote = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+    wrote && child.wait().is_ok_and(|status| status.success())
 }
 
 fn base64_encode(bytes: &[u8]) -> String {

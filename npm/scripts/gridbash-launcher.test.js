@@ -1,14 +1,52 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const http = require("node:http");
+const os = require("node:os");
+const path = require("node:path");
 const { test } = require("node:test");
 
 const {
   checkForUpdate,
   compareVersions,
   formatUpdateNotice,
+  nativeTarget,
+  resolveNativeExecutable,
   shouldSkipUpdateCheck,
   updateCheckTimeoutMs,
 } = require("../bin/gridbash.js");
+
+test("nativeTarget maps supported platform architectures", () => {
+  assert.equal(nativeTarget("win32", "x64").packageName, "gridbash-win32-x64");
+  assert.equal(nativeTarget("darwin", "arm64").packageName, "gridbash-darwin-arm64");
+  assert.equal(nativeTarget("darwin", "x64").packageName, "gridbash-darwin-x64");
+  assert.equal(nativeTarget("linux", "x64"), undefined);
+});
+
+test("resolveNativeExecutable finds the installed optional package", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "gridbash-launcher-"));
+  const packageDir = path.join(root, "node_modules", "gridbash-darwin-arm64");
+  const executable = path.join(packageDir, "GridBash.app", "Contents", "MacOS", "gridbash");
+  fs.mkdirSync(path.dirname(executable), { recursive: true });
+  fs.writeFileSync(path.join(packageDir, "package.json"), '{"name":"gridbash-darwin-arm64"}');
+  fs.writeFileSync(executable, "test");
+
+  try {
+    assert.equal(resolveNativeExecutable(root, "darwin", "arm64"), executable);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveNativeExecutable explains unsupported and omitted targets", () => {
+  assert.throws(
+    () => resolveNativeExecutable(process.cwd(), "freebsd", "x64"),
+    /unsupported platform: freebsd-x64/,
+  );
+  assert.throws(
+    () => resolveNativeExecutable(process.cwd(), "darwin", "x64"),
+    /missing optional native package gridbash-darwin-x64/,
+  );
+});
 
 function serveJson(payload) {
   const server = http.createServer((_request, response) => {

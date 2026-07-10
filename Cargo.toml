@@ -2,11 +2,11 @@
 name = "gridbash"
 version = "0.1.6"
 edition = "2024"
-description = "Windows-native terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side."
+description = "Cross-platform terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side."
 license = "MIT"
 repository = "https://github.com/jasonsuhari/gridbash"
 homepage = "https://jasonsuhari.github.io/gridbash/"
-keywords = ["terminal", "tui", "agents", "windows", "conpty"]
+keywords = ["terminal", "tui", "agents", "windows", "macos"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]

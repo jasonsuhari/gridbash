@@ -6,6 +6,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "macos")]
+use std::{env, path::PathBuf};
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -14,6 +17,7 @@ const NO_SPEECH_EXIT_CODE: i32 = 2;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+#[cfg(windows)]
 const RECOGNIZE_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
 $recognizer = $null
@@ -177,28 +181,16 @@ impl Drop for VoiceInput {
 }
 
 fn recognize(cancel_rx: Receiver<()>) -> Option<VoiceOutcome> {
-    let mut command = Command::new("powershell.exe");
-    command
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            RECOGNIZE_SCRIPT,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
+    let mut command = match recognition_command() {
+        Ok(command) => command,
+        Err(error) => return Some(VoiceOutcome::Error(error)),
+    };
 
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
             return Some(VoiceOutcome::Error(format!(
-                "could not start modern Windows dictation: {error}"
+                "could not start speech recognition: {error}"
             )));
         }
     };
@@ -218,11 +210,71 @@ fn recognize(cancel_rx: Receiver<()>) -> Option<VoiceOutcome> {
             Err(error) => {
                 terminate(&mut child);
                 return Some(VoiceOutcome::Error(format!(
-                    "modern Windows dictation failed: {error}"
+                    "speech recognition failed: {error}"
                 )));
             }
         }
     }
+}
+
+#[cfg(windows)]
+fn recognition_command() -> Result<Command, String> {
+    let mut command = Command::new("powershell.exe");
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            RECOGNIZE_SCRIPT,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.creation_flags(CREATE_NO_WINDOW);
+    Ok(command)
+}
+
+#[cfg(target_os = "macos")]
+fn recognition_command() -> Result<Command, String> {
+    let helper = macos_speech_helper().ok_or_else(|| {
+        "macOS speech helper is missing; reinstall the packaged GridBash application".to_string()
+    })?;
+    let mut command = Command::new(helper);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    Ok(command)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_speech_helper() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("GRIDBASH_SPEECH_HELPER").map(PathBuf::from) {
+        return path.is_file().then_some(path);
+    }
+
+    let executable = env::current_exe().ok()?;
+    let sibling = executable.with_file_name("gridbash-speech");
+    if sibling.is_file() {
+        return Some(sibling);
+    }
+
+    let contents = executable.parent()?.parent()?;
+    let bundled = contents
+        .join("Helpers")
+        .join("GridBashSpeech.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("gridbash-speech");
+    bundled.is_file().then_some(bundled)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn recognition_command() -> Result<Command, String> {
+    Err("voice input is not supported on this platform yet".into())
 }
 
 fn terminate(child: &mut Child) {
@@ -249,7 +301,7 @@ fn read_outcome(child: &mut Child, status: ExitStatus) -> VoiceOutcome {
 
     let detail = normalize_transcript(&stderr);
     if detail.is_empty() {
-        VoiceOutcome::Error(format!("modern Windows dictation exited with {status}"))
+        VoiceOutcome::Error(format!("speech recognition exited with {status}"))
     } else {
         VoiceOutcome::Error(detail)
     }

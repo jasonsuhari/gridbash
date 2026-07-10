@@ -1,7 +1,7 @@
 {
   "name": "gridbash",
   "version": "0.1.6",
-  "description": "Windows-native terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side.",
+  "description": "Cross-platform terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side.",
   "license": "MIT",
   "homepage": "https://jasonsuhari.github.io/gridbash/",
   "repository": {
@@ -55,6 +55,7 @@
     "pty",
     "conpty",
     "windows",
+    "macos",
     "powershell",
     "git-bash",
     "developer-tools"
@@ -62,10 +63,9 @@
   "engines": {
     "node": ">=18"
   },
-  "os": [
-    "win32"
-  ],
-  "cpu": [
-    "x64"
-  ]
+  "optionalDependencies": {
+    "gridbash-win32-x64": "0.1.6",
+    "gridbash-darwin-arm64": "0.1.6",
+    "gridbash-darwin-x64": "0.1.6"
+  }
 }

@@ -9,6 +9,20 @@ const path = require("node:path");
 const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 900;
 const DEFAULT_UPDATE_CHECK_URL =
   "https://api.github.com/repos/jasonsuhari/gridbash/releases/latest";
+const NATIVE_TARGETS = {
+  "win32-x64": {
+    packageName: "gridbash-win32-x64",
+    executable: ["bin", "gridbash.exe"],
+  },
+  "darwin-arm64": {
+    packageName: "gridbash-darwin-arm64",
+    executable: ["GridBash.app", "Contents", "MacOS", "gridbash"],
+  },
+  "darwin-x64": {
+    packageName: "gridbash-darwin-x64",
+    executable: ["GridBash.app", "Contents", "MacOS", "gridbash"],
+  },
+};
 
 function fail(message) {
   console.error(`gridbash: ${message}`);
@@ -17,6 +31,36 @@ function fail(message) {
 
 function packageRoot() {
   return path.resolve(__dirname, "..", "..");
+}
+
+function nativeTarget(platform = process.platform, arch = process.arch) {
+  return NATIVE_TARGETS[`${platform}-${arch}`];
+}
+
+function resolveNativeExecutable(
+  root = packageRoot(),
+  platform = process.platform,
+  arch = process.arch,
+) {
+  const target = nativeTarget(platform, arch);
+  if (!target) {
+    throw new Error(`unsupported platform: ${platform}-${arch}`);
+  }
+
+  let manifest;
+  try {
+    manifest = require.resolve(`${target.packageName}/package.json`, { paths: [root] });
+  } catch {
+    throw new Error(
+      `missing optional native package ${target.packageName}; reinstall gridbash without omitting optional dependencies`,
+    );
+  }
+
+  const executable = path.join(path.dirname(manifest), ...target.executable);
+  if (!fs.existsSync(executable)) {
+    throw new Error(`native package ${target.packageName} is missing ${target.executable.join("/")}`);
+  }
+  return executable;
 }
 
 function readPackageVersion(root = packageRoot()) {
@@ -235,16 +279,7 @@ async function maybePrintUpdateNotice(args, env = process.env, stderr = process.
 
 async function main() {
   const args = process.argv.slice(2);
-
-  if (process.platform !== "win32") {
-    fail("this npm package currently ships the Windows x64 build only");
-  }
-
-  if (process.arch !== "x64") {
-    fail(`unsupported architecture: ${process.arch}`);
-  }
-
-  const exe = path.join(__dirname, "win32-x64", "gridbash.exe");
+  const exe = resolveNativeExecutable();
   const normalizedBinDir = path.resolve(__dirname).toLowerCase();
   const sourceManifest = path.resolve(__dirname, "..", "..", "Cargo.toml");
 
@@ -256,10 +291,6 @@ async function main() {
     fail(
       'global command resolves to a source checkout. Run "npm run install:local" from the intended checkout, or set GRIDBASH_ALLOW_WORKTREE_LINK=1 to override.',
     );
-  }
-
-  if (!fs.existsSync(exe)) {
-    fail(`missing packaged binary at ${exe}. Run "npm run build" from the gridbash repo.`);
   }
 
   await maybePrintUpdateNotice(args);
@@ -289,6 +320,8 @@ if (require.main === module) {
     compareVersions,
     fetchLatestRelease,
     formatUpdateNotice,
+    nativeTarget,
+    resolveNativeExecutable,
     shouldSkipUpdateCheck,
     updateCheckTimeoutMs,
   };

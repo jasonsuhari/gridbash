@@ -65,9 +65,7 @@ pub fn should_run(cli: &Cli, config: &Config) -> bool {
 pub fn run(config: &mut Config, config_path: Option<&Path>) -> Result<OnboardingResult> {
     let choices = detected_terminal_choices(config);
     if choices.is_empty() {
-        return Err(anyhow!(
-            "no terminal profiles detected; install Git Bash, PowerShell, or cmd"
-        ));
+        return Err(anyhow!(missing_terminal_message()));
     }
 
     let Some(profile) = run_picker(&choices)? else {
@@ -77,6 +75,17 @@ pub fn run(config: &mut Config, config_path: Option<&Path>) -> Result<Onboarding
     config.set_default_profile(profile);
     config.save(config_path)?;
     Ok(OnboardingResult::Continue)
+}
+
+fn missing_terminal_message() -> &'static str {
+    #[cfg(windows)]
+    {
+        "no terminal profiles detected; install Git Bash, PowerShell, or cmd"
+    }
+    #[cfg(not(windows))]
+    {
+        "no terminal profiles detected; install zsh, bash, sh, or PowerShell 7"
+    }
 }
 
 fn detected_terminal_choices(config: &Config) -> Vec<TerminalChoice> {
