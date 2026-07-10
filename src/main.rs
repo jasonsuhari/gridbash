@@ -8,6 +8,7 @@ mod image_preview;
 mod layout;
 mod manager;
 mod onboarding;
+mod process_priority;
 mod profiles;
 mod pty;
 mod session;

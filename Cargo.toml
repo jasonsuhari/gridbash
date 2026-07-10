@@ -26,3 +26,6 @@ shell-words = "1.1"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
 toml = "0.9"
 vt100 = "0.16"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

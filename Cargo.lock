@@ -760,6 +760,7 @@ dependencies = [
  "tokio",
  "toml",
  "vt100",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
