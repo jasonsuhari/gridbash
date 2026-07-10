@@ -29,4 +29,4 @@ Issue: #130
 
 ## Release Notes
 
-- Voice mode now uses modern Windows online dictation for more accurate prompt transcription. Enable Online speech recognition in Windows Settings before using `Alt+v`.
+- Voice mode now uses modern Windows online dictation for more accurate prompt transcription. Enable Online speech recognition in Windows Settings before using `Alt+Shift+V`.

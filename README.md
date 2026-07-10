@@ -269,7 +269,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+c | Focus or unfocus the command bar |
-| Alt+v | Listen for one dictated utterance; press again to cancel |
+| Alt+Shift+V | Listen for one dictated utterance; press again to cancel |
 | Alt+p | Open settings for the focused pane; use Reload past history to refresh its visible conversation snapshot |
 | Alt+Shift+p | Open the previous panes list |
 | Alt+r | Rename the focused pane |
@@ -302,10 +302,10 @@ shown in blue. Shrinking removes live panes outside the retained upper-left
 rectangle. For example, changing 3x3 to 3x2 deactivates the full rightmost column.
 
 Voice mode uses modern Windows online dictation and the default microphone. Press
-`Alt+v` to listen for one utterance; GridBash waits up to 15 seconds for speech.
+`Alt+Shift+V` to listen for one utterance; GridBash waits up to 15 seconds for speech.
 The transcript is inserted into the command bar or the panes that were targeted
 when listening started. GridBash never presses Enter for dictated text, so you can
-review or edit it before submitting. Press `Alt+v` while listening to cancel.
+review or edit it before submitting. Press `Alt+Shift+V` while listening to cancel.
 
 Voice audio is processed by Microsoft's online speech service. Enable **Online
 speech recognition** in Windows Settings under **Privacy & security > Speech**,

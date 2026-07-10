@@ -1622,10 +1622,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
             .into()
     } else {
-        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+v voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
+        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
             .into()
     }
 }
@@ -2445,7 +2445,7 @@ impl App {
                 }
             },
             VoiceOutcome::NoSpeech => {
-                self.status = "voice heard no speech; press Alt+v to try again".into();
+                self.status = "voice heard no speech; press Alt+Shift+V to try again".into();
             }
             VoiceOutcome::Error(error) => {
                 self.status = format!("voice unavailable: {error}");
@@ -2792,7 +2792,7 @@ impl App {
                 self.status = self.focus_status();
                 Ok(Some(false))
             }
-            'v' => {
+            'v' if is_voice_shortcut(ch, modifiers) => {
                 self.toggle_voice_input();
                 Ok(Some(false))
             }
@@ -4707,7 +4707,7 @@ impl App {
         self.voice_destination = Some(destination);
         self.voice.start();
         self.status = format!(
-            "voice listening for {} (Alt+v cancels; speech is not submitted)",
+            "voice listening for {} (Alt+Shift+V cancels; speech is not submitted)",
             self.input_scope_label()
         );
     }
@@ -6399,6 +6399,13 @@ fn pane_number_list(indices: &[usize]) -> String {
         .join(", ")
 }
 
+fn is_voice_shortcut(ch: char, modifiers: KeyModifiers) -> bool {
+    ch.eq_ignore_ascii_case(&'v')
+        && modifiers.contains(KeyModifiers::ALT)
+        && modifiers.contains(KeyModifiers::SHIFT)
+        && !modifiers.contains(KeyModifiers::CONTROL)
+}
+
 fn control_byte(ch: char) -> Option<u8> {
     let lower = ch.to_ascii_lowercase();
     if lower.is_ascii_lowercase() {
@@ -7123,6 +7130,16 @@ mod tests {
         assert_eq!(command.cursor_chars(), 3);
         assert!(command.backspace());
         assert_eq!(command.input, "abc");
+    }
+
+    #[test]
+    fn voice_shortcut_preserves_plain_alt_v_for_agent_image_paste() {
+        let image_paste = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
+        assert!(!is_voice_shortcut('v', KeyModifiers::ALT));
+        assert_eq!(terminal_key_bytes(image_paste), Some(b"\x1bv".to_vec()));
+
+        let voice_modifiers = KeyModifiers::ALT | KeyModifiers::SHIFT;
+        assert!(is_voice_shortcut('V', voice_modifiers));
     }
 
     #[test]
