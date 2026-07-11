@@ -13,7 +13,7 @@ GridBash by Jason Suhari is a cross-platform Rust TUI for agent-heavy developmen
 
 Official site: [jasonsuhari.github.io/gridbash](https://jasonsuhari.github.io/gridbash/)
 
-[![GridBash demo showing multiple CLI agents running side by side in a Windows terminal grid](https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-openvid-demo-poster.png)](https://github.com/jasonsuhari/gridbash/blob/main/docs/assets/gridbash-openvid-demo.mp4)
+[![GridBash launch teaser showing six CLI coding agents in one terminal grid](https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-launch-teaser-poster.png)](https://github.com/jasonsuhari/gridbash/blob/main/docs/assets/gridbash-launch-teaser.mp4)
 
 GridBash is built for developers who want parallel CLI-agent work without juggling terminal windows, browser tabs, or accidental cross-pane input.
 
@@ -86,9 +86,12 @@ agents are all part of the same development session.
 
 ## Demo Assets
 
+- Watch the 13-second launch teaser: [`docs/assets/gridbash-launch-teaser.mp4`](https://github.com/jasonsuhari/gridbash/blob/main/docs/assets/gridbash-launch-teaser.mp4).
 - Watch the OpenVid-style demo: [`docs/assets/gridbash-openvid-demo.mp4`](https://github.com/jasonsuhari/gridbash/blob/main/docs/assets/gridbash-openvid-demo.mp4).
+- Rebuild the teaser from its HyperFrames source in [`docs/demo/gridbash-launch-teaser/`](docs/demo/gridbash-launch-teaser/).
 - See the source scene and OpenVid recreation recipe in [`docs/demo/openvid-gridbash-demo.md`](https://github.com/jasonsuhari/gridbash/blob/main/docs/demo/openvid-gridbash-demo.md).
 - Use [`docs/assets/gridbash-social-preview.png`](docs/assets/gridbash-social-preview.png) as the GitHub social preview image.
+- Use the ready-to-post copy and publication sequence in [`docs/LAUNCH_KIT.md`](docs/LAUNCH_KIT.md).
 
 ## Install From This Repo
 
