@@ -1,0 +1,11 @@
+{
+  "name": "gridbash-launch-teaser",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx --yes hyperframes@0.7.49 preview",
+    "check": "npx --yes hyperframes@0.7.49 lint && npx --yes hyperframes@0.7.49 validate && npx --yes hyperframes@0.7.49 inspect",
+    "render": "npx --yes hyperframes@0.7.49 render",
+    "publish": "npx --yes hyperframes@0.7.49 publish"
+  }
+}
