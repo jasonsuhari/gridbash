@@ -16,12 +16,13 @@ Release target: v0.2.0-macos.1
 
 - Added one platform-neutral launcher and exact-version native packages for
   Windows x64, glibc Linux x64/arm64, and macOS 13+ arm64/x64.
-- Added tabbed grids, bounded session resume, runtime grid resizing, pane
-  worktrees, pane rename, scrollback, and wrapped pane navigation; refined the
-  existing startup grid picker.
+- Added tabbed grids, bounded session resume, pane-local scrollback, and wrapped
+  pane navigation; replaced incremental resize shortcuts with a unified visual
+  grid resizer and refined the existing startup grid picker.
 - Added the dedicated command bar and expanded Alt+C CLI, auth profile
-  management and cycling, a configurable live-grid palette, hidden manager
-  groups, idle TODO prompts, and terminal activity/work summaries.
+  management and cycling, hidden manager groups, idle TODO prompts, and terminal
+  activity summaries; made the existing live-grid palette durable and improved
+  work-summary presentation.
 - Expanded manager goals into grid-wide orchestration with strict response
   validation, stable per-pane dispatch tracking, targeted follow-ups, and
   bounded recovery after partial or asynchronous write failures.
@@ -30,8 +31,10 @@ Release target: v0.2.0-macos.1
   restarts. The normal `CODEX_HOME` remains shared for auth, configuration,
   skills, and rollout history, and explicit user overrides remain authoritative.
 - Added push-to-talk voice input, an offline Linux voice helper, a macOS speech
-  helper, and restored Alt+V image paste. Pane shells now inherit the invoking
-  shell consistently across supported platforms.
+  helper, and restored terminal passthrough for Alt+V clipboard-image paste.
+  Pane shells now inherit the invoking shell consistently across platforms.
+- Added modeless Alt+H/F1 help, actionable `--list-profiles` diagnostics,
+  two-step quit confirmation, and an Alt+Shift+P previous-panes selector.
 - Improved runtime responsiveness, pane workload protection, usage reporting,
   startup/starter UX, settings presentation, and terminal input reliability.
 - Added keyboard-first Pane Activity navigation (#189 via PR #201): Up/Down
