@@ -156,7 +156,7 @@ idempotent importer; migration must copy rather than destroy the old records.
 - Whether selections are always client-local or can become explicitly shared
   session state.
 - How long detached scrollback and exited sessions are retained by default.
-- Whether pane-local manager requests execute in the daemon or in a privileged
+- Whether grid-manager requests execute in the daemon or in a privileged
   client helper.
 - Which capabilities are mandatory for the first daemon preview versus deferred
   to multi-client or remote milestones.
