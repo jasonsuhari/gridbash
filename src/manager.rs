@@ -44,14 +44,16 @@ struct ChatMessage {
     content: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DecisionPayload {
-    status: String,
-    #[serde(default)]
-    commands: Vec<ManagerCommand>,
-    #[serde(default)]
-    summary: String,
+#[derive(Debug, Deserialize)]
+#[serde(tag = "status", deny_unknown_fields)]
+enum DecisionPayload {
+    #[serde(rename = "continue")]
+    Continue {
+        commands: Vec<ManagerCommand>,
+        summary: String,
+    },
+    #[serde(rename = "done")]
+    Done { summary: String },
 }
 
 pub fn review(config: &ManagerConfig, goal: &str, pane_output: &str) -> Result<ManagerDecision> {
@@ -122,16 +124,23 @@ pub(crate) fn parse_decision(content: &str) -> Result<ManagerDecision> {
         .trim();
     let payload: DecisionPayload =
         serde_json::from_str(content).context("manager response was not a decision object")?;
-    let status = payload.status.trim();
-    if status.len() > 16 || status.chars().any(char::is_control) {
-        return Err(anyhow!("manager returned an invalid decision status"));
+    match payload {
+        DecisionPayload::Continue { commands, summary } => Ok(ManagerDecision::Continue {
+            commands: validate_commands(commands)?,
+            summary: validate_summary(summary, "continue")?,
+        }),
+        DecisionPayload::Done { summary } => {
+            Ok(ManagerDecision::Done(validate_summary(summary, "done")?))
+        }
     }
-    if payload.commands.len() > MAX_COMMANDS {
+}
+
+fn validate_commands(commands: Vec<ManagerCommand>) -> Result<Vec<ManagerCommand>> {
+    if commands.len() > MAX_COMMANDS {
         return Err(anyhow!("manager returned too many commands"));
     }
     let mut targeted_panes = BTreeSet::new();
-    let commands = payload
-        .commands
+    commands
         .into_iter()
         .map(|mut command| {
             if command.pane == 0 {
@@ -176,19 +185,23 @@ pub(crate) fn parse_decision(content: &str) -> Result<ManagerDecision> {
             }
             Ok(command)
         })
-        .collect::<Result<Vec<_>>>()?;
-    let summary = payload.summary.trim().to_string();
-    if summary.chars().count() > MAX_SUMMARY_CHARS {
-        return Err(anyhow!("manager summary exceeded size limit"));
-    }
+        .collect()
+}
+
+fn validate_summary(summary: String, status: &str) -> Result<String> {
     if summary.chars().any(char::is_control) {
         return Err(anyhow!("manager summary contained control characters"));
     }
-    match status.to_ascii_lowercase().as_str() {
-        "continue" => Ok(ManagerDecision::Continue { commands, summary }),
-        "done" => Ok(ManagerDecision::Done(summary)),
-        status => Err(anyhow!("unknown manager decision status '{status}'")),
+    let summary = summary.trim().to_string();
+    if summary.is_empty() {
+        return Err(anyhow!(
+            "manager {status} decision requires a nonblank summary"
+        ));
     }
+    if summary.chars().count() > MAX_SUMMARY_CHARS {
+        return Err(anyhow!("manager summary exceeded size limit"));
+    }
+    Ok(summary)
 }
 
 fn contains_markdown_fence(command: &str) -> bool {
@@ -297,30 +310,23 @@ mod tests {
                 summary: "waiting".into(),
             }
         );
-        assert_eq!(
-            parse_decision(r#"{"status":"continue"}"#).unwrap(),
-            ManagerDecision::Continue {
-                commands: Vec::new(),
-                summary: String::new(),
-            }
-        );
     }
 
     #[test]
     fn rejects_invalid_manager_commands() {
         let zero = parse_decision(
-            r#"{"status":"continue","commands":[{"pane":0,"command":"run tests"}]}"#,
+            r#"{"status":"continue","commands":[{"pane":0,"command":"run tests"}],"summary":"delegating"}"#,
         )
         .unwrap_err();
         assert!(zero.to_string().contains("pane 0"));
 
         let blank =
-            parse_decision(r#"{"status":"continue","commands":[{"pane":3,"command":"   "}]}"#)
+            parse_decision(r#"{"status":"continue","commands":[{"pane":3,"command":"   "}],"summary":"delegating"}"#)
                 .unwrap_err();
         assert!(blank.to_string().contains("pane 3 was blank"));
 
         let duplicate = parse_decision(
-            r#"{"status":"continue","commands":[{"pane":2,"command":"first"},{"pane":2,"command":"second"}]}"#,
+            r#"{"status":"continue","commands":[{"pane":2,"command":"first"},{"pane":2,"command":"second"}],"summary":"delegating"}"#,
         )
         .unwrap_err();
         assert!(
@@ -330,14 +336,15 @@ mod tests {
         );
 
         let control = parse_decision(
-            r#"{"status":"continue","commands":[{"pane":1,"command":"first\nsecond"}]}"#,
+            r#"{"status":"continue","commands":[{"pane":1,"command":"first\nsecond"}],"summary":"delegating"}"#,
         )
         .unwrap_err();
         assert!(control.to_string().contains("control characters"));
 
         let oversized = json!({
             "status": "continue",
-            "commands": [{"pane": 1, "command": "x".repeat(MAX_COMMAND_BYTES + 1)}]
+            "commands": [{"pane": 1, "command": "x".repeat(MAX_COMMAND_BYTES + 1)}],
+            "summary": "delegating"
         });
         assert!(
             parse_decision(&oversized.to_string())
@@ -353,7 +360,8 @@ mod tests {
         ] {
             let payload = json!({
                 "status": "continue",
-                "commands": [{"pane": 1, "command": fenced}]
+                "commands": [{"pane": 1, "command": fenced}],
+                "summary": "delegating"
             });
             assert!(
                 parse_decision(&payload.to_string())
@@ -372,7 +380,8 @@ mod tests {
         ] {
             let payload = json!({
                 "status": "continue",
-                "commands": [{"pane": 1, "command": routed}]
+                "commands": [{"pane": 1, "command": routed}],
+                "summary": "delegating"
             });
             assert!(
                 parse_decision(&payload.to_string())
@@ -388,9 +397,9 @@ mod tests {
     fn rejects_unknown_or_misspelled_decision_fields() {
         for payload in [
             r#"{"status":"done","summmary":"typo"}"#,
-            r#"{"status":"continue","command":[]}"#,
-            r#"{"status":"continue","commands":[{"pan":1,"command":"test"}]}"#,
-            r#"{"status":"continue","commands":[{"pane":1,"command":"test","target":2}]}"#,
+            r#"{"status":"continue","commands":[],"summary":"waiting","command":[]}"#,
+            r#"{"status":"continue","commands":[{"pan":1,"command":"test"}],"summary":"delegating"}"#,
+            r#"{"status":"continue","commands":[{"pane":1,"command":"test","target":2}],"summary":"delegating"}"#,
         ] {
             assert!(
                 parse_decision(payload)
@@ -398,6 +407,25 @@ mod tests {
                     .to_string()
                     .contains("decision object"),
                 "accepted unknown field in: {payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_status_incompatible_decision_shapes() {
+        for payload in [
+            r#"{"status":"done"}"#,
+            r#"{"status":"done","summary":"   "}"#,
+            r#"{"status":"done","commands":[],"summary":"complete"}"#,
+            r#"{"status":"done","commands":[{"pane":1,"command":"test"}],"summary":"complete"}"#,
+            r#"{"status":"continue","summary":"waiting"}"#,
+            r#"{"status":"continue","commands":[]}"#,
+            r#"{"status":"continue","commands":[],"summary":"   "}"#,
+            r#"{"status":"monitoring","summary":"waiting"}"#,
+        ] {
+            assert!(
+                parse_decision(payload).is_err(),
+                "accepted invalid shape: {payload}"
             );
         }
     }

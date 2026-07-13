@@ -3,7 +3,10 @@ use std::{
     env, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::mpsc::{SyncSender, TrySendError, sync_channel},
+    sync::{
+        Arc, Mutex,
+        mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -82,6 +85,31 @@ impl PtyWrite {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PtyWriterStatus {
+    Open,
+    Failed,
+}
+
+#[derive(Debug)]
+struct PtyWriterQueue {
+    sender: SyncSender<PtyWrite>,
+    status: Arc<Mutex<PtyWriterStatus>>,
+}
+
+impl PtyWriterQueue {
+    fn try_send(&self, write: PtyWrite) -> std::result::Result<(), TrySendError<PtyWrite>> {
+        let status = self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *status == PtyWriterStatus::Failed {
+            return Err(TrySendError::Disconnected(write));
+        }
+        self.sender.try_send(write)
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct OutputActivity {
     last_output_at: Option<Instant>,
@@ -121,7 +149,7 @@ pub struct PtyPane {
     generation: u64,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send>,
-    writer: SyncSender<PtyWrite>,
+    writer: PtyWriterQueue,
     workload: PaneWorkloadController,
     workload_error: Option<String>,
     parser: Parser,
@@ -603,8 +631,10 @@ fn spawn_writer(
     generation: u64,
     event_tx: mpsc::Sender<PtyEvent>,
     mut writer: Box<dyn Write + Send>,
-) -> SyncSender<PtyWrite> {
+) -> PtyWriterQueue {
     let (tx, rx) = sync_channel::<PtyWrite>(PTY_WRITE_QUEUE_MESSAGES);
+    let status = Arc::new(Mutex::new(PtyWriterStatus::Open));
+    let worker_status = status.clone();
     thread::spawn(move || {
         while let Ok(write) = rx.recv() {
             let result = writer
@@ -623,13 +653,14 @@ fn spawn_writer(
                 }
                 Err(error) => {
                     let error = format!("{error:#}");
+                    let queued = fail_writer_queue(&worker_status, &rx);
                     let _ = event_tx.blocking_send(PtyEvent::WriteFailed {
                         pane,
                         generation,
                         token: write.token,
                         error: error.clone(),
                     });
-                    for queued in rx.try_iter().filter(|queued| queued.token.is_some()) {
+                    for queued in queued.into_iter().filter(|queued| queued.token.is_some()) {
                         let _ = event_tx.blocking_send(PtyEvent::WriteFailed {
                             pane,
                             generation,
@@ -644,7 +675,18 @@ fn spawn_writer(
             }
         }
     });
-    tx
+    PtyWriterQueue { sender: tx, status }
+}
+
+fn fail_writer_queue(
+    status: &Mutex<PtyWriterStatus>,
+    receiver: &Receiver<PtyWrite>,
+) -> Vec<PtyWrite> {
+    let mut status = status
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *status = PtyWriterStatus::Failed;
+    receiver.try_iter().collect()
 }
 
 fn advance_input_revision(revision: &mut u64, bytes: &[u8]) {
@@ -1039,9 +1081,9 @@ fn tail_chars(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         env, io,
         path::Path,
-        sync::{Arc, Mutex},
         thread,
         time::{Duration, Instant},
     };
@@ -1076,6 +1118,23 @@ mod tests {
         }
     }
 
+    struct GatedFailingWriter {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl Write for GatedFailingWriter {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            self.entered.send(()).expect("signal writer entry");
+            self.release.recv().expect("release failing writer");
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn writer_worker_preserves_enqueued_input_order() {
         let output = Arc::new(Mutex::new(Vec::new()));
@@ -1087,10 +1146,10 @@ mod tests {
             Box::new(SharedWriter(output.clone())),
         );
         writer
-            .send(PtyWrite::untracked(b"first"))
+            .try_send(PtyWrite::untracked(b"first"))
             .expect("first write");
         writer
-            .send(PtyWrite::untracked(b"-second"))
+            .try_send(PtyWrite::untracked(b"-second"))
             .expect("second write");
 
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -1106,7 +1165,7 @@ mod tests {
         let writer = spawn_writer(PaneId(4), 2, event_tx, Box::new(FailingWriter));
         let token = PtyWriteToken(42);
         writer
-            .send(PtyWrite::tracked(b"input", token))
+            .try_send(PtyWrite::tracked(b"input", token))
             .expect("queue input");
 
         let event = event_rx.blocking_recv().expect("write failure event");
@@ -1122,6 +1181,57 @@ mod tests {
     }
 
     #[test]
+    fn writer_failure_fails_all_accepted_tokens_and_closes_enqueue_race() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let writer = spawn_writer(
+            PaneId(6),
+            4,
+            event_tx,
+            Box::new(GatedFailingWriter {
+                entered: entered_tx,
+                release: release_rx,
+            }),
+        );
+        let first = PtyWriteToken(101);
+        let queued = PtyWriteToken(102);
+        writer
+            .try_send(PtyWrite::tracked(b"first", first))
+            .expect("queue failing write");
+        entered_rx.recv().expect("writer entered write");
+        writer
+            .try_send(PtyWrite::tracked(b"queued", queued))
+            .expect("queue tracked write before shutdown");
+        release_tx.send(()).expect("release writer failure");
+
+        let mut failed = BTreeSet::new();
+        for _ in 0..2 {
+            let event = event_rx.blocking_recv().expect("tracked failure event");
+            let PtyEvent::WriteFailed {
+                pane: PaneId(6),
+                generation: 4,
+                token: Some(token),
+                ..
+            } = event
+            else {
+                panic!("expected tracked write failure, got {event:?}");
+            };
+            failed.insert(token);
+        }
+        assert_eq!(failed, BTreeSet::from([first, queued]));
+
+        let after_failure = PtyWriteToken(103);
+        assert!(matches!(
+            writer.try_send(PtyWrite::tracked(b"too late", after_failure)),
+            Err(TrySendError::Disconnected(PtyWrite {
+                token: Some(token),
+                ..
+            })) if token == after_failure
+        ));
+    }
+
+    #[test]
     fn writer_worker_acknowledges_tracked_input_after_flush() {
         let output = Arc::new(Mutex::new(Vec::new()));
         let (event_tx, mut event_rx) = mpsc::channel(4);
@@ -1133,7 +1243,7 @@ mod tests {
         );
         let token = PtyWriteToken(99);
         writer
-            .send(PtyWrite::tracked(b"tracked", token))
+            .try_send(PtyWrite::tracked(b"tracked", token))
             .expect("queue tracked input");
 
         let event = event_rx.blocking_recv().expect("write acknowledgement");
