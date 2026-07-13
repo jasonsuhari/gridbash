@@ -91,7 +91,7 @@ test("nightlyVersion reuses a prerelease core and advances a stable patch", () =
   );
 });
 
-test("release workflow publishes tarballs as explicit filesystem paths", () => {
+test("release workflow keeps local tarballs and GitHub fallback available", () => {
   const workflow = fs.readFileSync(
     path.join(__dirname, "..", "..", ".github", "workflows", "release.yml"),
     "utf8",
@@ -102,4 +102,8 @@ test("release workflow publishes tarballs as explicit filesystem paths", () => {
     /npm publish "\.\/\$tarball" --access public --provenance --tag "\$dist_tag"/,
   );
   assert.doesNotMatch(workflow, /npm publish "\$tarball"/);
+  assert.match(
+    workflow,
+    /- name: Create or update GitHub release\r?\n\s+if: \$\{\{ !cancelled\(\) \}\}/,
+  );
 });
