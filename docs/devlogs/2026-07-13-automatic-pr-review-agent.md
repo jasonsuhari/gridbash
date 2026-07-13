@@ -15,6 +15,8 @@ Release target: unreleased
 - Added a dependency-free, tested reviewer that paginates changed files,
   bounds model input, resists prompt injection, and upserts its report.
 - Added GridBash-specific review instructions and setup/security documentation.
+- Added explicit truncated/omitted filename reporting and a configurable Models
+  API version after dogfooding the live reviewer on its own implementation PR.
 
 ## Why It Matters
 

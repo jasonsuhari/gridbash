@@ -26,6 +26,23 @@ function boundedUntrustedText(value, maximumCharacters) {
     : `${text.slice(0, maximumCharacters)}\n[truncated]`;
 }
 
+function summarizeFileNames(fileNames) {
+  const visible = fileNames.slice(0, 10).map((name) => boundedUntrustedText(name, 240));
+  const remainder = fileNames.length - visible.length;
+  return `${JSON.stringify(visible)}${remainder > 0 ? ` (+${remainder} more)` : ""}`;
+}
+
+function describeInputLimitations(renderedDiff) {
+  const limitations = [];
+  if (renderedDiff.partialFileNames?.length) {
+    limitations.push(`Truncated patches: ${summarizeFileNames(renderedDiff.partialFileNames)}`);
+  }
+  if (renderedDiff.omittedFileNames?.length) {
+    limitations.push(`Omitted files: ${summarizeFileNames(renderedDiff.omittedFileNames)}`);
+  }
+  return limitations.join("\n");
+}
+
 async function requestJson(fetchImpl, url, options = {}) {
   const method = options.method || "GET";
   const headers = {
@@ -87,6 +104,7 @@ function renderChangedFiles(files, maximumCharacters = DEFAULT_MAX_DIFF_CHARS) {
   let text = "";
   let includedFiles = 0;
   let partialFiles = 0;
+  const partialFileNames = [];
 
   for (let index = 0; index < files.length; index += 1) {
     const file = files[index];
@@ -111,22 +129,27 @@ function renderChangedFiles(files, maximumCharacters = DEFAULT_MAX_DIFF_CHARS) {
       text += suffix.slice(0, Math.min(suffix.length, maximumCharacters - text.length));
       includedFiles += 1;
       partialFiles += 1;
+      partialFileNames.push(file.filename);
     }
     break;
   }
+
+  const omittedFileNames = files.slice(includedFiles).map((file) => file.filename);
 
   return {
     text,
     includedFiles,
     partialFiles,
-    omittedFiles: Math.max(0, files.length - includedFiles),
+    partialFileNames,
+    omittedFiles: omittedFileNames.length,
+    omittedFileNames,
     truncated: includedFiles < files.length || partialFiles > 0,
   };
 }
 
 function buildReviewMessages(pullRequest, renderedDiff, instructions) {
   const scopeNote = renderedDiff.truncated
-    ? `The input budget truncated ${renderedDiff.partialFiles} patch(es) and omitted ${renderedDiff.omittedFiles} file(s). Do not claim those portions were reviewed.`
+    ? `The input budget limited this review. Do not claim the following portions were reviewed:\n${describeInputLimitations(renderedDiff)}`
     : "All changed-file patches returned by GitHub are included.";
   const metadata = {
     number: pullRequest.number,
@@ -171,11 +194,19 @@ function buildReviewMessages(pullRequest, renderedDiff, instructions) {
   ];
 }
 
-async function callReviewModel(fetchImpl, endpoint, token, model, messages, maxTokens) {
+async function callReviewModel(
+  fetchImpl,
+  endpoint,
+  token,
+  model,
+  messages,
+  maxTokens,
+  apiVersion = "2026-03-10",
+) {
   const payload = await requestJson(fetchImpl, endpoint, {
     method: "POST",
     token,
-    apiVersion: "2026-03-10",
+    apiVersion,
     body: {
       model,
       messages,
@@ -198,15 +229,34 @@ function sanitizeModelOutput(review) {
     .slice(0, 40_000);
 }
 
+function escapeHtml(value) {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("@", "@\u200b");
+}
+
 function formatReviewComment(review, pullRequest, renderedDiff, model) {
   const scope = renderedDiff.truncated
     ? `${renderedDiff.includedFiles}/${pullRequest.changed_files} files represented; input was truncated`
     : `${renderedDiff.includedFiles}/${pullRequest.changed_files} files represented`;
+  const limitations = renderedDiff.truncated
+    ? [
+        "",
+        "<details><summary>Review input limitations</summary>",
+        "",
+        `<pre>${escapeHtml(describeInputLimitations(renderedDiff))}</pre>`,
+        "</details>",
+      ]
+    : [];
   return [
     COMMENT_MARKER,
     "## 🛡️ GridBash Review Agent",
     "",
     sanitizeModelOutput(review),
+    ...limitations,
     "",
     "---",
     `<sub>Model: \`${model}\` · Commit: \`${pullRequest.head.sha.slice(0, 12)}\` · Scope: ${scope}. AI feedback can be wrong; verify findings before changing code.</sub>`,
@@ -272,6 +322,7 @@ async function runReview(options = {}) {
   const apiBase = environment.GITHUB_API_URL || "https://api.github.com";
   const endpoint = environment.REVIEW_MODELS_ENDPOINT || "https://models.github.ai/inference/chat/completions";
   const model = environment.REVIEW_MODEL || DEFAULT_MODEL;
+  const modelsApiVersion = environment.REVIEW_MODELS_API_VERSION || "2026-03-10";
   const maximumCharacters = boundedInteger(
     environment.REVIEW_MAX_DIFF_CHARS,
     DEFAULT_MAX_DIFF_CHARS,
@@ -297,6 +348,7 @@ async function runReview(options = {}) {
     model,
     messages,
     maximumTokens,
+    modelsApiVersion,
   );
   const result = await upsertReviewComment(
     fetchImpl,
@@ -343,6 +395,7 @@ module.exports = {
   COMMENT_MARKER,
   buildReviewMessages,
   callReviewModel,
+  describeInputLimitations,
   fetchChangedFiles,
   formatReviewComment,
   renderChangedFiles,

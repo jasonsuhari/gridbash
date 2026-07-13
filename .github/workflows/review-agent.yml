@@ -38,6 +38,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           REVIEW_MODEL: openai/gpt-4.1
+          REVIEW_MODELS_API_VERSION: "2026-03-10"
           REVIEW_MAX_DIFF_CHARS: "18000"
           REVIEW_MAX_OUTPUT_TOKENS: "1800"
         run: node npm/scripts/review-agent.js
