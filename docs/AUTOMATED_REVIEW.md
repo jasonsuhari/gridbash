@@ -13,8 +13,9 @@ Models usage is separate and opt-in; the workflow does not enable billing.
 
 The workflow uses `openai/gpt-4.1` by default. Change `REVIEW_MODEL` in
 `.github/workflows/review-agent.yml` to select another model allowed by the
-repository. The checked-in `.github/copilot-instructions.md` file defines the
-project-specific review standard.
+repository. `REVIEW_MODELS_API_VERSION` keeps the GitHub Models API contract
+explicit and configurable. The checked-in `.github/copilot-instructions.md`
+file defines the project-specific review standard.
 
 To re-run a review manually:
 
@@ -25,6 +26,8 @@ gh workflow run review-agent.yml -f pr_number=123
 The agent updates one marker-based comment instead of adding a new comment on
 every push. A failed model request updates that same report with the error and
 fails the workflow check so configuration and quota problems stay visible.
+When the input budget is exceeded, the report names the truncated and omitted
+files instead of implying the complete change was reviewed.
 
 ## Security model
 

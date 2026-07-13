@@ -8,6 +8,7 @@ const {
   COMMENT_MARKER,
   buildReviewMessages,
   callReviewModel,
+  describeInputLimitations,
   fetchChangedFiles,
   formatReviewComment,
   renderChangedFiles,
@@ -33,9 +34,13 @@ test("renderChangedFiles enforces the input budget and reports omissions", () =>
   assert.equal(rendered.text.length, 180);
   assert.equal(rendered.includedFiles, 1);
   assert.equal(rendered.partialFiles, 1);
+  assert.deepEqual(rendered.partialFileNames, ["src/app.rs"]);
   assert.equal(rendered.omittedFiles, 1);
+  assert.deepEqual(rendered.omittedFileNames, ["src/ui.rs"]);
   assert.equal(rendered.truncated, true);
   assert.match(rendered.text, /Patch truncated/);
+  assert.match(describeInputLimitations(rendered), /src\/app\.rs/);
+  assert.match(describeInputLimitations(rendered), /src\/ui\.rs/);
 });
 
 test("fetchChangedFiles paginates until GitHub returns a short page", async () => {
@@ -94,8 +99,10 @@ test("review prompt bounds contributor-controlled metadata", () => {
 
 test("callReviewModel sends a bounded deterministic request", async () => {
   let request;
+  let apiVersion;
   const fetchImpl = async (_url, options) => {
     request = JSON.parse(options.body);
+    apiVersion = options.headers["X-GitHub-Api-Version"];
     return jsonResponse({ choices: [{ message: { content: "## Verdict\nNo findings." } }] });
   };
 
@@ -106,11 +113,13 @@ test("callReviewModel sends a bounded deterministic request", async () => {
     "openai/gpt-4.1",
     [{ role: "user", content: "review" }],
     900,
+    "2099-01-01",
   );
   assert.equal(result, "## Verdict\nNo findings.");
   assert.equal(request.model, "openai/gpt-4.1");
   assert.equal(request.temperature, 0.1);
   assert.equal(request.max_tokens, 900);
+  assert.equal(apiVersion, "2099-01-01");
 });
 
 test("upsertReviewComment updates the existing bot report", async () => {
@@ -149,6 +158,24 @@ test("review comments neutralize mentions and marker injection", () => {
   );
   assert.equal(body.match(/gridbash-review-agent/g).length, 1);
   assert.match(body, /1234567890ab/);
+});
+
+test("truncated review comments name omitted files without allowing markup or mentions", () => {
+  const body = formatReviewComment(
+    "## Verdict\nReview was limited.",
+    { changed_files: 2, head: { sha: "1234567890abcdef" } },
+    {
+      includedFiles: 1,
+      truncated: true,
+      partialFileNames: ["src/@owner<partial>.rs"],
+      omittedFileNames: ["src/omitted.rs"],
+    },
+    "openai/gpt-4.1",
+  );
+
+  assert.match(body, /Review input limitations/);
+  assert.match(body, /@\u200bowner&lt;partial&gt;\.rs/);
+  assert.match(body, /src\/omitted\.rs/);
 });
 
 test("runReview completes the API-to-model-to-comment flow", async () => {
