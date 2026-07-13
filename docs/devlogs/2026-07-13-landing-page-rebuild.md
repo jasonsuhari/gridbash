@@ -5,7 +5,7 @@ Release target: unreleased
 
 ## Summary
 
-- Rebuilt the existing GitHub Pages site around GridBash's real terminal experience and its two primary launch actions: preview downloads and GitHub stars.
+- Rebuilt the existing GitHub Pages site around GridBash's real terminal experience and its two primary launch actions: npm installation and GitHub stars.
 
 ## What Changed
 

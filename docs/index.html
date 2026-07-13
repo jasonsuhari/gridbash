@@ -38,12 +38,12 @@
         "description": "GridBash is a cross-platform terminal grid for running CLI coding agents side by side.",
         "url": "https://jasonsuhari.github.io/gridbash/",
         "codeRepository": "https://github.com/jasonsuhari/gridbash",
-        "downloadUrl": "https://github.com/jasonsuhari/gridbash/releases/tag/v0.2.0-macos.1",
+        "downloadUrl": "https://www.npmjs.com/package/gridbash",
         "image": "https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-social-preview.png",
         "applicationCategory": "DeveloperApplication",
         "applicationSubCategory": "Terminal multiplexer",
         "operatingSystem": "Windows, Linux, macOS",
-        "softwareVersion": "0.2.0-macos.1",
+        "softwareVersion": "0.1.6",
         "programmingLanguage": "Rust",
         "license": "https://github.com/jasonsuhari/gridbash/blob/main/LICENSE",
         "author": {
@@ -88,7 +88,7 @@
             "name": "How do I install GridBash?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Download the v0.2 cross-platform preview from GitHub Releases. The stable npm package remains v0.1.6 for Windows x64 until the new native packages complete their registry bootstrap."
+              "text": "Install the stable Windows package with npm install -g gridbash. Cross-platform v0.2 preview builds are also available from GitHub Releases."
             }
           }
         ]
@@ -374,14 +374,16 @@
       h1 {
         max-width: 700px;
         margin-bottom: 24px;
-        font-size: clamp(3.65rem, 6.6vw, 6.8rem);
+        font-size: clamp(3.4rem, 5.4vw, 5.8rem);
         font-weight: 750;
         line-height: 0.9;
         letter-spacing: -0.075em;
       }
 
       .hero-accent {
+        display: inline-block;
         color: var(--accent-bright);
+        white-space: nowrap;
       }
 
       .hero-lead {
@@ -1133,8 +1135,13 @@
 
         .hero {
           width: 100%;
+          min-width: 0;
           gap: 28px;
           padding: 94px 16px 36px;
+        }
+
+        .hero-copy {
+          min-width: 0;
         }
 
         .hero::before {
@@ -1155,12 +1162,22 @@
 
         .hero-actions {
           display: grid;
-          grid-template-columns: 1fr 1fr;
+          grid-template-columns: 1fr;
         }
 
         .button {
+          width: 100%;
           padding-inline: 12px;
           font-size: 0.86rem;
+        }
+
+        .install-command {
+          width: 100%;
+          min-width: 0;
+        }
+
+        .install-command code {
+          min-width: 0;
         }
 
         .hero-visual {
@@ -1324,12 +1341,12 @@
           <h1 id="hero-title">Every agent.<br><span class="hero-accent">One terminal.</span></h1>
           <p class="hero-lead">Run your entire CLI agent stack side by side. Prompt one pane, selected panes, or all of them at once.</p>
           <div class="hero-actions">
-            <a class="button button--primary" href="https://github.com/jasonsuhari/gridbash/releases/tag/v0.2.0-macos.1">Get v0.2 preview <span class="button__arrow" aria-hidden="true">→</span></a>
+            <a class="button button--primary" href="https://www.npmjs.com/package/gridbash">Install from npm <span class="button__arrow" aria-hidden="true">→</span></a>
             <a class="button" href="https://github.com/jasonsuhari/gridbash">Star on GitHub</a>
           </div>
-          <button class="install-command" type="button" data-copy="https://github.com/jasonsuhari/gridbash/releases/tag/v0.2.0-macos.1" aria-label="Copy v0.2 preview release link">
-            <code>v0.2.0-macos.1 · 6 verified packages</code>
-            <span class="install-command__status">Copy link</span>
+          <button class="install-command" type="button" data-copy="npm install -g gridbash" aria-label="Copy npm install command">
+            <code>npm install -g gridbash</code>
+            <span class="install-command__status">Copy</span>
           </button>
         </div>
 
@@ -1440,7 +1457,7 @@
         <div class="page section workflow-layout">
           <div class="workflow-intro reveal">
             <p class="section-kicker">From zero to grid</p>
-            <h2 class="section-title">Choose a build. Then let it rip.</h2>
+            <h2 class="section-title">One install. Then let it rip.</h2>
             <p class="section-lead">No daemon, product account, or cloud workspace required.</p>
           </div>
 
@@ -1448,9 +1465,9 @@
             <article class="step reveal">
               <span class="step__index">01</span>
               <div>
-                <h3>Choose your channel</h3>
-                <p>Windows stable is on npm. The cross-platform preview is on GitHub Releases.</p>
-                <code>stable 0.1.6 | preview 0.2.0-macos.1</code>
+                <h3>Install globally</h3>
+                <p>Start with the stable npm package. Cross-platform preview builds are available on GitHub Releases.</p>
+                <code>npm install -g gridbash</code>
               </div>
             </article>
             <article class="step reveal">
@@ -1493,9 +1510,9 @@
         <div class="page final-cta__inner reveal">
           <p class="section-kicker">Your agent command center</p>
           <h2 id="final-title">Stop tab juggling.</h2>
-          <p>Grab the cross-platform preview and star the project if it earns a place in your terminal.</p>
+          <p>Install GridBash, launch your first grid, and star the project if it earns a place in your terminal.</p>
           <div class="final-actions">
-            <a class="button button--primary" href="https://github.com/jasonsuhari/gridbash/releases/tag/v0.2.0-macos.1">Get v0.2 preview</a>
+            <button class="button button--primary install-copy" type="button" data-copy="npm install -g gridbash">Copy npm install</button>
             <a class="button" href="https://github.com/jasonsuhari/gridbash">Star on GitHub <span class="button__arrow" aria-hidden="true">→</span></a>
           </div>
         </div>
