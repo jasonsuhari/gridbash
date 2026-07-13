@@ -5,13 +5,15 @@ Release target: unreleased
 
 ## Summary
 
-- Rebuilt the existing GitHub Pages site around GridBash's real terminal experience and its two primary launch actions: npm installation and GitHub stars.
+- Rebuilt the existing GitHub Pages site around GridBash's real terminal experience and its two primary launch actions: preview downloads and GitHub stars.
 
 ## What Changed
 
 - Replaced the sparse landing page with a responsive, editorial developer-tool design.
 - Added a copyable install command, persistent GitHub CTA, real product video, scroll reveals, pointer tilt, and a reduced-motion fallback.
 - Updated stale Windows-only copy and structured data to reflect Windows, Linux, and macOS support.
+- Kept npm explicitly labeled as the Windows v0.1.6 stable channel while the
+  cross-platform v0.2 preview packages complete their registry bootstrap.
 - Self-hosted Geist and Geist Mono for a sharper product identity without adding a build step.
 
 ## Why It Matters
