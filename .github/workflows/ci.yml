@@ -51,6 +51,8 @@ jobs:
 
       - run: node --test npm/scripts/gridbash-launcher.test.js
 
+      - run: node --test npm/scripts/issue-labeler.test.js
+
       - run: node --test npm/scripts/review-agent.test.js
 
       - run: node --test npm/scripts/update-star-history.test.js
