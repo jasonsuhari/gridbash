@@ -28,6 +28,13 @@ pub(crate) struct CodexSqliteLease {
     _lock: File,
 }
 
+impl Drop for CodexSqliteLease {
+    fn drop(&mut self) {
+        // Release the flock even if a concurrently spawned child briefly inherited the handle.
+        let _ = FileExt::unlock(&self._lock);
+    }
+}
+
 pub(crate) struct PaneCodexSqlite {
     pub(crate) env: Vec<(OsString, OsString)>,
     pub(crate) lease: Option<CodexSqliteLease>,
