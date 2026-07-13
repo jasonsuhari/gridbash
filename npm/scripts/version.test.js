@@ -90,3 +90,16 @@ test("nightlyVersion reuses a prerelease core and advances a stable patch", () =
     "0.3.0-nightly.20260714.43.gabcdef123456",
   );
 });
+
+test("release workflow publishes tarballs as explicit filesystem paths", () => {
+  const workflow = fs.readFileSync(
+    path.join(__dirname, "..", "..", ".github", "workflows", "release.yml"),
+    "utf8",
+  );
+
+  assert.match(
+    workflow,
+    /npm publish "\.\/\$tarball" --access public --provenance --tag "\$dist_tag"/,
+  );
+  assert.doesNotMatch(workflow, /npm publish "\$tarball"/);
+});
