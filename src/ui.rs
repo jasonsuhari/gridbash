@@ -41,6 +41,15 @@ pub struct DrawState {
     pub pane_settings_stop_goal_button: Option<Rect>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PaneRenderCache {
+    revision: u64,
+    width: u16,
+    height: u16,
+    selection: Option<PaneSelection>,
+    lines: Vec<Line<'static>>,
+}
+
 const QUIET_MARKER: &str = " *";
 const STATUS_BRAND: &str = " GridBash ";
 const PREVIOUS_PANES_BUTTON: &str = " Panes ";
@@ -167,7 +176,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         } else if sleeping {
             render_sleeping_screen(frame, inner);
         } else {
-            render_screen(frame, inner, pane.screen(), app.selection_for_pane(index));
+            let selection = app.selection_for_pane(index);
+            let lines = app.pane_screen_lines(index, inner.width, inner.height, selection);
+            render_screen_lines(frame, inner, lines);
         }
 
         if focused && !sleeping && !modal_open && pane.screen().scrollback() == 0 {
@@ -2532,24 +2543,45 @@ fn render_sleeping_screen(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(Paragraph::new(lines).style(style), area);
 }
 
-fn render_screen(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    screen: &vt100::Screen,
-    selection: Option<PaneSelection>,
-) {
+fn render_screen_lines(frame: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-
-    let lines = (0..area.height)
-        .map(|row| render_screen_row(screen, row, area.width, selection))
-        .collect::<Vec<_>>();
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
         area,
     );
+}
+
+pub fn cached_screen_lines(
+    cache: &mut PaneRenderCache,
+    revision: u64,
+    screen: &vt100::Screen,
+    width: u16,
+    height: u16,
+    selection: Option<PaneSelection>,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    if cache.revision == revision
+        && cache.width == width
+        && cache.height == height
+        && cache.selection == selection
+    {
+        return cache.lines.clone();
+    }
+
+    let lines = (0..height)
+        .map(|row| render_screen_row(screen, row, width, selection))
+        .collect::<Vec<_>>();
+    cache.revision = revision;
+    cache.width = width;
+    cache.height = height;
+    cache.selection = selection;
+    cache.lines.clone_from(&lines);
+    lines
 }
 
 fn render_screen_row<'a>(
@@ -2908,6 +2940,41 @@ mod tests {
             Style::default()
                 .fg(rgb_color(group_color))
                 .add_modifier(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn pane_render_cache_reuses_revision_and_invalidates_on_output() {
+        let mut parser = vt100::Parser::new(2, 10, 100);
+        parser.process(b"hello");
+        let mut cache = PaneRenderCache::default();
+
+        let first = cached_screen_lines(&mut cache, 1, parser.screen(), 10, 2, None);
+        parser.process(b" world");
+        let cached = cached_screen_lines(&mut cache, 1, parser.screen(), 10, 2, None);
+        assert_eq!(cached, first);
+
+        let refreshed = cached_screen_lines(&mut cache, 2, parser.screen(), 10, 2, None);
+        assert_ne!(refreshed, first);
+    }
+
+    #[test]
+    fn pane_render_cache_keys_selection_and_dimensions() {
+        let mut parser = vt100::Parser::new(2, 10, 100);
+        parser.process(b"hello");
+        let mut cache = PaneRenderCache::default();
+        let plain = cached_screen_lines(&mut cache, 1, parser.screen(), 10, 2, None);
+        let selection = Some(PaneSelection {
+            start_row: 0,
+            start_column: 0,
+            end_row: 0,
+            end_column: 4,
+        });
+        let selected = cached_screen_lines(&mut cache, 1, parser.screen(), 10, 2, selection);
+        assert_ne!(selected, plain);
+        assert_eq!(
+            cached_screen_lines(&mut cache, 1, parser.screen(), 5, 2, selection).len(),
+            2
         );
     }
 }

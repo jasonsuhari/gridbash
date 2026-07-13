@@ -85,6 +85,8 @@ pub struct Defaults {
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "PaneProcessPriority::is_default")]
     pub pane_priority: PaneProcessPriority,
+    #[serde(default, skip_serializing_if = "PaneWorkloadPolicy::is_default")]
+    pub pane_workload: PaneWorkloadPolicy,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,6 +95,14 @@ pub enum PaneProcessPriority {
     Normal,
     #[default]
     BelowNormal,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PaneWorkloadPolicy {
+    #[default]
+    Adaptive,
+    Unrestricted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,11 +178,17 @@ impl Config {
 
 impl Defaults {
     fn is_empty(&self) -> bool {
-        self.profile.is_none() && self.pane_priority.is_default()
+        self.profile.is_none() && self.pane_priority.is_default() && self.pane_workload.is_default()
     }
 }
 
 impl PaneProcessPriority {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl PaneWorkloadPolicy {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -230,6 +246,7 @@ mod tests {
             config.defaults.pane_priority,
             PaneProcessPriority::BelowNormal
         );
+        assert_eq!(config.defaults.pane_workload, PaneWorkloadPolicy::Adaptive);
     }
 
     #[test]
@@ -252,6 +269,25 @@ mod tests {
         let serialized = toml::to_string(&Config::default()).expect("serialize config");
 
         assert!(!serialized.contains("pane_priority"));
+        assert!(!serialized.contains("pane_workload"));
+    }
+
+    #[test]
+    fn parses_unrestricted_pane_workload_policy() {
+        let config: Config = toml::from_str(
+            r#"
+            [defaults]
+            pane_workload = "unrestricted"
+            "#,
+        )
+        .expect("parse config");
+
+        assert_eq!(
+            config.defaults.pane_workload,
+            PaneWorkloadPolicy::Unrestricted
+        );
+        let serialized = toml::to_string(&config).expect("serialize config");
+        assert!(serialized.contains("pane_workload = \"unrestricted\""));
     }
 
     #[test]
