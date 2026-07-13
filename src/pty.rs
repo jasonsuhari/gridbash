@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
@@ -17,6 +19,7 @@ use tokio::sync::mpsc;
 use vt100::{Parser, Screen};
 
 use crate::{
+    codex_sqlite::CodexSqliteLease,
     config::{PaneProcessPriority, PaneWorkloadPolicy},
     layout::PaneId,
     process_priority::{PaneWorkloadClass, PaneWorkloadController},
@@ -35,6 +38,9 @@ const MAX_REPLAY_OUTPUT_CHARS: usize = 18_000;
 const MAX_OSC_SCAN: usize = 4096;
 const PTY_READ_BUFFER_BYTES: usize = 32 * 1024;
 const PTY_WRITE_QUEUE_MESSAGES: usize = 256;
+const CHILD_REAP_GRACE: Duration = Duration::from_millis(100);
+const CHILD_REAP_AFTER_FORCE: Duration = Duration::from_millis(400);
+const CHILD_REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone)]
 pub enum PtyEvent {
@@ -110,6 +116,80 @@ impl PtyWriterQueue {
     }
 }
 
+struct SpawnGuard<L = CodexSqliteLease> {
+    child: Box<dyn Child + Send>,
+    _lease: Option<L>,
+    armed: bool,
+}
+
+impl<L> SpawnGuard<L> {
+    fn new(child: Box<dyn Child + Send>, lease: Option<L>) -> Self {
+        Self {
+            child,
+            _lease: lease,
+            armed: true,
+        }
+    }
+
+    fn child(&self) -> &(dyn Child + Send) {
+        self.child.as_ref()
+    }
+
+    fn child_mut(&mut self) -> &mut (dyn Child + Send) {
+        self.child.as_mut()
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl<L> Drop for SpawnGuard<L> {
+    fn drop(&mut self) {
+        if self.armed {
+            terminate_and_reap_spawn_failure(self.child.as_mut());
+        }
+    }
+}
+
+fn terminate_and_reap_spawn_failure(child: &mut (dyn Child + Send)) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+
+    let _ = child.kill();
+    if reap_spawn_failure_for(child, CHILD_REAP_GRACE) {
+        return;
+    }
+
+    #[cfg(unix)]
+    if let Some(process_id) = child.process_id() {
+        // SAFETY: the PID comes from the owned child process. SIGKILL is the
+        // fallback when portable-pty's SIGHUP did not stop it.
+        let _ = unsafe { libc::kill(process_id as i32, libc::SIGKILL) };
+    }
+
+    if !reap_spawn_failure_for(child, CHILD_REAP_AFTER_FORCE) {
+        // This cleanup runs only while spawn construction is failing. Waiting
+        // here keeps the SQLite lease alive until the child has been reaped.
+        let _ = child.wait();
+    }
+}
+
+fn reap_spawn_failure_for(child: &mut (dyn Child + Send), timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return true;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        thread::sleep(CHILD_REAP_POLL_INTERVAL.min(deadline - now));
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct OutputActivity {
     last_output_at: Option<Instant>,
@@ -148,7 +228,7 @@ pub struct PtyPane {
     id: PaneId,
     generation: u64,
     master: Box<dyn MasterPty + Send>,
-    child: Box<dyn Child + Send>,
+    child: SpawnGuard,
     writer: PtyWriterQueue,
     workload: PaneWorkloadController,
     workload_error: Option<String>,
@@ -167,6 +247,7 @@ pub struct PtyPane {
     output_tail_chars: usize,
     pub active: bool,
     pub exited: bool,
+    child_reaped: bool,
 }
 
 impl PtyPane {
@@ -179,7 +260,8 @@ impl PtyPane {
         args: &[String],
         env: &BTreeMap<String, String>,
         cwd: &Path,
-        extra_env: &[(String, String)],
+        extra_env: &[(OsString, OsString)],
+        codex_sqlite_lease: Option<CodexSqliteLease>,
         scrollback_rows: usize,
         process_priority: PaneProcessPriority,
         workload_policy: PaneWorkloadPolicy,
@@ -215,7 +297,8 @@ impl PtyPane {
             .slave
             .spawn_command(command_builder)
             .with_context(|| format!("failed to spawn {}", command.display()))?;
-        let (workload, workload_error) = match child.process_id() {
+        let child = SpawnGuard::new(child, codex_sqlite_lease);
+        let (workload, workload_error) = match child.child().process_id() {
             Some(process_id) => {
                 match PaneWorkloadController::attach(process_id, process_priority, workload_policy)
                 {
@@ -241,7 +324,7 @@ impl PtyPane {
         let writer = spawn_writer(id, generation, event_tx.clone(), writer);
         spawn_reader(id, generation, event_tx, reader);
 
-        Ok(Self {
+        let mut pane = Self {
             id,
             generation,
             master: pair.master,
@@ -264,7 +347,10 @@ impl PtyPane {
             output_tail_chars: 0,
             active: false,
             exited: false,
-        })
+            child_reaped: false,
+        };
+        pane.child.disarm();
+        Ok(pane)
     }
 
     pub fn id(&self) -> PaneId {
@@ -424,8 +510,7 @@ impl PtyPane {
             return false;
         }
 
-        if matches!(self.child.try_wait(), Ok(Some(_))) {
-            self.exited = true;
+        if self.reap_child_now() {
             return true;
         }
 
@@ -484,12 +569,54 @@ impl PtyPane {
     }
 
     pub fn terminate(&mut self) {
-        if self.exited {
+        if self.child_reaped {
             return;
         }
 
-        let _ = self.child.kill();
+        if self.reap_child_now() {
+            return;
+        }
+
+        let _ = self.child.child_mut().kill();
+        if self.reap_child_for(CHILD_REAP_GRACE) {
+            return;
+        }
+
+        #[cfg(unix)]
+        if let Some(process_id) = self.child.child().process_id() {
+            // SAFETY: the PID comes from the owned child process. SIGKILL is the
+            // bounded fallback after portable-pty's SIGHUP did not reap it.
+            let _ = unsafe { libc::kill(process_id as i32, libc::SIGKILL) };
+        }
+
+        let _ = self.reap_child_for(CHILD_REAP_AFTER_FORCE);
         self.exited = true;
+    }
+
+    fn reap_child_now(&mut self) -> bool {
+        if self.child_reaped {
+            return true;
+        }
+        if matches!(self.child.child_mut().try_wait(), Ok(Some(_))) {
+            self.child_reaped = true;
+            self.exited = true;
+            return true;
+        }
+        false
+    }
+
+    fn reap_child_for(&mut self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.reap_child_now() {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            thread::sleep(CHILD_REAP_POLL_INTERVAL.min(deadline - now));
+        }
     }
 
     fn append_plain_output(&mut self, plain: &str) {
@@ -1118,6 +1245,113 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct GuardTestChild {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        exited: bool,
+    }
+
+    impl portable_pty::ChildKiller for GuardTestChild {
+        fn kill(&mut self) -> io::Result<()> {
+            self.events.lock().expect("guard events").push("kill");
+            self.exited = true;
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(GuardTestKiller)
+        }
+    }
+
+    impl Child for GuardTestChild {
+        fn try_wait(&mut self) -> io::Result<Option<portable_pty::ExitStatus>> {
+            let event = if self.exited { "reaped" } else { "running" };
+            self.events.lock().expect("guard events").push(event);
+            Ok(self
+                .exited
+                .then(|| portable_pty::ExitStatus::with_exit_code(0)))
+        }
+
+        fn wait(&mut self) -> io::Result<portable_pty::ExitStatus> {
+            self.events.lock().expect("guard events").push("waited");
+            self.exited = true;
+            Ok(portable_pty::ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    impl Drop for GuardTestChild {
+        fn drop(&mut self) {
+            self.events.lock().expect("guard events").push("child_drop");
+        }
+    }
+
+    #[derive(Debug)]
+    struct GuardTestKiller;
+
+    impl portable_pty::ChildKiller for GuardTestKiller {
+        fn kill(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self)
+        }
+    }
+
+    struct GuardTestLease(Arc<Mutex<Vec<&'static str>>>);
+
+    impl Drop for GuardTestLease {
+        fn drop(&mut self) {
+            self.0.lock().expect("guard events").push("lease_drop");
+        }
+    }
+
+    #[test]
+    fn spawn_guard_reaps_child_before_releasing_lease() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let child = Box::new(GuardTestChild {
+            events: Arc::clone(&events),
+            exited: false,
+        });
+
+        drop(SpawnGuard::new(
+            child,
+            Some(GuardTestLease(Arc::clone(&events))),
+        ));
+
+        assert_eq!(
+            *events.lock().expect("guard events"),
+            ["running", "kill", "reaped", "child_drop", "lease_drop"]
+        );
+    }
+
+    #[test]
+    fn disarmed_spawn_guard_leaves_child_cleanup_to_pane() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let child = Box::new(GuardTestChild {
+            events: Arc::clone(&events),
+            exited: false,
+        });
+        let mut guard = SpawnGuard::new(child, Some(GuardTestLease(Arc::clone(&events))));
+
+        guard.disarm();
+        drop(guard);
+
+        assert_eq!(
+            *events.lock().expect("guard events"),
+            ["child_drop", "lease_drop"]
+        );
+    }
+
     struct GatedFailingWriter {
         entered: std::sync::mpsc::Sender<()>,
         release: std::sync::mpsc::Receiver<()>,
@@ -1420,6 +1654,7 @@ mod tests {
             &BTreeMap::new(),
             &cwd,
             &[],
+            None,
             10_000,
             PaneProcessPriority::BelowNormal,
             PaneWorkloadPolicy::Adaptive,
@@ -1483,6 +1718,7 @@ mod tests {
             &BTreeMap::new(),
             &cwd,
             &[],
+            None,
             10_000,
             PaneProcessPriority::BelowNormal,
             PaneWorkloadPolicy::Adaptive,

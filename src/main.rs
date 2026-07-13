@@ -1,6 +1,7 @@
 mod app;
 mod auth;
 mod cli;
+mod codex_sqlite;
 mod composer;
 mod config;
 mod control;

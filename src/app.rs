@@ -32,6 +32,7 @@ use vt100::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 use crate::{
     auth::{self, AgentKind, AuthProfile},
     cli::{Cli, GridMode},
+    codex_sqlite::{CodexSqlitePool, PaneCodexSqlite},
     composer::{Composer, GridPicker, GridPickerAction},
     config::{Config, PaletteColor, PaneWorkloadPolicy, UiConfig, UiPalette},
     control::{self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse},
@@ -86,6 +87,7 @@ pub struct App {
     layout: GridLayout,
     grid_area: Rect,
     panes: Vec<PtyPane>,
+    codex_sqlite: CodexSqlitePool,
     pane_idle: Vec<PaneIdleState>,
     focus: usize,
     selected: BTreeSet<usize>,
@@ -1880,7 +1882,7 @@ impl App {
             .unwrap_or(base_status);
         let settings = SettingsState::from_config(&config);
 
-        Ok(Self::from_parts(AppInit {
+        Self::from_parts(AppInit {
             config,
             config_path,
             worktrees,
@@ -1894,7 +1896,7 @@ impl App {
             restored_histories: Vec::new(),
             session_recorder: None,
             status,
-        }))
+        })
     }
 
     pub fn resume(config: Config, record: SessionRecord, mouse_enabled: bool) -> Result<Self> {
@@ -1911,7 +1913,7 @@ impl App {
             .map(|pane| pane.cwd.clone())
             .unwrap_or(resolved_current_dir()?);
 
-        Ok(Self::from_parts(AppInit {
+        Self::from_parts(AppInit {
             config,
             config_path: None,
             worktrees: None,
@@ -1925,16 +1927,16 @@ impl App {
             restored_histories,
             session_recorder: Some(recorder),
             status: format!("resumed session {session_id}"),
-        }))
+        })
     }
 
-    fn from_parts(init: AppInit) -> Self {
+    fn from_parts(init: AppInit) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::channel(PTY_EVENT_CHANNEL_CAPACITY);
         let (usage_tx, usage_rx) = std_mpsc::channel();
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (goal_tx, goal_rx) = std_mpsc::channel();
 
-        Self {
+        Ok(Self {
             config: init.config,
             config_path: init.config_path,
             worktrees: init.worktrees,
@@ -1945,6 +1947,7 @@ impl App {
             layout: GridLayout::new(init.grid),
             grid_area: Rect::default(),
             panes: Vec::new(),
+            codex_sqlite: CodexSqlitePool::new()?,
             pane_idle: Vec::new(),
             focus: 0,
             selected: BTreeSet::new(),
@@ -2003,7 +2006,7 @@ impl App {
             api_spend_label: None,
             last_activity_decay: Instant::now(),
             last_exit_poll: Instant::now(),
-        }
+        })
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -2204,7 +2207,10 @@ impl App {
         let launch = spec.resolved_command()?;
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
-        let extra_env = self.pane_env(pane_index);
+        let PaneCodexSqlite {
+            env: extra_env,
+            lease: codex_sqlite_lease,
+        } = self.pane_env(pane_index, &spec.env)?;
         PtyPane::spawn(
             &spec.profile_name,
             id,
@@ -2214,6 +2220,7 @@ impl App {
             &spec.env,
             &spec.cwd,
             &extra_env,
+            codex_sqlite_lease,
             self.config.ui.scrollback_rows,
             self.config.defaults.pane_priority,
             self.config.defaults.pane_workload,
@@ -2221,19 +2228,31 @@ impl App {
         )
     }
 
-    fn pane_env(&self, pane_index: usize) -> Vec<(String, String)> {
-        let Some(control) = &self.control_handle else {
-            return Vec::new();
-        };
+    fn pane_env(
+        &self,
+        pane_index: usize,
+        spec_env: &BTreeMap<String, String>,
+    ) -> Result<PaneCodexSqlite> {
+        let mut pane_sqlite = self.codex_sqlite.for_pane(spec_env)?;
 
-        vec![
-            (
-                "GRIDBASH_CONTROL_ADDR".into(),
-                control.endpoint().to_string(),
-            ),
-            ("GRIDBASH_CONTROL_TOKEN".into(), control.token().to_string()),
-            ("GRIDBASH_PANE_INDEX".into(), (pane_index + 1).to_string()),
-        ]
+        if let Some(control) = &self.control_handle {
+            pane_sqlite.env.extend([
+                (
+                    "GRIDBASH_CONTROL_ADDR".into(),
+                    control.endpoint().to_string().into(),
+                ),
+                (
+                    "GRIDBASH_CONTROL_TOKEN".into(),
+                    control.token().to_string().into(),
+                ),
+                (
+                    "GRIDBASH_PANE_INDEX".into(),
+                    (pane_index + 1).to_string().into(),
+                ),
+            ]);
+        }
+
+        Ok(pane_sqlite)
     }
 
     fn run_loop(&mut self, terminal: &mut Tui) -> Result<()> {
