@@ -40,7 +40,7 @@ use crate::{
     manager::{self, ManagerCommand, ManagerDecision},
     process_priority::PaneWorkloadClass,
     profiles::{default_profile_name, find_profile},
-    pty::{PtyEvent, PtyPane},
+    pty::{PtyEvent, PtyPane, PtyWriteToken},
     session::{SavedPaneHistory, SessionRecord, SessionRecorder},
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
@@ -330,8 +330,25 @@ struct ManagerGoal {
     in_flight: bool,
     retry_after: Option<Instant>,
     review_notice: Option<String>,
+    dispatch_retry: Option<GoalDispatchRetry>,
+    next_dispatch_sequence: u64,
     failure_count: u8,
     status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct GoalCommandKey {
+    pane_id: PaneId,
+    pane_generation: u64,
+    command: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GoalDispatchRetry {
+    successful: BTreeSet<GoalCommandKey>,
+    pending: BTreeMap<PtyWriteToken, GoalCommandKey>,
+    failed: BTreeMap<GoalCommandKey, String>,
+    summary: String,
 }
 
 #[derive(Debug, Clone)]
@@ -2413,15 +2430,29 @@ impl App {
                 PtyEvent::WriteFailed {
                     pane,
                     generation,
+                    token,
                     error,
                 } => {
                     budget.record(0);
-                    if let Some(PaneRoute::Visible(index)) =
-                        routes.get(&(pane, generation)).copied()
+                    let handled = token.is_some_and(|token| {
+                        self.apply_manager_write_result(pane, generation, token, Err(error.clone()))
+                    });
+                    if !handled
+                        && let Some(PaneRoute::Visible(index)) =
+                            routes.get(&(pane, generation)).copied()
                     {
                         self.status = format!("pane {} input failed: {error}", index + 1);
                         changed = true;
                     }
+                    changed |= handled;
+                }
+                PtyEvent::WriteSucceeded {
+                    pane,
+                    generation,
+                    token,
+                } => {
+                    budget.record(0);
+                    changed |= self.apply_manager_write_result(pane, generation, token, Ok(()));
                 }
             }
         }
@@ -2523,6 +2554,44 @@ impl App {
         routes
     }
 
+    fn apply_manager_write_result(
+        &mut self,
+        pane: PaneId,
+        generation: u64,
+        token: PtyWriteToken,
+        result: Result<(), String>,
+    ) -> bool {
+        let current = goal_pane_states(&self.panes, &self.sleeping);
+        if let Some(status) = apply_goal_dispatch_result(
+            &mut self.manager_goal,
+            &current,
+            pane,
+            generation,
+            token,
+            result.clone(),
+        ) {
+            self.status = status;
+            return true;
+        }
+
+        for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
+            let current = goal_pane_states(&tab.panes, &tab.sleeping);
+            if apply_goal_dispatch_result(
+                &mut tab.manager_goal,
+                &current,
+                pane,
+                generation,
+                token,
+                result.clone(),
+            )
+            .is_some()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     fn capture_goal_output(&mut self, pane_index: usize, output: &str) {
         capture_goal_text(&mut self.manager_goal, &self.sleeping, pane_index, output);
     }
@@ -2534,6 +2603,10 @@ impl App {
         };
         if !goal.active
             || goal.in_flight
+            || goal
+                .dispatch_retry
+                .as_ref()
+                .is_some_and(|dispatch| !dispatch.pending.is_empty())
             || goal.output_buffer.trim().is_empty()
             || goal.retry_after.is_some_and(|retry| now < retry)
             || goal
@@ -2553,8 +2626,17 @@ impl App {
         let pane_metadata =
             manager_goal_pane_metadata(&self.panes, &self.pane_names, self.launch_plan.as_ref());
         let mut context = manager_goal_context(&self.panes, &pane_metadata, &self.sleeping);
-        if let Some(notice) = goal.review_notice.as_deref() {
+        if let Some(dispatch) = goal.dispatch_retry.as_ref() {
+            let current = goal_pane_states(&self.panes, &self.sleeping);
             context.push_str("\n--- LOCALLY GENERATED PRIOR-DISPATCH RECORD ---\n");
+            context.push_str(&bounded_prefix(
+                &format_goal_dispatch_record(dispatch, &current),
+                2_048,
+            ));
+            context.push('\n');
+        }
+        if let Some(notice) = goal.review_notice.as_deref() {
+            context.push_str("\n--- LOCALLY GENERATED MANAGER ERROR RECORD ---\n");
             context.push_str(&bounded_prefix(notice, 2_048));
             context.push('\n');
         }
@@ -2584,16 +2666,19 @@ impl App {
     fn drain_goal_reviews(&mut self) -> bool {
         let mut changed = false;
         while let Ok(event) = self.goal_rx.try_recv() {
-            if let Some(status) =
-                apply_goal_review(&self.panes, &mut self.manager_goal, &self.sleeping, &event)
-            {
+            if let Some(status) = apply_goal_review(
+                &mut self.panes,
+                &mut self.manager_goal,
+                &self.sleeping,
+                &event,
+            ) {
                 self.status = status;
                 changed = true;
                 continue;
             }
 
             for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
-                if apply_goal_review(&tab.panes, &mut tab.manager_goal, &tab.sleeping, &event)
+                if apply_goal_review(&mut tab.panes, &mut tab.manager_goal, &tab.sleeping, &event)
                     .is_some()
                 {
                     changed = true;
@@ -3952,6 +4037,8 @@ impl App {
             in_flight: false,
             retry_after: None,
             review_notice: None,
+            dispatch_retry: None,
+            next_dispatch_sequence: 0,
             failure_count: 0,
             status: "preparing initial grid review".into(),
         };
@@ -4211,9 +4298,10 @@ impl App {
 
         if let Some(bytes) = bytes
             && !exited
-            && let Some(pane) = self.panes.get(index)
+            && let Some(pane) = self.panes.get_mut(index)
         {
             pane.write(&bytes)?;
+            pane.record_input_activity(&bytes);
             if changed {
                 self.status = format!("focused pane {}", index + 1);
             }
@@ -6119,7 +6207,7 @@ fn capture_goal_text(
         .push_str(&format!("\n[PANE {} OUTPUT]\n{output}", pane_index + 1));
     trim_goal_buffer(&mut goal.output_buffer);
     goal.last_output_at = Some(Instant::now());
-    if !goal.in_flight {
+    if !goal.in_flight && goal.dispatch_retry.is_none() && goal.review_notice.is_none() {
         goal.status = "waiting for quiet grid output".into();
     }
 }
@@ -6318,34 +6406,132 @@ fn goal_target_index(
     Ok(index)
 }
 
+#[derive(Debug)]
+struct PlannedGoalCommand<'a> {
+    command: &'a ManagerCommand,
+    pane_index: usize,
+    key: GoalCommandKey,
+}
+
+#[derive(Debug)]
+struct GoalCommandPlan<'a> {
+    commands: Vec<PlannedGoalCommand<'a>>,
+    skipped_successful: usize,
+}
+
 fn goal_command_plan<'a>(
     commands: &'a [ManagerCommand],
     targets: &[GoalTarget],
     current: &[GoalPaneState],
-) -> Result<Vec<(&'a ManagerCommand, usize)>, Vec<String>> {
+    successful: &BTreeSet<GoalCommandKey>,
+) -> Result<GoalCommandPlan<'a>, Vec<String>> {
     let mut planned = Vec::with_capacity(commands.len());
     let mut failures = Vec::new();
+    let mut skipped_successful = 0;
     for command in commands {
         match goal_target_index(targets, command.pane, current) {
-            Ok(index) => planned.push((command, index)),
+            Ok(index) => {
+                let target = &targets[targets
+                    .iter()
+                    .position(|target| target.pane_number == command.pane)
+                    .expect("validated goal target")];
+                let key = GoalCommandKey {
+                    pane_id: target.pane_id,
+                    pane_generation: target.pane_generation,
+                    command: command.command.clone(),
+                };
+                if successful.contains(&key) {
+                    skipped_successful += 1;
+                } else {
+                    planned.push(PlannedGoalCommand {
+                        command,
+                        pane_index: index,
+                        key,
+                    });
+                }
+            }
             Err(error) => failures.push(error),
         }
     }
     if failures.is_empty() {
-        Ok(planned)
+        Ok(GoalCommandPlan {
+            commands: planned,
+            skipped_successful,
+        })
     } else {
         Err(failures)
     }
 }
 
-fn schedule_goal_retry(goal: &mut ManagerGoal, notice: String, status: String) -> bool {
+fn next_goal_dispatch_token(goal: &mut ManagerGoal) -> PtyWriteToken {
+    goal.next_dispatch_sequence = goal.next_dispatch_sequence.wrapping_add(1);
+    if goal.next_dispatch_sequence == 0 {
+        goal.next_dispatch_sequence = 1;
+    }
+    PtyWriteToken(((goal.id as u128) << 64) | goal.next_dispatch_sequence as u128)
+}
+
+fn goal_command_label(key: &GoalCommandKey, current: &[GoalPaneState]) -> String {
+    current
+        .iter()
+        .position(|pane| pane.pane_id == key.pane_id && pane.pane_generation == key.pane_generation)
+        .map(|index| format!("PANE {}", index + 1))
+        .unwrap_or_else(|| {
+            format!(
+                "unavailable PTY {} generation {}",
+                key.pane_id.0, key.pane_generation
+            )
+        })
+}
+
+fn format_goal_dispatch_record(dispatch: &GoalDispatchRetry, current: &[GoalPaneState]) -> String {
+    let mut lines = Vec::new();
+    for key in &dispatch.successful {
+        lines.push(format!(
+            "- {} command {:?}: sent successfully; do not repeat this exact command during this retry.",
+            goal_command_label(key, current),
+            key.command
+        ));
+    }
+    for key in dispatch.pending.values() {
+        lines.push(format!(
+            "- {} command {:?}: awaiting PTY writer acknowledgement.",
+            goal_command_label(key, current),
+            key.command
+        ));
+    }
+    for (key, error) in &dispatch.failed {
+        lines.push(format!(
+            "- {} command {:?}: failed and still needs attention ({error}).",
+            goal_command_label(key, current),
+            key.command
+        ));
+    }
+    if lines.is_empty() {
+        "No pane command remains recorded for this retry.".into()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn dispatch_failure_summary(dispatch: &GoalDispatchRetry, current: &[GoalPaneState]) -> String {
+    dispatch
+        .failed
+        .iter()
+        .map(|(key, error)| format!("{} write failed: {error}", goal_command_label(key, current)))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn schedule_goal_retry(goal: &mut ManagerGoal, notice: Option<String>, status: String) -> bool {
     goal.failure_count = goal.failure_count.saturating_add(1);
-    goal.review_notice = Some(bounded_prefix(&notice, 2_048));
+    goal.review_notice = notice.map(|notice| bounded_prefix(&notice, 2_048));
     if goal.failure_count >= PANE_GOAL_MAX_FAILURES {
         goal.active = false;
         goal.output_buffer.clear();
         goal.last_output_at = None;
         goal.retry_after = None;
+        goal.dispatch_retry = None;
         goal.status = format!("stopped after repeated failures: {status}");
         return false;
     }
@@ -6359,8 +6545,93 @@ fn schedule_goal_retry(goal: &mut ManagerGoal, notice: String, status: String) -
     true
 }
 
+fn finish_goal_dispatch(goal: &mut ManagerGoal, current: &[GoalPaneState]) -> Option<String> {
+    let dispatch = goal.dispatch_retry.as_ref()?;
+    if !dispatch.pending.is_empty() {
+        return None;
+    }
+
+    if dispatch.failed.is_empty() {
+        let sent = dispatch.successful.len();
+        let summary = dispatch.summary.clone();
+        goal.dispatch_retry = None;
+        goal.retry_after = None;
+        goal.failure_count = 0;
+        goal.review_notice = None;
+        goal.status = if sent == 0 {
+            if summary.is_empty() {
+                "monitoring grid".into()
+            } else {
+                format!("monitoring: {summary}")
+            }
+        } else if summary.is_empty() {
+            format!("sent {sent} pane command(s)")
+        } else {
+            format!("sent {sent} command(s): {summary}")
+        };
+        return Some(if sent == 0 {
+            "grid manager is monitoring pane output".into()
+        } else {
+            format!("grid manager sent {sent} pane command(s)")
+        });
+    }
+
+    let sent = dispatch.successful.len();
+    let error = dispatch_failure_summary(dispatch, current);
+    let retrying = schedule_goal_retry(goal, None, format!("sent {sent}; dispatch issue: {error}"));
+    Some(if retrying {
+        format!("grid manager sent {sent}; dispatch issue: {error}")
+    } else {
+        "grid manager stopped after repeated dispatch failures".into()
+    })
+}
+
+fn apply_goal_dispatch_result(
+    manager_goal: &mut Option<ManagerGoal>,
+    current: &[GoalPaneState],
+    pane: PaneId,
+    generation: u64,
+    token: PtyWriteToken,
+    result: Result<(), String>,
+) -> Option<String> {
+    let goal = manager_goal.as_mut()?;
+    let dispatch = goal.dispatch_retry.as_mut()?;
+    let key = dispatch.pending.remove(&token)?;
+    if key.pane_id != pane || key.pane_generation != generation {
+        dispatch.pending.insert(token, key);
+        return None;
+    }
+
+    match result {
+        Ok(()) => {
+            dispatch.successful.insert(key);
+        }
+        Err(error) => {
+            let label = goal_command_label(&key, current);
+            dispatch.failed.insert(key, error.clone());
+            goal.status = format!("dispatch issue for {label}: {error}");
+        }
+    }
+
+    if dispatch.pending.is_empty() {
+        return finish_goal_dispatch(goal, current);
+    }
+
+    let pending = dispatch.pending.len();
+    if dispatch.failed.is_empty() {
+        goal.status = format!("dispatching grid commands; awaiting {pending} acknowledgement(s)");
+        Some(format!(
+            "grid manager is awaiting {pending} PTY write acknowledgement(s)"
+        ))
+    } else {
+        let error = dispatch_failure_summary(dispatch, current);
+        goal.status = format!("dispatch issue: {error}; awaiting {pending} acknowledgement(s)");
+        Some(format!("grid manager dispatch issue: {error}"))
+    }
+}
+
 fn apply_goal_review(
-    panes: &[PtyPane],
+    panes: &mut [PtyPane],
     manager_goal: &mut Option<ManagerGoal>,
     sleeping: &BTreeSet<usize>,
     event: &GoalReviewEvent,
@@ -6383,65 +6654,70 @@ fn apply_goal_review(
 
     match &event.result {
         Ok(ManagerDecision::Continue { commands, summary }) => {
-            let (planned, mut failures) =
-                match goal_command_plan(commands, &event.targets, &current) {
-                    Ok(planned) => (planned, Vec::new()),
-                    Err(failures) => (Vec::new(), failures),
-                };
+            let successful = goal
+                .dispatch_retry
+                .as_ref()
+                .map(|dispatch| &dispatch.successful)
+                .cloned()
+                .unwrap_or_default();
+            let plan = match goal_command_plan(commands, &event.targets, &current, &successful) {
+                Ok(plan) => plan,
+                Err(failures) => {
+                    let error = failures.join("; ");
+                    let retrying = schedule_goal_retry(
+                        goal,
+                        Some(format!("Manager dispatch validation failed: {error}")),
+                        format!("dispatch issue: {error}"),
+                    );
+                    return Some(if retrying {
+                        format!("grid manager dispatch issue: {error}")
+                    } else {
+                        "grid manager stopped after repeated dispatch failures".into()
+                    });
+                }
+            };
 
-            let mut sent_panes = Vec::new();
-            if failures.is_empty() {
-                for (command, pane_index) in planned {
-                    match panes[pane_index].write(&paste_and_enter_bytes(&command.command)) {
-                        Ok(()) => sent_panes.push(command.pane),
-                        Err(error) => {
-                            failures.push(format!("pane {} write failed: {error:#}", command.pane))
-                        }
+            let mut dispatch = goal.dispatch_retry.take().unwrap_or_default();
+            dispatch.pending.clear();
+            dispatch.failed.clear();
+            dispatch.summary = summary.clone();
+            let dispatching = plan.commands.len();
+            let skipped_successful = plan.skipped_successful;
+            for planned in plan.commands {
+                let token = next_goal_dispatch_token(goal);
+                let bytes = paste_and_enter_bytes(&planned.command.command);
+                match panes[planned.pane_index].write_tracked(&bytes, token) {
+                    Ok(()) => {
+                        panes[planned.pane_index].record_input(&bytes);
+                        dispatch.pending.insert(token, planned.key);
+                    }
+                    Err(error) => {
+                        dispatch.failed.insert(planned.key, format!("{error:#}"));
                     }
                 }
             }
-
-            let sent = sent_panes.len();
+            goal.dispatch_retry = Some(dispatch);
             goal.retry_after = None;
-            if failures.is_empty() {
-                goal.failure_count = 0;
-                goal.review_notice = None;
-                goal.status = if sent == 0 {
-                    if summary.is_empty() {
-                        "monitoring grid".into()
-                    } else {
-                        format!("monitoring: {summary}")
-                    }
-                } else if summary.is_empty() {
-                    format!("sent {sent} pane command(s)")
+            goal.review_notice = None;
+            if goal
+                .dispatch_retry
+                .as_ref()
+                .is_some_and(|dispatch| !dispatch.pending.is_empty())
+            {
+                goal.status = if skipped_successful == 0 {
+                    format!(
+                        "dispatching {dispatching} grid command(s); awaiting PTY acknowledgement"
+                    )
                 } else {
-                    format!("sent {sent} command(s): {summary}")
+                    format!(
+                        "dispatching {dispatching} grid command(s); skipped {skipped_successful} already sent"
+                    )
                 };
-                Some(if sent == 0 {
-                    "grid manager is monitoring pane output".into()
-                } else {
-                    format!("grid manager sent {sent} pane command(s)")
-                })
+                Some(format!(
+                    "grid manager queued {dispatching} pane command(s) for acknowledged delivery"
+                ))
             } else {
-                let error = failures.join("; ");
-                let success = if sent_panes.is_empty() {
-                    "no commands were sent".into()
-                } else {
-                    format!("commands were already sent to panes {sent_panes:?}")
-                };
-                let notice = format!(
-                    "Prior dispatch result: {success}; failed commands: {error}. Do not repeat successful commands unless newer pane output requires it."
-                );
-                let retrying = schedule_goal_retry(
-                    goal,
-                    notice,
-                    format!("sent {sent}; dispatch issue: {error}"),
-                );
-                Some(if retrying {
-                    format!("grid manager sent {sent}; dispatch issue: {error}")
-                } else {
-                    "grid manager stopped after repeated dispatch failures".into()
-                })
+                finish_goal_dispatch(goal, &current)
             }
         }
         Ok(ManagerDecision::Done(summary)) => {
@@ -6450,6 +6726,7 @@ fn apply_goal_review(
             goal.last_output_at = None;
             goal.retry_after = None;
             goal.review_notice = None;
+            goal.dispatch_retry = None;
             goal.failure_count = 0;
             goal.status = if summary.is_empty() {
                 "goal complete".into()
@@ -6465,7 +6742,7 @@ fn apply_goal_review(
             } else {
                 format!("{prior}\nManager API error while reviewing that record: {error}")
             };
-            let retrying = schedule_goal_retry(goal, notice, format!("API error: {error}"));
+            let retrying = schedule_goal_retry(goal, Some(notice), format!("API error: {error}"));
             Some(if retrying {
                 format!("grid manager error: {error}")
             } else {
@@ -8244,6 +8521,8 @@ mod selection_tests {
             in_flight: false,
             retry_after: None,
             review_notice: None,
+            dispatch_retry: None,
+            next_dispatch_sequence: 0,
             failure_count: 0,
             status: String::new(),
         });
@@ -8267,6 +8546,8 @@ mod selection_tests {
             in_flight: false,
             retry_after: None,
             review_notice: None,
+            dispatch_retry: None,
+            next_dispatch_sequence: 0,
             failure_count: 0,
             status: String::new(),
         });
@@ -8353,11 +8634,14 @@ mod selection_tests {
                 command: "review the implementation".into(),
             },
         ];
-        let plan = goal_command_plan(&commands, &targets, &reordered).unwrap();
-        assert_eq!(plan[0].1, 1);
-        assert_eq!(plan[1].1, 0);
-        assert_eq!(plan[0].0.command, "implement the change");
-        assert_eq!(plan[1].0.command, "review the implementation");
+        let plan = goal_command_plan(&commands, &targets, &reordered, &BTreeSet::new()).unwrap();
+        assert_eq!(plan.commands[0].pane_index, 1);
+        assert_eq!(plan.commands[1].pane_index, 0);
+        assert_eq!(plan.commands[0].command.command, "implement the change");
+        assert_eq!(
+            plan.commands[1].command.command,
+            "review the implementation"
+        );
     }
 
     #[test]
@@ -8405,6 +8689,227 @@ mod selection_tests {
     }
 
     #[test]
+    fn manager_goal_partial_retry_uses_current_labels_after_reorder() {
+        let sent = GoalCommandKey {
+            pane_id: PaneId(10),
+            pane_generation: 2,
+            command: "implement the change".into(),
+        };
+        let failed = GoalCommandKey {
+            pane_id: PaneId(20),
+            pane_generation: 4,
+            command: "review the implementation".into(),
+        };
+        let dispatch = GoalDispatchRetry {
+            successful: BTreeSet::from([sent]),
+            failed: BTreeMap::from([(failed, "broken pipe".into())]),
+            ..Default::default()
+        };
+        let reordered = vec![
+            GoalPaneState {
+                pane_id: PaneId(20),
+                pane_generation: 4,
+                screen_revision: 10,
+                input_revision: 5,
+                unavailable: false,
+            },
+            GoalPaneState {
+                pane_id: PaneId(10),
+                pane_generation: 2,
+                screen_revision: 8,
+                input_revision: 4,
+                unavailable: false,
+            },
+        ];
+
+        let record = format_goal_dispatch_record(&dispatch, &reordered);
+        assert!(record.contains("PANE 2 command \"implement the change\": sent successfully"));
+        assert!(record.contains("PANE 1 command \"review the implementation\": failed"));
+        assert!(!record.contains("PANE 1 command \"implement the change\""));
+    }
+
+    #[test]
+    fn manager_goal_retry_skips_successful_command_without_duplicates_after_reorder() {
+        let successful = BTreeSet::from([GoalCommandKey {
+            pane_id: PaneId(10),
+            pane_generation: 2,
+            command: "implement the change".into(),
+        }]);
+        let targets = vec![
+            GoalTarget {
+                pane_number: 1,
+                pane_id: PaneId(20),
+                pane_generation: 4,
+                screen_revision: 10,
+                input_revision: 5,
+            },
+            GoalTarget {
+                pane_number: 2,
+                pane_id: PaneId(10),
+                pane_generation: 2,
+                screen_revision: 8,
+                input_revision: 4,
+            },
+        ];
+        let current = targets
+            .iter()
+            .map(|target| GoalPaneState {
+                pane_id: target.pane_id,
+                pane_generation: target.pane_generation,
+                screen_revision: target.screen_revision,
+                input_revision: target.input_revision,
+                unavailable: false,
+            })
+            .collect::<Vec<_>>();
+        let commands = vec![
+            ManagerCommand {
+                pane: 2,
+                command: "implement the change".into(),
+            },
+            ManagerCommand {
+                pane: 1,
+                command: "review the implementation".into(),
+            },
+        ];
+
+        let plan = goal_command_plan(&commands, &targets, &current, &successful).unwrap();
+        assert_eq!(plan.skipped_successful, 1);
+        assert_eq!(plan.commands.len(), 1);
+        assert_eq!(plan.commands[0].pane_index, 0);
+        assert_eq!(plan.commands[0].key.pane_id, PaneId(20));
+        assert_eq!(
+            plan.commands[0].command.command,
+            "review the implementation"
+        );
+    }
+
+    #[test]
+    fn manager_goal_async_write_failure_restores_visible_bounded_retry() {
+        let token = PtyWriteToken(17);
+        let key = GoalCommandKey {
+            pane_id: PaneId(20),
+            pane_generation: 4,
+            command: "review the implementation".into(),
+        };
+        let mut goal = Some(ManagerGoal {
+            id: 1,
+            objective: "ship the grid".into(),
+            active: true,
+            output_buffer: String::new(),
+            last_output_at: None,
+            in_flight: false,
+            retry_after: None,
+            review_notice: None,
+            dispatch_retry: Some(GoalDispatchRetry {
+                pending: BTreeMap::from([(token, key.clone())]),
+                summary: "delegated review".into(),
+                ..Default::default()
+            }),
+            next_dispatch_sequence: 1,
+            failure_count: 0,
+            status: "dispatching".into(),
+        });
+        let current = [GoalPaneState {
+            pane_id: PaneId(20),
+            pane_generation: 4,
+            screen_revision: 10,
+            input_revision: 5,
+            unavailable: false,
+        }];
+
+        let status = apply_goal_dispatch_result(
+            &mut goal,
+            &current,
+            PaneId(20),
+            4,
+            token,
+            Err("broken pipe".into()),
+        )
+        .expect("handled tracked manager failure");
+        let goal = goal.as_ref().unwrap();
+        assert!(status.contains("dispatch issue"));
+        assert!(goal.status.contains("PANE 1 write failed: broken pipe"));
+        assert!(goal.active);
+        assert_eq!(goal.failure_count, 1);
+        assert!(goal.retry_after.is_some());
+        assert_eq!(
+            goal.dispatch_retry
+                .as_ref()
+                .and_then(|dispatch| dispatch.failed.get(&key))
+                .map(String::as_str),
+            Some("broken pipe")
+        );
+    }
+
+    #[test]
+    fn manager_goal_waits_for_writer_ack_before_marking_dispatch_successful() {
+        let token = PtyWriteToken(23);
+        let key = GoalCommandKey {
+            pane_id: PaneId(40),
+            pane_generation: 8,
+            command: "run the targeted tests".into(),
+        };
+        let mut goal = Some(ManagerGoal {
+            id: 2,
+            objective: "verify the grid".into(),
+            active: true,
+            output_buffer: String::new(),
+            last_output_at: None,
+            in_flight: false,
+            retry_after: None,
+            review_notice: None,
+            dispatch_retry: Some(GoalDispatchRetry {
+                pending: BTreeMap::from([(token, key)]),
+                summary: "tests delegated".into(),
+                ..Default::default()
+            }),
+            next_dispatch_sequence: 1,
+            failure_count: 0,
+            status: "dispatching".into(),
+        });
+        let current = [GoalPaneState {
+            pane_id: PaneId(40),
+            pane_generation: 8,
+            screen_revision: 3,
+            input_revision: 2,
+            unavailable: false,
+        }];
+
+        assert!(finish_goal_dispatch(goal.as_mut().unwrap(), &current).is_none());
+        assert_eq!(goal.as_ref().unwrap().status, "dispatching");
+
+        let status = apply_goal_dispatch_result(&mut goal, &current, PaneId(40), 8, token, Ok(()))
+            .expect("handled tracked acknowledgement");
+        let goal = goal.as_ref().unwrap();
+        assert_eq!(status, "grid manager sent 1 pane command(s)");
+        assert_eq!(goal.status, "sent 1 command(s): tests delegated");
+        assert!(goal.dispatch_retry.is_none());
+    }
+
+    #[test]
+    fn manager_goal_stale_review_detects_history_free_mouse_input_activity() {
+        let targets = [GoalTarget {
+            pane_number: 1,
+            pane_id: PaneId(30),
+            pane_generation: 6,
+            screen_revision: 12,
+            input_revision: 7,
+        }];
+        let after_forwarded_mouse_input = [GoalPaneState {
+            pane_id: PaneId(30),
+            pane_generation: 6,
+            screen_revision: 12,
+            input_revision: 8,
+            unavailable: false,
+        }];
+
+        assert!(goal_snapshot_is_stale(
+            &targets,
+            &after_forwarded_mouse_input
+        ));
+    }
+
+    #[test]
     fn manager_goal_stops_after_bounded_retries() {
         let mut goal = ManagerGoal {
             id: 1,
@@ -8415,6 +8920,8 @@ mod selection_tests {
             in_flight: false,
             retry_after: None,
             review_notice: None,
+            dispatch_retry: None,
+            next_dispatch_sequence: 0,
             failure_count: 0,
             status: String::new(),
         };
@@ -8422,14 +8929,14 @@ mod selection_tests {
         for attempt in 1..PANE_GOAL_MAX_FAILURES {
             assert!(schedule_goal_retry(
                 &mut goal,
-                format!("attempt {attempt}"),
+                Some(format!("attempt {attempt}")),
                 "temporary failure".into()
             ));
             assert!(goal.active);
         }
         assert!(!schedule_goal_retry(
             &mut goal,
-            "final attempt".into(),
+            Some("final attempt".into()),
             "permanent failure".into()
         ));
         assert!(!goal.active);

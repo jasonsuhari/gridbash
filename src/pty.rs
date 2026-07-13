@@ -47,8 +47,39 @@ pub enum PtyEvent {
     WriteFailed {
         pane: PaneId,
         generation: u64,
+        token: Option<PtyWriteToken>,
         error: String,
     },
+    WriteSucceeded {
+        pane: PaneId,
+        generation: u64,
+        token: PtyWriteToken,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PtyWriteToken(pub u128);
+
+#[derive(Debug)]
+struct PtyWrite {
+    bytes: Vec<u8>,
+    token: Option<PtyWriteToken>,
+}
+
+impl PtyWrite {
+    fn untracked(bytes: &[u8]) -> Self {
+        Self {
+            bytes: bytes.to_vec(),
+            token: None,
+        }
+    }
+
+    fn tracked(bytes: &[u8], token: PtyWriteToken) -> Self {
+        Self {
+            bytes: bytes.to_vec(),
+            token: Some(token),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -90,7 +121,7 @@ pub struct PtyPane {
     generation: u64,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send>,
-    writer: SyncSender<Vec<u8>>,
+    writer: SyncSender<PtyWrite>,
     workload: PaneWorkloadController,
     workload_error: Option<String>,
     parser: Parser,
@@ -271,10 +302,12 @@ impl PtyPane {
     }
 
     pub fn record_input(&mut self, bytes: &[u8]) {
-        if !bytes.is_empty() {
-            self.input_revision = self.input_revision.wrapping_add(1);
-        }
+        self.record_input_activity(bytes);
         record_input_bytes(bytes, &mut self.pending_input, &mut self.input_history);
+    }
+
+    pub fn record_input_activity(&mut self, bytes: &[u8]) {
+        advance_input_revision(&mut self.input_revision, bytes);
     }
 
     pub fn input_revision(&self) -> u64 {
@@ -310,7 +343,15 @@ impl PtyPane {
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
-        match self.writer.try_send(bytes.to_vec()) {
+        self.enqueue_write(PtyWrite::untracked(bytes))
+    }
+
+    pub fn write_tracked(&self, bytes: &[u8], token: PtyWriteToken) -> Result<()> {
+        self.enqueue_write(PtyWrite::tracked(bytes, token))
+    }
+
+    fn enqueue_write(&self, write: PtyWrite) -> Result<()> {
+        match self.writer.try_send(write) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => Err(anyhow!("PTY input queue is full")),
             Err(TrySendError::Disconnected(_)) => Err(anyhow!("PTY writer has stopped")),
@@ -562,25 +603,54 @@ fn spawn_writer(
     generation: u64,
     event_tx: mpsc::Sender<PtyEvent>,
     mut writer: Box<dyn Write + Send>,
-) -> SyncSender<Vec<u8>> {
-    let (tx, rx) = sync_channel::<Vec<u8>>(PTY_WRITE_QUEUE_MESSAGES);
+) -> SyncSender<PtyWrite> {
+    let (tx, rx) = sync_channel::<PtyWrite>(PTY_WRITE_QUEUE_MESSAGES);
     thread::spawn(move || {
-        while let Ok(bytes) = rx.recv() {
+        while let Ok(write) = rx.recv() {
             let result = writer
-                .write_all(&bytes)
+                .write_all(&write.bytes)
                 .and_then(|()| writer.flush())
                 .context("failed to write to PTY");
-            if let Err(error) = result {
-                let _ = event_tx.blocking_send(PtyEvent::WriteFailed {
-                    pane,
-                    generation,
-                    error: format!("{error:#}"),
-                });
-                break;
+            match result {
+                Ok(()) => {
+                    if let Some(token) = write.token {
+                        let _ = event_tx.blocking_send(PtyEvent::WriteSucceeded {
+                            pane,
+                            generation,
+                            token,
+                        });
+                    }
+                }
+                Err(error) => {
+                    let error = format!("{error:#}");
+                    let _ = event_tx.blocking_send(PtyEvent::WriteFailed {
+                        pane,
+                        generation,
+                        token: write.token,
+                        error: error.clone(),
+                    });
+                    for queued in rx.try_iter().filter(|queued| queued.token.is_some()) {
+                        let _ = event_tx.blocking_send(PtyEvent::WriteFailed {
+                            pane,
+                            generation,
+                            token: queued.token,
+                            error: format!(
+                                "PTY writer stopped before queued input was written: {error}"
+                            ),
+                        });
+                    }
+                    break;
+                }
             }
         }
     });
     tx
+}
+
+fn advance_input_revision(revision: &mut u64, bytes: &[u8]) {
+    if !bytes.is_empty() {
+        *revision = revision.wrapping_add(1);
+    }
 }
 
 fn contains_sequence(buffer: &[u8], sequence: &[u8]) -> bool {
@@ -1016,8 +1086,12 @@ mod tests {
             event_tx,
             Box::new(SharedWriter(output.clone())),
         );
-        writer.send(b"first".to_vec()).expect("first write");
-        writer.send(b"-second".to_vec()).expect("second write");
+        writer
+            .send(PtyWrite::untracked(b"first"))
+            .expect("first write");
+        writer
+            .send(PtyWrite::untracked(b"-second"))
+            .expect("second write");
 
         let deadline = Instant::now() + Duration::from_secs(1);
         while output.lock().expect("output").len() < 12 && Instant::now() < deadline {
@@ -1030,7 +1104,10 @@ mod tests {
     fn writer_worker_reports_asynchronous_failures() {
         let (event_tx, mut event_rx) = mpsc::channel(4);
         let writer = spawn_writer(PaneId(4), 2, event_tx, Box::new(FailingWriter));
-        writer.send(b"input".to_vec()).expect("queue input");
+        let token = PtyWriteToken(42);
+        writer
+            .send(PtyWrite::tracked(b"input", token))
+            .expect("queue input");
 
         let event = event_rx.blocking_recv().expect("write failure event");
         assert!(matches!(
@@ -1038,9 +1115,47 @@ mod tests {
             PtyEvent::WriteFailed {
                 pane: PaneId(4),
                 generation: 2,
+                token: Some(value),
                 ..
-            }
+            } if value == token
         ));
+    }
+
+    #[test]
+    fn writer_worker_acknowledges_tracked_input_after_flush() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let writer = spawn_writer(
+            PaneId(5),
+            3,
+            event_tx,
+            Box::new(SharedWriter(output.clone())),
+        );
+        let token = PtyWriteToken(99);
+        writer
+            .send(PtyWrite::tracked(b"tracked", token))
+            .expect("queue tracked input");
+
+        let event = event_rx.blocking_recv().expect("write acknowledgement");
+        assert!(matches!(
+            event,
+            PtyEvent::WriteSucceeded {
+                pane: PaneId(5),
+                generation: 3,
+                token: value,
+            } if value == token
+        ));
+        assert_eq!(&*output.lock().expect("output"), b"tracked");
+    }
+
+    #[test]
+    fn input_activity_revision_can_skip_command_history() {
+        let mut revision = 7;
+        advance_input_revision(&mut revision, b"\x1b[<65;10;4M");
+        assert_eq!(revision, 8);
+
+        advance_input_revision(&mut revision, b"");
+        assert_eq!(revision, 8);
     }
 
     #[test]
@@ -1215,6 +1330,7 @@ mod tests {
                     }
                     PtyEvent::Exited { .. } => pane.exited = true,
                     PtyEvent::WriteFailed { error, .. } => panic!("PTY write failed: {error}"),
+                    PtyEvent::WriteSucceeded { .. } => {}
                 }
             }
 
@@ -1277,6 +1393,7 @@ mod tests {
                     }
                     PtyEvent::Exited { .. } => pane.exited = true,
                     PtyEvent::WriteFailed { error, .. } => panic!("PTY write failed: {error}"),
+                    PtyEvent::WriteSucceeded { .. } => {}
                 }
             }
 

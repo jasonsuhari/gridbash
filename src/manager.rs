@@ -14,6 +14,7 @@ const MAX_COMMAND_BYTES: usize = 4 * 1024;
 const MAX_SUMMARY_CHARS: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManagerCommand {
     pub pane: usize,
     pub command: String,
@@ -44,6 +45,7 @@ struct ChatMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DecisionPayload {
     status: String,
     #[serde(default)]
@@ -154,6 +156,18 @@ pub(crate) fn parse_decision(content: &str) -> Result<ManagerDecision> {
                     command.pane
                 ));
             }
+            if contains_markdown_fence(&command.command) {
+                return Err(anyhow!(
+                    "manager command for pane {} contained a Markdown fence",
+                    command.pane
+                ));
+            }
+            if contains_routing_syntax(&command.command) {
+                return Err(anyhow!(
+                    "manager command for pane {} contained routing syntax",
+                    command.pane
+                ));
+            }
             if !targeted_panes.insert(command.pane) {
                 return Err(anyhow!(
                     "manager returned multiple commands for pane {}",
@@ -175,6 +189,43 @@ pub(crate) fn parse_decision(content: &str) -> Result<ManagerDecision> {
         "done" => Ok(ManagerDecision::Done(summary)),
         status => Err(anyhow!("unknown manager decision status '{status}'")),
     }
+}
+
+fn contains_markdown_fence(command: &str) -> bool {
+    command.contains("```") || command.contains("~~~")
+}
+
+fn contains_routing_syntax(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let compact = lower.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = compact.trim_start();
+    let explicit_markers = [
+        "<|recipient|>",
+        "<|channel|>",
+        "<recipient",
+        "</recipient",
+        "to=",
+        "recipient=",
+        "recipient:",
+        "target=",
+        "pane=",
+        "@pane",
+        "\"pane\":",
+        "/root/",
+    ];
+    if explicit_markers
+        .iter()
+        .any(|marker| compact.contains(marker))
+    {
+        return true;
+    }
+
+    trimmed.match_indices("pane ").any(|(index, _)| {
+        let rest = &trimmed[index + "pane ".len()..];
+        let rest = rest.strip_prefix('#').unwrap_or(rest);
+        let digit_count = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        digit_count > 0 && rest[digit_count..].trim_start().starts_with([':', '='])
+    })
 }
 
 fn truncate_error(value: &str) -> String {
@@ -294,5 +345,60 @@ mod tests {
                 .to_string()
                 .contains("size limit")
         );
+
+        for fenced in [
+            "run ```cargo test```",
+            "~~~sh cargo test",
+            "run ~~~cargo test~~~",
+        ] {
+            let payload = json!({
+                "status": "continue",
+                "commands": [{"pane": 1, "command": fenced}]
+            });
+            assert!(
+                parse_decision(&payload.to_string())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Markdown fence")
+            );
+        }
+
+        for routed in [
+            "pane 2: run tests",
+            "ask pane 2: run tests",
+            "to=/root/reviewer check the diff",
+            "<|recipient|>collaboration.send_message",
+            r#"send {"pane":2,"command":"run tests"}"#,
+        ] {
+            let payload = json!({
+                "status": "continue",
+                "commands": [{"pane": 1, "command": routed}]
+            });
+            assert!(
+                parse_decision(&payload.to_string())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("routing syntax"),
+                "accepted routed command: {routed}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_or_misspelled_decision_fields() {
+        for payload in [
+            r#"{"status":"done","summmary":"typo"}"#,
+            r#"{"status":"continue","command":[]}"#,
+            r#"{"status":"continue","commands":[{"pan":1,"command":"test"}]}"#,
+            r#"{"status":"continue","commands":[{"pane":1,"command":"test","target":2}]}"#,
+        ] {
+            assert!(
+                parse_decision(payload)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("decision object"),
+                "accepted unknown field in: {payload}"
+            );
+        }
     }
 }
