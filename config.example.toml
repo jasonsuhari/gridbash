@@ -1,5 +1,6 @@
 [defaults]
-profile = "git-bash"
+# Set this to a key reported by `gridbash --list-profiles`.
+# profile = "git-bash"
 # Keeps compilers and other pane workloads from starving interactive desktop apps.
 pane_priority = "below-normal"
 # Shares CPU fairly under contention while keeping every pane process running.
@@ -32,7 +33,8 @@ prompts = [
 ]
 
 [auth]
-home = "C:\\Users\\Jason\\.gridbash-auth"
+# Optional absolute directory for isolated Claude and Codex profiles.
+# home = "C:\\Users\\you\\.gridbash-auth"
 auto_cycle = false
 usage_status = true
 
