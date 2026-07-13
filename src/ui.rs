@@ -833,9 +833,9 @@ fn pane_settings_lines(
     lines.push(settings_section(
         "PANE CONTROLS",
         if view.manager_configured {
-            "manager API ready"
+            "grid manager ready to orchestrate panes"
         } else {
-            "configure Manager in global settings"
+            "configure the grid Manager in global settings"
         },
         width,
     ));
@@ -844,7 +844,7 @@ fn pane_settings_lines(
             Span::raw("  "),
             Span::styled(
                 truncate_text(
-                    &format!("goal: {} | {}", goal.objective, goal.status),
+                    &format!("grid goal: {} | {}", goal.objective, goal.status),
                     width.saturating_sub(2) as usize,
                 ),
                 Style::default().fg(Color::LightCyan),
@@ -882,7 +882,7 @@ fn render_goal_editor(frame: &mut Frame<'_>, area: Rect, editor: &GoalEditorView
     };
     frame.render_widget(Clear, prompt_area);
     let input = if editor.input.is_empty() {
-        "Describe the goal for this pane...".into()
+        "Describe the goal for this grid...".into()
     } else {
         format!("{}_", editor.input)
     };
@@ -905,7 +905,7 @@ fn render_goal_editor(frame: &mut Frame<'_>, area: Rect, editor: &GoalEditorView
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::LightCyan))
-        .title(format!(" Pane {} manager goal ", editor.pane_number));
+        .title(" Grid manager goal ");
     frame.render_widget(
         Paragraph::new(lines)
             .block(block)
@@ -929,9 +929,9 @@ fn pane_settings_sleep_line(width: u16, sleeping: bool, palette: &GridPalette) -
 fn pane_settings_goal_line(width: u16, has_goal: bool, palette: &GridPalette) -> Line<'static> {
     pane_settings_action_line(
         if has_goal {
-            "[ Edit manager goal ]"
+            "[ Edit grid goal ]"
         } else {
-            "[ Set manager goal ]"
+            "[ Set grid goal ]"
         },
         width,
         palette.accent(),
@@ -939,7 +939,7 @@ fn pane_settings_goal_line(width: u16, has_goal: bool, palette: &GridPalette) ->
 }
 
 fn pane_settings_stop_goal_line(width: u16, palette: &GridPalette) -> Line<'static> {
-    pane_settings_action_line("[ Stop manager goal ]", width, palette.exited())
+    pane_settings_action_line("[ Stop grid goal ]", width, palette.exited())
 }
 
 fn pane_settings_action_line(label: &str, width: u16, background: Color) -> Line<'static> {
@@ -967,7 +967,7 @@ fn pane_settings_command_bar(width: u16, has_auth: bool) -> Line<'static> {
             command_key("z"),
             Span::styled(" sleep  ", Style::default().fg(Color::Gray)),
             command_key("g"),
-            Span::styled(" goal  ", Style::default().fg(Color::Gray)),
+            Span::styled(" grid goal  ", Style::default().fg(Color::Gray)),
             command_key("u"),
             Span::styled(" stop  ", Style::default().fg(Color::Gray)),
             command_key("Esc"),
@@ -984,7 +984,7 @@ fn pane_settings_command_bar(width: u16, has_auth: bool) -> Line<'static> {
         command_key("z"),
         Span::styled(" sleep/wake  ", Style::default().fg(Color::Gray)),
         command_key("g"),
-        Span::styled(" goal  ", Style::default().fg(Color::Gray)),
+        Span::styled(" grid goal  ", Style::default().fg(Color::Gray)),
         command_key("u"),
         Span::styled(" stop  ", Style::default().fg(Color::Gray)),
     ];
@@ -1945,8 +1945,8 @@ fn manager_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         settings_tabs(SettingsTab::Manager),
         Line::from(""),
         settings_section(
-            "PANE MANAGER API",
-            "one isolated goal manager per pane",
+            "GRID MANAGER API",
+            "one goal manager orchestrates all awake panes in the current grid",
             width,
         ),
         Line::from(vec![
@@ -2374,7 +2374,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
         ("Alt+r", "rename focused pane"),
         ("Alt+Shift+t", "restart exited panes"),
         ("Alt+z", "sleep or wake panes"),
-        ("Alt+g / Alt+u", "start or stop pane goal"),
+        ("Alt+g / Alt+u", "start or stop grid goal"),
         ("Alt+o", "open global settings/profiles"),
         ("Alt+Shift+V", "dictate without submitting"),
         ("Alt+q", "quit GridBash"),

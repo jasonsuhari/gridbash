@@ -103,6 +103,7 @@ pub struct PtyPane {
     osc_scan_tail: Vec<u8>,
     input_history: Vec<String>,
     pending_input: String,
+    input_revision: u64,
     output_tail: String,
     output_tail_chars: usize,
     pub active: bool,
@@ -199,6 +200,7 @@ impl PtyPane {
             osc_scan_tail: Vec::new(),
             input_history: Vec::new(),
             pending_input: String::new(),
+            input_revision: 0,
             output_tail: String::new(),
             output_tail_chars: 0,
             active: false,
@@ -269,7 +271,14 @@ impl PtyPane {
     }
 
     pub fn record_input(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.input_revision = self.input_revision.wrapping_add(1);
+        }
         record_input_bytes(bytes, &mut self.pending_input, &mut self.input_history);
+    }
+
+    pub fn input_revision(&self) -> u64 {
+        self.input_revision
     }
 
     pub fn input_history(&self) -> &[String] {
