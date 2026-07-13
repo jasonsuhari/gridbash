@@ -302,7 +302,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+t | Switch to the next tab |
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
-| Alt+c | Focus or unfocus the command bar |
+| Alt+c | Expand and focus the command line, or close it when focused |
 | Alt+Shift+V | Listen for one dictated utterance; press again to cancel |
 | Alt+h or F1 | Open or close the in-app help and shortcut legend |
 | Alt+p | Open a focused-pane activity summary with its latest meaningful terminal output |
@@ -314,7 +314,6 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+g | Create or edit the focused pane's manager goal |
 | Alt+u | Stop the focused pane's manager goal |
 | Hover sleeping pane | Wake the pane and make its terminal contents visible again |
-| Alt+e | Expand or hide command output |
 | Alt+o | Open settings |
 | Alt+q | Quit |
 
@@ -335,7 +334,7 @@ When the focused pane has exited, GridBash shows a recovery dialog. Press `Enter
 `r`, or `t` to restart it, or press `z` to put it to sleep. `Alt+Shift+t` restarts
 exited target panes directly.
 
-Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane. When the one-line command bar is focused, typing stays in that bar; Enter runs the command from the cwd shown in the prompt and keeps output hidden until expanded.
+Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane. Alt+C expands and focuses the command line with its captured output visible; typing stays in the command bar, and Enter runs the command from the cwd shown in the prompt. Press Alt+C again to close it and return input to the pane grid.
 
 The grid resizer uses the same row-and-column picker as startup, with active cells
 shown in blue. Shrinking removes live panes outside the retained upper-left
