@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="480" viewBox="0 0 960 480" role="img" aria-labelledby="chart-title chart-description">
+  <title id="chart-title">jasonsuhari/gridbash GitHub star history</title>
+  <desc id="chart-description">Cumulative GitHub stars from Jul 5, 2026 through Jul 13, 2026. Current total: 41 stars.</desc>
+  <defs>
+    <linearGradient id="area-gradient" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.38" />
+      <stop offset="100%" stop-color="#3b82f6" stop-opacity="0.03" />
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+    </filter>
+  </defs>
+  <style>
+    .background { fill: #ffffff; }
+    .title { fill: #111827; font: 700 24px ui-sans-serif, system-ui, sans-serif; }
+    .subtitle { fill: #6b7280; font: 14px ui-sans-serif, system-ui, sans-serif; }
+    .axis-label { fill: #6b7280; font: 12px ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .grid { stroke: #e5e7eb; stroke-width: 1; }
+    .vertical { stroke-dasharray: 3 6; }
+    .line { fill: none; stroke: #2563eb; stroke-width: 4; stroke-linecap: round; stroke-linejoin: round; }
+    .point { fill: #2563eb; stroke: #ffffff; stroke-width: 3; }
+    .count { fill: #2563eb; font: 700 16px ui-sans-serif, system-ui, sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      .background { fill: #0d1117; }
+      .title { fill: #f0f6fc; }
+      .subtitle, .axis-label { fill: #8b949e; }
+      .grid { stroke: #30363d; }
+      .line { stroke: #58a6ff; }
+      .point { fill: #58a6ff; stroke: #0d1117; }
+      .count { fill: #58a6ff; }
+    }
+  </style>
+  <rect class="background" width="960" height="480" rx="18" />
+  <text class="title" x="72" y="38">Star history</text>
+  <text class="subtitle" x="72" y="61">jasonsuhari/gridbash · updated 2026-07-13</text>
+  <line class="grid" x1="72" y1="412.00" x2="918" y2="412.00" />
+<text class="axis-label" x="58" y="417.00" text-anchor="end">0</text>
+<line class="grid" x1="72" y1="345.20" x2="918" y2="345.20" />
+<text class="axis-label" x="58" y="350.20" text-anchor="end">10</text>
+<line class="grid" x1="72" y1="278.40" x2="918" y2="278.40" />
+<text class="axis-label" x="58" y="283.40" text-anchor="end">20</text>
+<line class="grid" x1="72" y1="211.60" x2="918" y2="211.60" />
+<text class="axis-label" x="58" y="216.60" text-anchor="end">30</text>
+<line class="grid" x1="72" y1="144.80" x2="918" y2="144.80" />
+<text class="axis-label" x="58" y="149.80" text-anchor="end">40</text>
+<line class="grid" x1="72" y1="78.00" x2="918" y2="78.00" />
+<text class="axis-label" x="58" y="83.00" text-anchor="end">50</text>
+  <line class="grid vertical" x1="72.00" y1="78" x2="72.00" y2="412" />
+<text class="axis-label" x="72.00" y="442" text-anchor="middle">Jul 5, 2026</text>
+<line class="grid vertical" x1="283.50" y1="78" x2="283.50" y2="412" />
+<text class="axis-label" x="283.50" y="442" text-anchor="middle">Jul 7, 2026</text>
+<line class="grid vertical" x1="495.00" y1="78" x2="495.00" y2="412" />
+<text class="axis-label" x="495.00" y="442" text-anchor="middle">Jul 9, 2026</text>
+<line class="grid vertical" x1="706.50" y1="78" x2="706.50" y2="412" />
+<text class="axis-label" x="706.50" y="442" text-anchor="middle">Jul 11, 2026</text>
+<line class="grid vertical" x1="918.00" y1="78" x2="918.00" y2="412" />
+<text class="axis-label" x="918.00" y="442" text-anchor="middle">Jul 13, 2026</text>
+  <path d="M 72.00,412.00 L 389.25,331.84 L 495.00,285.08 L 600.75,238.32 L 706.50,178.20 L 812.25,144.80 L 918.00,138.12 L 918.00,412.00 L 72,412.00 Z" fill="url(#area-gradient)" />
+  <path class="line" d="M 72.00,412.00 L 389.25,331.84 L 495.00,285.08 L 600.75,238.32 L 706.50,178.20 L 812.25,144.80 L 918.00,138.12" />
+  <circle class="point" cx="918.00" cy="138.12" r="6" filter="url(#glow)" />
+  <text class="count" x="906.00" y="124.12" text-anchor="end">41 ★</text>
+</svg>

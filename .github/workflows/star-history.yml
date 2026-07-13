@@ -1,0 +1,44 @@
+name: Refresh Star History
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: refresh-star-history
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Update README chart
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: true
+
+      - name: Generate star history chart
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node npm/scripts/update-star-history.js
+
+      - name: Commit updated chart
+        shell: bash
+        run: |
+          if [[ -z "$(git status --porcelain -- docs/assets/gridbash-star-history.svg)" ]]; then
+            echo "Star history chart is already current."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/assets/gridbash-star-history.svg
+          git commit --signoff -m "docs: refresh star history chart"
+          git push

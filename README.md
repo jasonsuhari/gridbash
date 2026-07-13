@@ -68,6 +68,12 @@ agents are all part of the same development session.
 - The [v1.0 acceptance checklist](docs/V1_ACCEPTANCE.md) defines the stable-release gates.
 - The [daemon architecture proposal](docs/DAEMON_ARCHITECTURE.md) defines the detach/reattach direction beyond v1.
 
+## Star History
+
+[![GridBash GitHub star history chart](docs/assets/gridbash-star-history.svg)](https://github.com/jasonsuhari/gridbash/stargazers)
+
+_Refreshed daily by the [Star History workflow](https://github.com/jasonsuhari/gridbash/actions/workflows/star-history.yml). Click the chart to see the current stargazers._
+
 ## Highlights
 
 - Real PTY-backed panes through Windows ConPTY or Unix PTYs via `portable-pty`.
