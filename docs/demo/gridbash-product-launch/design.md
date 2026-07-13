@@ -1,82 +1,84 @@
-# GridBash Product Launch Design
+# GridBash Product Launch — Tactile Cut-Paper System
 
 ## Visual world
 
-Jason’s real desk becomes the operator station for a coding-agent dispatch room.
-The physical camera frame is never replaced by a synthetic backdrop: terminal
-routes, focus rails, and real product footage attach to the desk and laptop as
-if the GridBash control system is waking up around him.
+The film looks hand-built in After Effects from thick paper and matte clay sheets.
+Shapes are flat and graphic, but soft offset shadows give them one shallow layer
+of depth. GridBash terminal footage is the only dense surface; everything around
+it is quiet, oversized, and deliberately composed.
+
+The dominant metaphor is an editor's cutting table: cards slide into register,
+routes draw like cord laid on paper, windows stack, and branch strips peel away.
+Motion is orthographic and shape-led. There are no synthetic camera flights.
 
 ## Palette
 
-- Canvas: `#0b1118`
-- Panel: `#121720`
-- Foreground: `#f0f4f9`
-- Muted copy: `#8fa2b7`
-- GridBash green: `#29d392`
-- Focus blue: `#48a5ff`
-- Completion amber: `#ffca5c`
+- Paper: `#F3EDE1`
+- Ink: `#171817`
+- Soft ink: `#2B2C2A`
+- GridBash mint: `#78C9B6`
+- Tab yellow: `#E2C94C`
+- Paper highlight: `#FFF9EE`
 
-Use only these declared hex colors in composition CSS. For alpha, use `rgba()`
-values derived from the same palette.
+Use only these colors in composition CSS. Alpha values may be derived from them.
+Captured camera, product, and GitHub plates keep their real source colors.
 
 ## Typography
 
-- Display voice: `Archivo Black`, 400, tracking `-0.045em`.
-- Operational voice: `Cascadia Mono`, 400 and 700, tracking `0.02em` to `0.09em`.
-- Captions: Archivo Black for 2-4 word emphasis groups, Cascadia Mono for the
-  quieter connecting words.
-- Display statements: 112-176 px. Captions: 56-78 px. Operational labels: 24-32 px.
+- Display voice: `Anton`, 400, tracking `-0.025em`, line height `0.88`.
+- Operational voice: `Cascadia Mono`, 400/700, tracking `0.01em` to `0.06em`.
+- Display statements: 118–210 px.
+- Captions: `Anton`, 60–78 px, paper fill with a heavy ink outline; no pill.
+- Operational labels: 23–31 px.
+
+Headlines are short, cropped, and asymmetrical. Time is hierarchy: one phrase
+lands, holds, then makes room for the next. Never build centered web-style stacks.
 
 ## Frame and material
 
-- Master: 1920x1080, 30 fps.
-- Camera plate: 16:9 with 18 px corners and a 2 px operational border when not full frame.
-- Product plate: square-on, never perspective tilted, with a deep terminal-window shadow.
-- Structural rules: 2-4 px, anchored to the safe edges.
-- Depth: real camera atmosphere, product/UI midground, routing labels and captions foreground.
-- Add fine deterministic grain to unify the 640x360 camera with 1080p graphics; do not use grain to hide unreadable UI.
-
-## Captured GitHub repo plate
-
-- Source: `capture/github/screenshots/scroll-000.png`, captured at 1920x1080.
-- GitHub page: `#FFFFFF`; primary text/nav: `#1F2328`; muted text: `#59636E`;
-  link blue: `#0969DA`; action green: `#1F883D`; quiet surface: `#F6F8FA`.
-- Type: Mona Sans VF 400/500/600 with GitHub's system monospace for code.
-- Components: repository header, star button/count, file table, About panel, topic
-  chips, MIT resource link, release badge, and language split.
-- Present the screenshot square-on in a framed viewport. Use a slow camera crop and
-  an external GridBash-green proof rail; do not redraw GitHub or use an iframe.
+- Master: 1920×1080, 30 fps.
+- Paper canvas carries subtle deterministic fiber/noise, never a gradient.
+- Clay/paper shapes use 18–34 px corners and a soft down-right offset shadow.
+- Real UI remains square-on, sharp, and unwarped.
+- Jason's footage remains the original full frame or a simple rounded crop. Never
+  redraw his face, remove his background, or place him on a synthetic scene.
+- Every hero frame has background paper, a content plate, and foreground tabs or
+  route strokes, but no decorative filler.
 
 ## Motion language
 
-- Primary transition: velocity-matched directional push, 0.34-0.46 seconds, `power3.inOut`.
-- Accent transition: zoom-through into the product reveal, 0.48 seconds, `expo.inOut`.
-- Motion verbs: stamp, route, lock, focus, branch, resolve.
-- One ambient mechanism per scene; settled UI remains still.
+- Primary transition: a paper panel or oversized glyph wipes the full frame in
+  0.28–0.46 seconds with `power4.inOut`.
+- Accent transition: a layered paper peel reveals the product in 0.55–0.72 seconds.
+- Motion verbs: cut, stack, register, peel, route, snap, stamp, settle.
+- Entrances use visible overshoot followed by complete stillness.
+- Repeated cards enter on different axes and with different timing.
+- Route strokes draw only when the narration describes routing or branching.
 - First motion begins at 0.18 seconds.
 
 ## Sound language
 
-- Music: rhythmic industrial/editorial underscore, approximately 103 BPM.
-- Selection: short clean click family with slight pitch variation.
-- Routing: narrow tick/relay family.
-- Worktree transform: one branch whoosh.
-- Product and CTA: related impact family, with the product reveal larger.
+- Keep the existing voice, music, and restrained SFX map.
+- A pop means a card lands. A route tick means a connection is made.
+- The branch whoosh is reserved for the worktree transformation.
+- SFX sit beneath the voice and never imitate cartoon boings.
 
 ## Do
 
-- Keep Jason’s face and delivery human, warm, and legible.
-- Let the laptop and real desk motivate terminal graphics.
-- Use full product footage for routing proof.
-- Burn accurate captions for muted social viewing.
-- Hold the install command long enough to copy.
+- Use the two approved Seedance plates only as tactile motion plates.
+- Composite exact HTML text and exact real UI over any generated plate as needed.
+- Let Jason's red hoodie remain the human color contrast.
+- Use the real product demo for selection, focus, routing, and independent replies.
+- Recapture GitHub immediately before final render and use the live star count.
+- Hold `npm install -g gridbash` long enough to copy.
 
 ## Do not
 
-- Do not matte Jason out or replace the real room.
-- Do not use cyan-on-purple gradients, neon HUDs, particles, glowing orbs, or fake dashboards.
-- Do not cover Jason’s face with captions or UI.
-- Do not make the camera source the only fine-detail focal point at 1080p.
-- Do not publish cross-platform copy before the matching packages exist.
-- Do not hard-code a stale star count; the captured 2026-07-13 repo frame proves 46.
+- No chrome, glass, glossy 3D, fake cinematic cameras, neon, HUDs, or particles.
+- No generic SaaS card grids, pill captions, gradient text, or tiny metadata.
+- No generated readable terminal UI, GitHub UI, commands, or factual claims.
+- No residual wobble after an element settles.
+- No cross-platform availability claim in this cut. The published `gridbash@0.1.6`
+  package is Windows-only and the macOS/Linux platform packages are not live.
+- Use `assets/voice-truth-safe.wav`, which removes the inaccurate OS clause and
+  joins “completely open source” to “You can install it…” with a short natural pause.

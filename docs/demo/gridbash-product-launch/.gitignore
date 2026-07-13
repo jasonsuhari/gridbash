@@ -3,6 +3,7 @@ assets/music/*.mp3
 assets/sfx/*.mp3
 assets/takes/
 assets/voice.wav
+assets/voice-truth-safe.wav
 reference-analysis/*/frame-*.jpg
 reference-analysis/*/reference-audio.wav
 analysis/source-stills/

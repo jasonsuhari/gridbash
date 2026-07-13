@@ -9,8 +9,10 @@ remain authoritative in `edit-manifest.json` and `assets/captions.json`.
 4. Each pane is a real terminal session.
 5. Select the panes you want and send the prompt to every single one.
 6. Each pane can have its own Git worktree, so there are no file fights.
-7. GridBash is completely open source on Mac, Linux, and Windows. You can install it with `npm install -g gridbash`.
+7. GridBash is completely open source. You can install it with `npm install -g gridbash`.
 
-The GitHub proof beat uses the real captured repository page and its live 46-star
-count. The final product footage shows four selected GridBash panes receiving the
-same real Codex prompt and replying independently while two panes remain idle.
+The GitHub proof beat uses the freshly captured repository page and a non-volatile HTML
+`LIVE REPO` stamp. The final product footage shows four
+selected GridBash panes receiving the same real Codex prompt and replying
+independently while two panes remain idle. The public cut omits the recorded
+cross-platform clause until matching release artifacts are verified.
