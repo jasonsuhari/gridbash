@@ -427,6 +427,8 @@ Example:
 profile = "powershell"
 # Use "normal" to opt out of GridBash's desktop-responsiveness safeguard.
 pane_priority = "below-normal"
+# Use "unrestricted" to disable adaptive CPU sharing between pane workloads.
+pane_workload = "adaptive"
 
 [manager]
 endpoint = "https://api.openai.com/v1/chat/completions"
@@ -468,7 +470,11 @@ so GridBash's Alt shortcuts reach the TUI.
 GridBash keeps its own interface at normal Windows process priority, while pane
 processes default to `below-normal`. Child workloads such as parallel compilers
 normally inherit that priority, which keeps input and other desktop apps responsive
-when many panes are busy. Set `[defaults].pane_priority = "normal"` to opt out.
+when many panes are busy. On Windows, the default `adaptive` pane workload policy
+also gives focused and selected panes more CPU time than hidden or sleeping panes
+when the system is contested; every pane continues running. Set
+`[defaults].pane_workload = "unrestricted"` to disable adaptive sharing, or change
+the Workload policy under Performance settings while GridBash is running.
 
 Pane managers use the OpenAI-compatible chat-completions endpoint, model, and API
 key under `[manager]`. These values can also be edited from the Manager tab in

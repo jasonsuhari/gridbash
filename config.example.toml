@@ -2,6 +2,8 @@
 profile = "git-bash"
 # Keeps compilers and other pane workloads from starving interactive desktop apps.
 pane_priority = "below-normal"
+# Shares CPU fairly under contention while keeping every pane process running.
+pane_workload = "adaptive"
 
 [manager]
 endpoint = "https://api.openai.com/v1/chat/completions"

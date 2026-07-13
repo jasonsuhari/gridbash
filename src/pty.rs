@@ -3,17 +3,21 @@ use std::{
     env, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::mpsc::{SyncSender, TrySendError, sync_channel},
     thread,
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::mpsc;
 use vt100::{Parser, Screen};
 
-use crate::{config::PaneProcessPriority, layout::PaneId, process_priority::set_process_priority};
+use crate::{
+    config::{PaneProcessPriority, PaneWorkloadPolicy},
+    layout::PaneId,
+    process_priority::{PaneWorkloadClass, PaneWorkloadController},
+};
 
 const DEVICE_STATUS_QUERY: &[u8] = b"\x1b[5n";
 const CURSOR_POSITION_QUERY: &[u8] = b"\x1b[6n";
@@ -23,9 +27,11 @@ const MAX_TERMINAL_QUERY_LEN: usize = 4;
 const MAX_INPUT_HISTORY: usize = 200;
 const MAX_INPUT_LINE_CHARS: usize = 4096;
 const MAX_OUTPUT_TAIL_CHARS: usize = 40_000;
+const OUTPUT_TAIL_TRIM_AT_CHARS: usize = 48_000;
 const MAX_REPLAY_OUTPUT_CHARS: usize = 18_000;
 const MAX_OSC_SCAN: usize = 4096;
 const PTY_READ_BUFFER_BYTES: usize = 32 * 1024;
+const PTY_WRITE_QUEUE_MESSAGES: usize = 256;
 
 #[derive(Debug, Clone)]
 pub enum PtyEvent {
@@ -37,6 +43,11 @@ pub enum PtyEvent {
     Exited {
         pane: PaneId,
         generation: u64,
+    },
+    WriteFailed {
+        pane: PaneId,
+        generation: u64,
+        error: String,
     },
 }
 
@@ -79,8 +90,11 @@ pub struct PtyPane {
     generation: u64,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    writer: SyncSender<Vec<u8>>,
+    workload: PaneWorkloadController,
+    workload_error: Option<String>,
     parser: Parser,
+    screen_revision: u64,
     cwd: PathBuf,
     rows: u16,
     cols: u16,
@@ -90,6 +104,7 @@ pub struct PtyPane {
     input_history: Vec<String>,
     pending_input: String,
     output_tail: String,
+    output_tail_chars: usize,
     pub active: bool,
     pub exited: bool,
 }
@@ -106,7 +121,8 @@ impl PtyPane {
         cwd: &Path,
         extra_env: &[(String, String)],
         process_priority: PaneProcessPriority,
-        event_tx: mpsc::UnboundedSender<PtyEvent>,
+        workload_policy: PaneWorkloadPolicy,
+        event_tx: mpsc::Sender<PtyEvent>,
     ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -138,22 +154,30 @@ impl PtyPane {
             .slave
             .spawn_command(command_builder)
             .with_context(|| format!("failed to spawn {}", command.display()))?;
-        if let Some(process_id) = child.process_id() {
-            // A pane should still launch if Windows refuses a priority change.
-            // The root process normally passes this priority to its descendants.
-            let _ = set_process_priority(process_id, process_priority);
-        }
+        let (workload, workload_error) = match child.process_id() {
+            Some(process_id) => {
+                match PaneWorkloadController::attach(process_id, process_priority, workload_policy)
+                {
+                    Ok(controller) => (controller, None),
+                    Err(error) => (PaneWorkloadController::unmanaged(), Some(error.to_string())),
+                }
+            }
+            None => (
+                PaneWorkloadController::unmanaged(),
+                Some("child process ID is unavailable".into()),
+            ),
+        };
         drop(pair.slave);
 
         let reader = pair
             .master
             .try_clone_reader()
             .context("failed to clone PTY reader")?;
-        let writer = Arc::new(Mutex::new(
-            pair.master
-                .take_writer()
-                .context("failed to open PTY writer")?,
-        ));
+        let writer = pair
+            .master
+            .take_writer()
+            .context("failed to open PTY writer")?;
+        let writer = spawn_writer(id, generation, event_tx.clone(), writer);
         spawn_reader(id, generation, event_tx, reader);
 
         Ok(Self {
@@ -162,7 +186,10 @@ impl PtyPane {
             master: pair.master,
             child,
             writer,
+            workload,
+            workload_error,
             parser: Parser::new(24, 80, 10_000),
+            screen_revision: 0,
             cwd: cwd.to_path_buf(),
             rows: 24,
             cols: 80,
@@ -172,6 +199,7 @@ impl PtyPane {
             input_history: Vec::new(),
             pending_input: String::new(),
             output_tail: String::new(),
+            output_tail_chars: 0,
             active: false,
             exited: false,
         })
@@ -193,24 +221,38 @@ impl PtyPane {
         self.parser.screen()
     }
 
+    pub fn screen_revision(&self) -> u64 {
+        self.screen_revision
+    }
+
     pub fn scroll_view(&mut self, rows: isize) -> bool {
-        scroll_screen(self.parser.screen_mut(), rows)
+        let changed = scroll_screen(self.parser.screen_mut(), rows);
+        if changed {
+            self.screen_revision = self.screen_revision.wrapping_add(1);
+        }
+        changed
     }
 
     pub fn reset_view(&mut self) -> bool {
         let screen = self.parser.screen_mut();
         let changed = screen.scrollback() > 0;
         screen.set_scrollback(0);
+        if changed {
+            self.screen_revision = self.screen_revision.wrapping_add(1);
+        }
         changed
     }
 
-    pub fn process_output(&mut self, bytes: &[u8]) {
+    pub fn process_output(&mut self, bytes: &[u8]) -> String {
         self.update_cwd_from_osc7(bytes);
         self.parser.process(bytes);
-        self.append_plain_output(bytes);
+        let plain = plain_terminal_text(bytes);
+        self.append_plain_output(&plain);
         self.active = true;
+        self.screen_revision = self.screen_revision.wrapping_add(1);
         self.output_activity.record_output(Instant::now());
         self.answer_terminal_queries(bytes);
+        plain
     }
 
     pub fn output_quiet(&self) -> bool {
@@ -240,6 +282,7 @@ impl PtyPane {
     pub fn restore_history_display(&mut self, output_tail: &str, input_history: &[String]) {
         self.output_tail = output_tail.to_string();
         trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
+        self.output_tail_chars = self.output_tail.chars().count();
         self.input_history = input_history
             .iter()
             .filter(|line| !line.trim().is_empty())
@@ -252,13 +295,29 @@ impl PtyPane {
         let replay = history_replay_text(&self.output_tail, &self.input_history);
         if !replay.is_empty() {
             self.parser.process(replay.as_bytes());
+            self.screen_revision = self.screen_revision.wrapping_add(1);
         }
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
-        let mut writer = self.writer.lock().expect("PTY writer lock poisoned");
-        writer.write_all(bytes).context("failed to write to PTY")?;
-        writer.flush().context("failed to flush PTY")
+        match self.writer.try_send(bytes.to_vec()) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(anyhow!("PTY input queue is full")),
+            Err(TrySendError::Disconnected(_)) => Err(anyhow!("PTY writer has stopped")),
+        }
+    }
+
+    pub fn apply_workload(
+        &self,
+        policy: PaneWorkloadPolicy,
+        class: PaneWorkloadClass,
+    ) -> Result<()> {
+        if let Some(error) = &self.workload_error {
+            return Err(anyhow!(error.clone()));
+        }
+        self.workload
+            .apply(policy, class)
+            .context("failed to update pane workload policy")
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
@@ -277,6 +336,7 @@ impl PtyPane {
             .context("failed to resize PTY")?;
         self.rows = rows;
         self.cols = cols;
+        self.screen_revision = self.screen_revision.wrapping_add(1);
         Ok(())
     }
 
@@ -294,6 +354,9 @@ impl PtyPane {
     }
 
     fn answer_terminal_queries(&mut self, bytes: &[u8]) {
+        if self.response_scan_tail.is_empty() && !bytes.contains(&0x1b) {
+            return;
+        }
         let mut scan = Vec::with_capacity(self.response_scan_tail.len() + bytes.len());
         scan.extend_from_slice(&self.response_scan_tail);
         scan.extend_from_slice(bytes);
@@ -325,6 +388,9 @@ impl PtyPane {
     }
 
     fn update_cwd_from_osc7(&mut self, bytes: &[u8]) {
+        if self.osc_scan_tail.is_empty() && !bytes.contains(&0x1b) {
+            return;
+        }
         let mut scan = Vec::with_capacity(self.osc_scan_tail.len() + bytes.len());
         scan.extend_from_slice(&self.osc_scan_tail);
         scan.extend_from_slice(bytes);
@@ -335,8 +401,7 @@ impl PtyPane {
             }
         }
 
-        let tail_start = scan.len().saturating_sub(MAX_OSC_SCAN);
-        self.osc_scan_tail = scan[tail_start..].to_vec();
+        self.osc_scan_tail = incomplete_osc_tail(&scan);
     }
 
     pub fn terminate(&mut self) {
@@ -348,14 +413,17 @@ impl PtyPane {
         self.exited = true;
     }
 
-    fn append_plain_output(&mut self, bytes: &[u8]) {
-        let plain = plain_terminal_text(bytes);
+    fn append_plain_output(&mut self, plain: &str) {
         if plain.is_empty() {
             return;
         }
 
-        self.output_tail.push_str(&plain);
-        trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
+        self.output_tail.push_str(plain);
+        self.output_tail_chars += plain.chars().count();
+        if self.output_tail_chars > OUTPUT_TAIL_TRIM_AT_CHARS {
+            trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
+            self.output_tail_chars = self.output_tail.chars().count();
+        }
     }
 }
 
@@ -452,7 +520,7 @@ fn powershell_cwd_hook() -> &'static str {
 fn spawn_reader(
     pane: PaneId,
     generation: u64,
-    event_tx: mpsc::UnboundedSender<PtyEvent>,
+    event_tx: mpsc::Sender<PtyEvent>,
     mut reader: Box<dyn Read + Send>,
 ) {
     thread::spawn(move || {
@@ -460,23 +528,49 @@ fn spawn_reader(
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => {
-                    let _ = event_tx.send(PtyEvent::Exited { pane, generation });
+                    let _ = event_tx.blocking_send(PtyEvent::Exited { pane, generation });
                     break;
                 }
                 Ok(n) => {
-                    let _ = event_tx.send(PtyEvent::Output {
+                    let _ = event_tx.blocking_send(PtyEvent::Output {
                         pane,
                         generation,
                         bytes: buffer[..n].to_vec(),
                     });
                 }
                 Err(_) => {
-                    let _ = event_tx.send(PtyEvent::Exited { pane, generation });
+                    let _ = event_tx.blocking_send(PtyEvent::Exited { pane, generation });
                     break;
                 }
             }
         }
     });
+}
+
+fn spawn_writer(
+    pane: PaneId,
+    generation: u64,
+    event_tx: mpsc::Sender<PtyEvent>,
+    mut writer: Box<dyn Write + Send>,
+) -> SyncSender<Vec<u8>> {
+    let (tx, rx) = sync_channel::<Vec<u8>>(PTY_WRITE_QUEUE_MESSAGES);
+    thread::spawn(move || {
+        while let Ok(bytes) = rx.recv() {
+            let result = writer
+                .write_all(&bytes)
+                .and_then(|()| writer.flush())
+                .context("failed to write to PTY");
+            if let Err(error) = result {
+                let _ = event_tx.blocking_send(PtyEvent::WriteFailed {
+                    pane,
+                    generation,
+                    error: format!("{error:#}"),
+                });
+                break;
+            }
+        }
+    });
+    tx
 }
 
 fn contains_sequence(buffer: &[u8], sequence: &[u8]) -> bool {
@@ -704,13 +798,11 @@ fn history_replay_text(output_tail: &str, input_history: &[String]) -> String {
 pub(crate) fn plain_terminal_text(bytes: &[u8]) -> String {
     let raw = String::from_utf8_lossy(bytes);
     let mut plain = String::new();
-    let chars = raw.chars().collect::<Vec<_>>();
-    let mut index = 0;
+    let mut chars = raw.chars().peekable();
 
-    while index < chars.len() {
-        let ch = chars[index];
+    while let Some(ch) = chars.next() {
         if ch == '\x1b' {
-            index = skip_escape_chars(&chars, index);
+            skip_escape_chars(&mut chars);
             continue;
         }
 
@@ -732,7 +824,6 @@ pub(crate) fn plain_terminal_text(bytes: &[u8]) -> String {
             ch if ch.is_control() => {}
             ch => plain.push(ch),
         }
-        index += 1;
     }
 
     plain
@@ -781,47 +872,58 @@ fn skip_escape_sequence(bytes: &[u8], start: usize) -> usize {
     index
 }
 
-fn skip_escape_chars(chars: &[char], start: usize) -> usize {
-    let mut index = start.saturating_add(1);
-    if index >= chars.len() {
-        return index;
-    }
-
-    match chars[index] {
+fn skip_escape_chars(chars: &mut std::iter::Peekable<impl Iterator<Item = char>>) {
+    let Some(kind) = chars.next() else {
+        return;
+    };
+    match kind {
         '[' => {
-            index += 1;
-            while index < chars.len() {
-                let ch = chars[index];
-                index += 1;
+            for ch in chars.by_ref() {
                 if ('\u{40}'..='\u{7e}').contains(&ch) {
                     break;
                 }
             }
         }
         'O' => {
-            index += 1;
-            if index < chars.len() {
-                index += 1;
-            }
+            let _ = chars.next();
         }
         ']' => {
-            index += 1;
-            while index < chars.len() {
-                if chars[index] == '\x07' {
-                    index += 1;
+            while let Some(ch) = chars.next() {
+                if ch == '\x07' {
                     break;
                 }
-                if chars[index] == '\x1b' && index + 1 < chars.len() && chars[index + 1] == '\\' {
-                    index += 2;
+                if ch == '\x1b' && chars.next_if_eq(&'\\').is_some() {
                     break;
                 }
-                index += 1;
             }
         }
-        _ => index += 1,
+        _ => {}
     }
+}
 
-    index
+fn incomplete_osc_tail(buffer: &[u8]) -> Vec<u8> {
+    let start = buffer.len().saturating_sub(MAX_OSC_SCAN);
+    for index in (start..buffer.len()).rev() {
+        if buffer[index] != 0x1b {
+            continue;
+        }
+        if index + 1 == buffer.len() {
+            return buffer[index..].to_vec();
+        }
+        if buffer[index + 1] != b']' {
+            continue;
+        }
+
+        let payload = &buffer[index + 2..];
+        let complete =
+            payload.contains(&0x07) || payload.windows(2).any(|window| window == [0x1b, b'\\']);
+        return if complete {
+            Vec::new()
+        } else {
+            buffer[index..].to_vec()
+        };
+    }
+    Vec::new()
 }
 
 fn trim_string_tail(value: &mut String, max_chars: usize) {
@@ -857,13 +959,79 @@ fn tail_chars(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
-        env,
+        env, io,
         path::Path,
+        sync::{Arc, Mutex},
         thread,
         time::{Duration, Instant},
     };
 
     use super::*;
+
+    struct SharedWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("shared writer")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "closed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writer_worker_preserves_enqueued_input_order() {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let writer = spawn_writer(
+            PaneId(3),
+            7,
+            event_tx,
+            Box::new(SharedWriter(output.clone())),
+        );
+        writer.send(b"first".to_vec()).expect("first write");
+        writer.send(b"-second".to_vec()).expect("second write");
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while output.lock().expect("output").len() < 12 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert_eq!(&*output.lock().expect("output"), b"first-second");
+    }
+
+    #[test]
+    fn writer_worker_reports_asynchronous_failures() {
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let writer = spawn_writer(PaneId(4), 2, event_tx, Box::new(FailingWriter));
+        writer.send(b"input".to_vec()).expect("queue input");
+
+        let event = event_rx.blocking_recv().expect("write failure event");
+        assert!(matches!(
+            event,
+            PtyEvent::WriteFailed {
+                pane: PaneId(4),
+                generation: 2,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn counts_split_terminal_query_sequences() {
@@ -885,6 +1053,17 @@ mod tests {
         scan.extend_from_slice(b"prompt");
 
         assert_eq!(count_sequence(&scan, CURSOR_POSITION_QUERY), 0);
+    }
+
+    #[test]
+    fn osc_tail_keeps_only_incomplete_sequences() {
+        assert!(incomplete_osc_tail(b"ordinary output").is_empty());
+        assert!(incomplete_osc_tail(b"\x1b]7;file:///tmp\x07done").is_empty());
+        assert_eq!(
+            incomplete_osc_tail(b"output\x1b]7;file:///tmp"),
+            b"\x1b]7;file:///tmp"
+        );
+        assert_eq!(incomplete_osc_tail(b"output\x1b"), b"\x1b");
     }
 
     #[cfg(windows)]
@@ -989,7 +1168,7 @@ mod tests {
     #[test]
     #[ignore = "Windows ConPTY smoke test requires an interactive console; run manually when debugging PTY I/O"]
     fn spawned_pty_receives_output_and_input() {
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(64);
         let cwd = env::current_dir().expect("current dir");
         let mut pane = PtyPane::spawn(
             "cmd",
@@ -1007,6 +1186,7 @@ mod tests {
             &cwd,
             &[],
             PaneProcessPriority::BelowNormal,
+            PaneWorkloadPolicy::Adaptive,
             event_tx,
         )
         .expect("spawn cmd pty");
@@ -1023,6 +1203,7 @@ mod tests {
                         raw_output.extend(bytes);
                     }
                     PtyEvent::Exited { .. } => pane.exited = true,
+                    PtyEvent::WriteFailed { error, .. } => panic!("PTY write failed: {error}"),
                 }
             }
 
@@ -1051,7 +1232,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawned_unix_pty_receives_output_and_input() {
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(64);
         let cwd = env::current_dir().expect("current dir");
         let mut pane = PtyPane::spawn(
             "sh",
@@ -1066,6 +1247,7 @@ mod tests {
             &cwd,
             &[],
             PaneProcessPriority::BelowNormal,
+            PaneWorkloadPolicy::Adaptive,
             event_tx,
         )
         .expect("spawn Unix PTY");
@@ -1082,6 +1264,7 @@ mod tests {
                         raw_output.extend(bytes);
                     }
                     PtyEvent::Exited { .. } => pane.exited = true,
+                    PtyEvent::WriteFailed { error, .. } => panic!("PTY write failed: {error}"),
                 }
             }
 

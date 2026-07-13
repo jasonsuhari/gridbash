@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet, HashMap},
     env,
     ffi::OsString,
     io::{self, Stdout, Write},
@@ -17,14 +18,14 @@ use std::process::Stdio;
 use anyhow::{Context, Result, anyhow};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-        MouseEventKind,
+        self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+        EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, style::Color};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, style::Color, text::Line};
 use tokio::sync::mpsc;
 use vt100::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 
@@ -32,13 +33,14 @@ use crate::{
     auth::{self, AgentKind, AuthProfile},
     cli::{Cli, GridMode},
     composer::{Composer, GridPicker, GridPickerAction},
-    config::Config,
+    config::{Config, PaneWorkloadPolicy},
     control::{self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse},
     image_preview::{self, ImagePreview},
     layout::{GridLayout, GridSize, PaneId, pane_at},
     manager::{self, ManagerDecision},
+    process_priority::PaneWorkloadClass,
     profiles::{default_profile_name, find_profile},
-    pty::{PtyEvent, PtyPane, plain_terminal_text},
+    pty::{PtyEvent, PtyPane},
     session::{SavedPaneHistory, SessionRecord, SessionRecorder},
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
@@ -50,6 +52,11 @@ use crate::{
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const LARGE_GRID_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+const PTY_EVENT_CHANNEL_CAPACITY: usize = 256;
+const PTY_DRAIN_MAX_EVENTS: usize = 64;
+const PTY_DRAIN_MAX_BYTES: usize = 512 * 1024;
+const PTY_DRAIN_MAX_TIME: Duration = Duration::from_millis(4);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const PANE_GOAL_OUTPUT_MAX_BYTES: usize = 12_000;
 const PANE_GOAL_REVIEW_IDLE: Duration = Duration::from_secs(2);
@@ -121,8 +128,13 @@ pub struct App {
     pane_settings_sleep_button: Option<Rect>,
     pane_settings_goal_button: Option<Rect>,
     pane_settings_stop_goal_button: Option<Rect>,
-    event_tx: mpsc::UnboundedSender<PtyEvent>,
-    event_rx: mpsc::UnboundedReceiver<PtyEvent>,
+    event_tx: mpsc::Sender<PtyEvent>,
+    event_rx: mpsc::Receiver<PtyEvent>,
+    pane_render_cache: RefCell<HashMap<PaneId, ui::PaneRenderCache>>,
+    conversation_cache: RefCell<HashMap<PaneId, ConversationCache>>,
+    applied_workloads: HashMap<PaneId, (PaneWorkloadPolicy, PaneWorkloadClass)>,
+    terminal_focused: bool,
+    workload_warning_shown: bool,
     usage_tx: std_mpsc::Sender<UsageEvent>,
     usage_rx: std_mpsc::Receiver<UsageEvent>,
     profile_usage: BTreeMap<String, String>,
@@ -211,6 +223,47 @@ pub struct PaneSelection {
     pub start_column: u16,
     pub end_row: u16,
     pub end_column: u16,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ConversationCache {
+    revision: u64,
+    summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneRoute {
+    Visible(usize),
+    Inactive { tab: usize, pane: usize },
+}
+
+struct PtyDrainBudget {
+    started: Instant,
+    events: usize,
+    bytes: usize,
+}
+
+impl PtyDrainBudget {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            events: 0,
+            bytes: 0,
+        }
+    }
+
+    fn allows_more(&self) -> bool {
+        self.within_size_limits() && self.started.elapsed() < PTY_DRAIN_MAX_TIME
+    }
+
+    fn within_size_limits(&self) -> bool {
+        self.events < PTY_DRAIN_MAX_EVENTS && self.bytes < PTY_DRAIN_MAX_BYTES
+    }
+
+    fn record(&mut self, bytes: usize) {
+        self.events += 1;
+        self.bytes += bytes;
+    }
 }
 
 impl MouseSelection {
@@ -540,6 +593,7 @@ enum SettingsTarget {
     PaneDensity,
     Scrollback,
     RefreshMs,
+    PaneWorkload,
     Palette(PaletteRole),
 }
 
@@ -560,6 +614,7 @@ enum SettingsChange {
     None,
     Render,
     SaveTodos,
+    SaveWorkload,
 }
 
 #[derive(Debug, Clone)]
@@ -893,6 +948,7 @@ struct SettingsState {
     pane_density: i32,
     scrollback: i32,
     refresh_ms: i32,
+    pane_workload: PaneWorkloadPolicy,
     palette: GridPalette,
     manager_cursor: usize,
     manager_edit: Option<ManagerSettingEdit>,
@@ -1054,6 +1110,7 @@ impl Default for SettingsState {
             pane_density: 2,
             scrollback: 10_000,
             refresh_ms: 16,
+            pane_workload: PaneWorkloadPolicy::Adaptive,
             palette: GridPalette::default(),
             manager_cursor: 0,
             manager_edit: None,
@@ -1070,6 +1127,7 @@ impl SettingsState {
                 .idle_seconds
                 .clamp(MIN_TODO_IDLE_SECONDS, MAX_TODO_IDLE_SECONDS),
             todo_prompts: config.todos.normalized_prompts(),
+            pane_workload: config.defaults.pane_workload,
             ..Self::default()
         }
     }
@@ -1163,6 +1221,15 @@ impl SettingsState {
             Some(SettingsTarget::RefreshMs) => {
                 self.refresh_ms = (self.refresh_ms + delta * 4).clamp(8, 100);
                 SettingsChange::Render
+            }
+            Some(SettingsTarget::PaneWorkload) => {
+                if delta != 0 {
+                    self.pane_workload = match self.pane_workload {
+                        PaneWorkloadPolicy::Adaptive => PaneWorkloadPolicy::Unrestricted,
+                        PaneWorkloadPolicy::Unrestricted => PaneWorkloadPolicy::Adaptive,
+                    };
+                }
+                SettingsChange::SaveWorkload
             }
             Some(SettingsTarget::Palette(role)) => {
                 self.palette.adjust(role, delta as isize);
@@ -1404,6 +1471,7 @@ impl SettingsState {
             SettingsTarget::PaneDensity,
             SettingsTarget::Scrollback,
             SettingsTarget::RefreshMs,
+            SettingsTarget::PaneWorkload,
         ]);
         targets.extend(
             PaletteRole::ALL
@@ -1550,10 +1618,24 @@ impl SettingsState {
             SettingsTarget::RefreshMs,
             SettingsGroup::Performance,
             SettingsValueKind::Stepper,
-            "Refresh delay",
+            "Minimum refresh delay",
             format!("{} ms", self.refresh_ms),
-            "render loop throttle",
+            "output frame throttle",
         ));
+        rows.push(
+            self.row(
+                SettingsTarget::PaneWorkload,
+                SettingsGroup::Performance,
+                SettingsValueKind::Choice,
+                "Workload policy",
+                match self.pane_workload {
+                    PaneWorkloadPolicy::Adaptive => "adaptive",
+                    PaneWorkloadPolicy::Unrestricted => "unrestricted",
+                }
+                .into(),
+                "keep the desktop responsive under load",
+            ),
+        );
         rows.extend(
             PaletteRole::ALL
                 .iter()
@@ -1607,6 +1689,10 @@ impl SettingsChange {
 
     fn save_todos(self) -> bool {
         matches!(self, Self::SaveTodos)
+    }
+
+    fn save_workload(self) -> bool {
+        matches!(self, Self::SaveWorkload)
     }
 }
 
@@ -1722,7 +1808,7 @@ impl App {
     }
 
     fn from_parts(init: AppInit) -> Self {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::channel(PTY_EVENT_CHANNEL_CAPACITY);
         let (usage_tx, usage_rx) = std_mpsc::channel();
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (goal_tx, goal_rx) = std_mpsc::channel();
@@ -1783,6 +1869,11 @@ impl App {
             pane_settings_stop_goal_button: None,
             event_tx,
             event_rx,
+            pane_render_cache: RefCell::new(HashMap::new()),
+            conversation_cache: RefCell::new(HashMap::new()),
+            applied_workloads: HashMap::new(),
+            terminal_focused: true,
+            workload_warning_shown: false,
             usage_tx,
             usage_rx,
             profile_usage: BTreeMap::new(),
@@ -2002,6 +2093,7 @@ impl App {
             &spec.cwd,
             &extra_env,
             self.config.defaults.pane_priority,
+            self.config.defaults.pane_workload,
             self.event_tx.clone(),
         )
     }
@@ -2022,22 +2114,47 @@ impl App {
     }
 
     fn run_loop(&mut self, terminal: &mut Tui) -> Result<()> {
-        let mut needs_render = true;
+        let mut immediate_render = true;
+        let mut output_render = false;
+        let mut last_render = Instant::now();
         let mut mouse_capture_enabled = self.mouse_enabled;
 
         loop {
-            needs_render |= self.drain_pty_events();
-            needs_render |= self.drain_usage_events();
-            needs_render |= self.drain_auth_refresh();
-            needs_render |= self.drain_command_events();
-            needs_render |= self.drain_goal_reviews();
-            needs_render |= self.drain_voice_events()?;
-            needs_render |= self.drain_control_events();
-            needs_render |= self.decay_activity();
-            needs_render |= self.update_follow_up_prompt();
-            needs_render |= self.schedule_goal_reviews();
+            let frame_interval = self.output_frame_interval();
+            let until_frame = frame_interval.saturating_sub(last_render.elapsed());
+            let wait = if immediate_render || !self.event_rx.is_empty() {
+                Duration::ZERO
+            } else if output_render {
+                until_frame.min(INPUT_POLL_INTERVAL)
+            } else {
+                INPUT_POLL_INTERVAL
+            };
 
-            if needs_render {
+            if event::poll(wait)? {
+                let event = event::read()?;
+                if self.handle_terminal_event(
+                    terminal,
+                    event,
+                    &mut immediate_render,
+                    &mut mouse_capture_enabled,
+                )? {
+                    break;
+                }
+            }
+
+            output_render |= self.drain_pty_events();
+            immediate_render |= self.drain_usage_events();
+            immediate_render |= self.drain_auth_refresh();
+            immediate_render |= self.drain_command_events();
+            immediate_render |= self.drain_goal_reviews();
+            immediate_render |= self.drain_voice_events()?;
+            immediate_render |= self.drain_control_events();
+            immediate_render |= self.decay_activity();
+            immediate_render |= self.update_follow_up_prompt();
+            immediate_render |= self.schedule_goal_reviews();
+            immediate_render |= self.refresh_workload_classes();
+
+            if immediate_render || (output_render && last_render.elapsed() >= frame_interval) {
                 terminal.draw(|frame| {
                     let draw_state = ui::draw(frame, self);
                     self.grid_area = draw_state.grid_area;
@@ -2052,80 +2169,11 @@ impl App {
                     self.pane_settings_stop_goal_button = draw_state.pane_settings_stop_goal_button;
                 })?;
                 self.sync_pane_sizes();
-                needs_render = false;
+                immediate_render = false;
+                output_render = false;
+                last_render = Instant::now();
             }
             self.sync_mouse_capture(terminal, &mut mouse_capture_enabled)?;
-
-            if event::poll(INPUT_POLL_INTERVAL)? {
-                match event::read()? {
-                    Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        match self.handle_key(terminal, key)? {
-                            KeyOutcome::Continue => {}
-                            KeyOutcome::Render => needs_render = true,
-                            KeyOutcome::AuthLogin(profile) => {
-                                self.run_auth_login(terminal, profile)?;
-                                mouse_capture_enabled = false;
-                                needs_render = true;
-                            }
-                            KeyOutcome::Quit => break,
-                        }
-                    }
-                    Event::Resize(_, _) => needs_render = true,
-                    Event::Paste(text) if self.tab_rename.open => {
-                        self.tab_rename.insert_text(&text);
-                        needs_render = true;
-                    }
-                    Event::Paste(text) if self.rename.open => {
-                        self.rename.insert_text(&text);
-                        needs_render = true;
-                    }
-                    Event::Paste(text) if self.settings.editing_manager() => {
-                        if self.settings.insert_manager_text(&text) {
-                            needs_render = true;
-                        }
-                    }
-                    Event::Paste(text) if self.settings.editing_todo() => {
-                        if self.settings.insert_todo_text(&text) {
-                            needs_render = true;
-                        }
-                    }
-                    Event::Paste(text) if self.goal_editor.is_some() => {
-                        if let Some(editor) = &mut self.goal_editor {
-                            let remaining =
-                                TODO_INPUT_LIMIT.saturating_sub(editor.input.chars().count());
-                            editor.input.extend(text.chars().take(remaining));
-                            needs_render = true;
-                        }
-                    }
-                    Event::Paste(text)
-                        if !self.settings.open
-                            && self.grid_resizer.is_none()
-                            && !self.rename.open
-                            && !self.previous_panes.open
-                            && !self.pane_settings.open
-                            && self.image_overlay.is_none()
-                            && self.follow_up.is_none()
-                            && self.goal_editor.is_none() =>
-                    {
-                        if self.command_line.focused {
-                            self.command_line.insert_text(&text);
-                            needs_render = true;
-                        } else {
-                            self.route_input(text.as_bytes())?;
-                        }
-                    }
-                    Event::Mouse(mouse)
-                        if (self.mouse_enabled || !self.sleeping.is_empty())
-                            && !self.settings.open
-                            && self.grid_resizer.is_none()
-                            && self.follow_up.is_none()
-                            && self.goal_editor.is_none() =>
-                    {
-                        needs_render |= self.handle_mouse(mouse, terminal)?;
-                    }
-                    _ => {}
-                }
-            }
         }
 
         if mouse_capture_enabled {
@@ -2133,6 +2181,136 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn handle_terminal_event(
+        &mut self,
+        terminal: &mut Tui,
+        event: Event,
+        needs_render: &mut bool,
+        mouse_capture_enabled: &mut bool,
+    ) -> Result<bool> {
+        match event {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                match self.handle_key(terminal, key)? {
+                    KeyOutcome::Continue => {}
+                    KeyOutcome::Render => *needs_render = true,
+                    KeyOutcome::AuthLogin(profile) => {
+                        self.run_auth_login(terminal, profile)?;
+                        *mouse_capture_enabled = false;
+                        *needs_render = true;
+                    }
+                    KeyOutcome::Quit => return Ok(true),
+                }
+            }
+            Event::Resize(_, _) => *needs_render = true,
+            Event::FocusGained => {
+                self.terminal_focused = true;
+                *needs_render = true;
+            }
+            Event::FocusLost => self.terminal_focused = false,
+            Event::Paste(text) if self.tab_rename.open => {
+                self.tab_rename.insert_text(&text);
+                *needs_render = true;
+            }
+            Event::Paste(text) if self.rename.open => {
+                self.rename.insert_text(&text);
+                *needs_render = true;
+            }
+            Event::Paste(text) if self.settings.editing_manager() => {
+                *needs_render |= self.settings.insert_manager_text(&text);
+            }
+            Event::Paste(text) if self.settings.editing_todo() => {
+                *needs_render |= self.settings.insert_todo_text(&text);
+            }
+            Event::Paste(text) if self.goal_editor.is_some() => {
+                if let Some(editor) = &mut self.goal_editor {
+                    let remaining = TODO_INPUT_LIMIT.saturating_sub(editor.input.chars().count());
+                    editor.input.extend(text.chars().take(remaining));
+                    *needs_render = true;
+                }
+            }
+            Event::Paste(text)
+                if !self.settings.open
+                    && self.grid_resizer.is_none()
+                    && !self.rename.open
+                    && !self.previous_panes.open
+                    && !self.pane_settings.open
+                    && self.image_overlay.is_none()
+                    && self.follow_up.is_none()
+                    && self.goal_editor.is_none() =>
+            {
+                if self.command_line.focused {
+                    self.command_line.insert_text(&text);
+                    *needs_render = true;
+                } else {
+                    self.route_input(text.as_bytes())?;
+                }
+            }
+            Event::Mouse(mouse)
+                if (self.mouse_enabled || !self.sleeping.is_empty())
+                    && !self.settings.open
+                    && self.grid_resizer.is_none()
+                    && self.follow_up.is_none()
+                    && self.goal_editor.is_none() =>
+            {
+                *needs_render |= self.handle_mouse(mouse, terminal)?;
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn output_frame_interval(&self) -> Duration {
+        adaptive_output_frame_interval(self.settings.refresh_ms, self.panes.len())
+    }
+
+    fn refresh_workload_classes(&mut self) -> bool {
+        let policy = self.config.defaults.pane_workload;
+        let mut seen = BTreeSet::new();
+        let mut failure = None;
+
+        for (index, pane) in self.panes.iter().enumerate() {
+            let class = if !self.terminal_focused || self.sleeping.contains(&index) {
+                PaneWorkloadClass::Background
+            } else if index == self.focus {
+                PaneWorkloadClass::Focused
+            } else if self.selected.contains(&index) {
+                PaneWorkloadClass::Selected
+            } else {
+                PaneWorkloadClass::Visible
+            };
+            seen.insert(pane.id());
+            if self.applied_workloads.get(&pane.id()) != Some(&(policy, class)) {
+                if let Err(error) = pane.apply_workload(policy, class) {
+                    failure.get_or_insert(error);
+                }
+                self.applied_workloads.insert(pane.id(), (policy, class));
+            }
+        }
+
+        for tab in self.tabs.iter().filter_map(Option::as_ref) {
+            for pane in &tab.panes {
+                let class = PaneWorkloadClass::Background;
+                seen.insert(pane.id());
+                if self.applied_workloads.get(&pane.id()) != Some(&(policy, class)) {
+                    if let Err(error) = pane.apply_workload(policy, class) {
+                        failure.get_or_insert(error);
+                    }
+                    self.applied_workloads.insert(pane.id(), (policy, class));
+                }
+            }
+        }
+
+        self.applied_workloads.retain(|id, _| seen.contains(id));
+        if let Some(error) = failure
+            && !self.workload_warning_shown
+        {
+            self.status = format!("adaptive workload fallback: {error:#}");
+            self.workload_warning_shown = true;
+            return true;
+        }
+        false
     }
 
     fn sync_mouse_capture(&self, terminal: &mut Tui, enabled: &mut bool) -> Result<()> {
@@ -2152,54 +2330,96 @@ impl App {
 
     fn drain_pty_events(&mut self) -> bool {
         let mut changed = false;
+        let routes = self.pane_routes();
         let mut pending_output = BTreeMap::<(PaneId, u64), Vec<u8>>::new();
         let mut exited = Vec::new();
+        let mut budget = PtyDrainBudget::new();
 
-        while let Ok(event) = self.event_rx.try_recv() {
+        while budget.allows_more() {
+            let Ok(event) = self.event_rx.try_recv() else {
+                break;
+            };
             match event {
                 PtyEvent::Output {
                     pane,
                     generation,
                     bytes,
                 } => {
+                    budget.record(bytes.len());
                     pending_output
                         .entry((pane, generation))
                         .or_default()
                         .extend(bytes);
                 }
                 PtyEvent::Exited { pane, generation } => {
+                    budget.record(0);
                     exited.push((pane, generation));
+                }
+                PtyEvent::WriteFailed {
+                    pane,
+                    generation,
+                    error,
+                } => {
+                    budget.record(0);
+                    if let Some(PaneRoute::Visible(index)) =
+                        routes.get(&(pane, generation)).copied()
+                    {
+                        self.status = format!("pane {} input failed: {error}", index + 1);
+                        changed = true;
+                    }
                 }
             }
         }
 
         for ((pane, generation), bytes) in pending_output {
-            if let Some(index) = self.visible_pane_index(pane, generation) {
-                let target = &mut self.panes[index];
-                target.process_output(&bytes);
-                self.capture_goal_output(index, &bytes);
-                self.mark_pane_touched(index);
-                changed = true;
-            } else if self.process_inactive_output(pane, generation, &bytes) {
-                changed = true;
+            match routes.get(&(pane, generation)).copied() {
+                Some(PaneRoute::Visible(index)) => {
+                    let target = &mut self.panes[index];
+                    let plain = target.process_output(&bytes);
+                    self.capture_goal_output(index, &plain);
+                    self.mark_pane_touched(index);
+                    changed |= !self.sleeping.contains(&index);
+                }
+                Some(PaneRoute::Inactive { tab, pane }) => {
+                    if let Some(tab) = self.tabs.get_mut(tab).and_then(Option::as_mut) {
+                        let was_active = tab.panes[pane].active;
+                        let plain = tab.panes[pane].process_output(&bytes);
+                        capture_goal_text(&mut tab.pane_goals, &tab.sleeping, pane, &plain);
+                        changed |= !was_active;
+                    }
+                }
+                None => {}
             }
         }
 
         for (pane, generation) in exited {
-            if let Some(index) = self.visible_pane_index(pane, generation) {
-                let target = &mut self.panes[index];
-                if !target.exited {
-                    target.exited = true;
-                    changed = true;
+            match routes.get(&(pane, generation)).copied() {
+                Some(PaneRoute::Visible(index)) => {
+                    let target = &mut self.panes[index];
+                    if !target.exited {
+                        target.exited = true;
+                        changed = true;
+                    }
+                    if self
+                        .follow_up
+                        .is_some_and(|prompt| prompt.pane_index == index)
+                    {
+                        self.follow_up = None;
+                    }
                 }
-                if self
-                    .follow_up
-                    .is_some_and(|prompt| prompt.pane_index == index)
-                {
-                    self.follow_up = None;
+                Some(PaneRoute::Inactive { tab, pane }) => {
+                    if let Some(target) = self
+                        .tabs
+                        .get_mut(tab)
+                        .and_then(Option::as_mut)
+                        .and_then(|tab| tab.panes.get_mut(pane))
+                        && !target.exited
+                    {
+                        target.exited = true;
+                        changed = true;
+                    }
                 }
-            } else if self.process_inactive_exit(pane, generation) {
-                changed = true;
+                None => {}
             }
         }
 
@@ -2226,48 +2446,30 @@ impl App {
         changed
     }
 
-    fn visible_pane_index(&self, pane: PaneId, generation: u64) -> Option<usize> {
-        self.panes
-            .iter()
-            .position(|target| target.id() == pane && target.generation() == generation)
-    }
-
-    fn process_inactive_output(&mut self, pane: PaneId, generation: u64, bytes: &[u8]) -> bool {
-        for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
-            if let Some(index) = tab
-                .panes
-                .iter()
-                .position(|target| target.id() == pane && target.generation() == generation)
-            {
-                tab.panes[index].process_output(bytes);
-                capture_goal_bytes(&mut tab.pane_goals, &tab.sleeping, index, bytes);
-                return true;
+    fn pane_routes(&self) -> HashMap<(PaneId, u64), PaneRoute> {
+        let mut routes = HashMap::new();
+        for (index, pane) in self.panes.iter().enumerate() {
+            routes.insert((pane.id(), pane.generation()), PaneRoute::Visible(index));
+        }
+        for (tab_index, tab) in self.tabs.iter().enumerate() {
+            let Some(tab) = tab else {
+                continue;
+            };
+            for (pane_index, pane) in tab.panes.iter().enumerate() {
+                routes.insert(
+                    (pane.id(), pane.generation()),
+                    PaneRoute::Inactive {
+                        tab: tab_index,
+                        pane: pane_index,
+                    },
+                );
             }
         }
-
-        false
+        routes
     }
 
-    fn process_inactive_exit(&mut self, pane: PaneId, generation: u64) -> bool {
-        for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
-            if let Some(target) = tab
-                .panes
-                .iter_mut()
-                .find(|target| target.id() == pane && target.generation() == generation)
-            {
-                if target.exited {
-                    return false;
-                }
-                target.exited = true;
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn capture_goal_output(&mut self, pane_index: usize, bytes: &[u8]) {
-        capture_goal_bytes(&mut self.pane_goals, &self.sleeping, pane_index, bytes);
+    fn capture_goal_output(&mut self, pane_index: usize, output: &str) {
+        capture_goal_text(&mut self.pane_goals, &self.sleeping, pane_index, output);
     }
 
     fn schedule_goal_reviews(&mut self) -> bool {
@@ -2595,20 +2797,19 @@ impl App {
 
         let now = Instant::now();
         let mut changed = false;
-        for pane in &mut self.panes {
-            if pane.active {
+        for (index, pane) in self.panes.iter_mut().enumerate() {
+            let became_quiet = pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER);
+            if became_quiet {
                 pane.active = false;
-                changed = true;
+                changed |= !self.sleeping.contains(&index);
             }
-            changed |= pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER);
         }
         for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
             for pane in &mut tab.panes {
-                if pane.active {
+                if pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER) {
                     pane.active = false;
                     changed = true;
                 }
-                changed |= pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER);
             }
         }
         self.last_activity_decay = now;
@@ -4514,6 +4715,9 @@ impl App {
         if change.save_todos() {
             self.save_todo_settings();
         }
+        if change.save_workload() {
+            self.save_workload_setting();
+        }
     }
 
     fn save_todo_settings(&mut self) -> bool {
@@ -4747,9 +4951,9 @@ impl App {
                 continue;
             }
             changed |= pane.reset_view();
-            pane.record_input(bytes);
             pane.write(bytes)
                 .with_context(|| format!("failed to route input to pane {}", index + 1))?;
+            pane.record_input(bytes);
             self.mark_pane_touched(index);
         }
 
@@ -4952,6 +5156,44 @@ impl App {
 
     pub fn panes(&self) -> &[PtyPane] {
         &self.panes
+    }
+
+    fn save_workload_setting(&mut self) -> bool {
+        let previous = self.config.defaults.pane_workload;
+        self.config.defaults.pane_workload = self.settings.pane_workload;
+        match self.config.save(self.config_path.as_deref()) {
+            Ok(_) => {
+                self.applied_workloads.clear();
+                true
+            }
+            Err(error) => {
+                self.config.defaults.pane_workload = previous;
+                self.settings.pane_workload = previous;
+                self.status = format!("failed to save workload policy: {error:#}");
+                false
+            }
+        }
+    }
+
+    pub fn pane_screen_lines(
+        &self,
+        index: usize,
+        width: u16,
+        height: u16,
+        selection: Option<PaneSelection>,
+    ) -> Vec<Line<'static>> {
+        let Some(pane) = self.panes.get(index) else {
+            return Vec::new();
+        };
+        let mut caches = self.pane_render_cache.borrow_mut();
+        ui::cached_screen_lines(
+            caches.entry(pane.id()).or_default(),
+            pane.screen_revision(),
+            pane.screen(),
+            width,
+            height,
+            selection,
+        )
     }
 
     pub fn focused_pane(&self) -> Option<usize> {
@@ -5311,7 +5553,15 @@ impl App {
             .and_then(|plan| plan.panes.get(index))
             .and_then(|pane| pane.agent_label())?;
         let pane = self.panes.get(index)?;
-        let summary = conversation_summary(pane.screen())
+        let mut caches = self.conversation_cache.borrow_mut();
+        let cache = caches.entry(pane.id()).or_default();
+        if cache.revision != pane.screen_revision() {
+            cache.revision = pane.screen_revision();
+            cache.summary = conversation_summary(pane.screen());
+        }
+        let summary = cache
+            .summary
+            .clone()
             .unwrap_or_else(|| "waiting for conversation".into());
         Some(truncate_chars(&format!("{label} | {summary}"), max_chars))
     }
@@ -5605,6 +5855,15 @@ impl App {
     }
 }
 
+fn adaptive_output_frame_interval(refresh_ms: i32, pane_count: usize) -> Duration {
+    let configured = Duration::from_millis(refresh_ms.max(1) as u64);
+    if pane_count > 8 {
+        configured.max(LARGE_GRID_FRAME_INTERVAL)
+    } else {
+        configured
+    }
+}
+
 fn resolve_grid(cli: &Cli) -> Result<GridSize> {
     if let Some(grid) = &cli.grid {
         return GridSize::parse(grid).with_context(|| format!("invalid grid '{grid}'"));
@@ -5756,11 +6015,11 @@ fn resolved_current_dir() -> Result<std::path::PathBuf> {
     let current = env::current_dir().context("failed to resolve current directory")?;
     Ok(current.canonicalize().unwrap_or(current))
 }
-fn capture_goal_bytes(
+fn capture_goal_text(
     goals: &mut [Option<PaneGoal>],
     sleeping: &BTreeSet<usize>,
     pane_index: usize,
-    bytes: &[u8],
+    output: &str,
 ) {
     if sleeping.contains(&pane_index) {
         return;
@@ -5772,11 +6031,10 @@ fn capture_goal_bytes(
     if !goal.active {
         return;
     }
-    let output = plain_terminal_text(bytes);
     if output.trim().is_empty() {
         return;
     }
-    goal.output_buffer.push_str(&output);
+    goal.output_buffer.push_str(output);
     trim_goal_buffer(&mut goal.output_buffer);
     goal.last_output_at = Some(Instant::now());
     if !goal.in_flight {
@@ -7292,7 +7550,12 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 fn setup_terminal(enable_mouse: bool) -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableFocusChange
+    )?;
     if enable_mouse {
         execute!(stdout, EnableMouseCapture)?;
     }
@@ -7308,6 +7571,7 @@ fn teardown_terminal(terminal: &mut Tui, enable_mouse: bool) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
+        DisableFocusChange,
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;
@@ -7320,6 +7584,7 @@ fn suspend_terminal(terminal: &mut Tui) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         DisableBracketedPaste,
+        DisableFocusChange,
         DisableMouseCapture,
         LeaveAlternateScreen
     )?;
@@ -7332,7 +7597,8 @@ fn resume_terminal(terminal: &mut Tui) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        EnableFocusChange
     )?;
     Ok(())
 }
@@ -7341,6 +7607,39 @@ fn resume_terminal(terminal: &mut Tui) -> Result<()> {
 mod selection_tests {
     use super::*;
     use vt100::Parser;
+
+    #[test]
+    fn pty_drain_budget_bounds_event_and_byte_work() {
+        let mut event_budget = PtyDrainBudget::new();
+        for _ in 0..PTY_DRAIN_MAX_EVENTS {
+            assert!(event_budget.within_size_limits());
+            event_budget.record(0);
+        }
+        assert!(!event_budget.within_size_limits());
+
+        let mut byte_budget = PtyDrainBudget::new();
+        while byte_budget.bytes < PTY_DRAIN_MAX_BYTES {
+            assert!(byte_budget.within_size_limits());
+            byte_budget.record(32 * 1024);
+        }
+        assert!(!byte_budget.within_size_limits());
+    }
+
+    #[test]
+    fn large_grids_use_a_thirty_fps_output_floor() {
+        assert_eq!(
+            adaptive_output_frame_interval(8, 20),
+            LARGE_GRID_FRAME_INTERVAL
+        );
+        assert_eq!(
+            adaptive_output_frame_interval(16, 4),
+            Duration::from_millis(16)
+        );
+        assert_eq!(
+            adaptive_output_frame_interval(48, 20),
+            Duration::from_millis(48)
+        );
+    }
 
     #[test]
     fn pane_selection_contains_single_and_multi_line_ranges() {
@@ -7461,7 +7760,7 @@ mod selection_tests {
         };
         let mut goals = vec![goal(1), goal(2)];
 
-        capture_goal_bytes(&mut goals, &BTreeSet::new(), 1, b"pane two only\r\n");
+        capture_goal_text(&mut goals, &BTreeSet::new(), 1, "pane two only\n");
 
         assert!(goals[0].as_ref().unwrap().output_buffer.is_empty());
         assert_eq!(goals[1].as_ref().unwrap().output_buffer, "pane two only\n");
