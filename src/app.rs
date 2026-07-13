@@ -32,7 +32,7 @@ use vt100::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 use crate::{
     auth::{self, AgentKind, AuthProfile},
     cli::{Cli, GridMode},
-    codex_sqlite::{CodexSqliteLease, CodexSqlitePool, PaneCodexSqlite},
+    codex_sqlite::{CodexSqlitePool, PaneCodexSqlite},
     composer::{Composer, GridPicker, GridPickerAction},
     config::{Config, PaletteColor, PaneWorkloadPolicy, UiConfig, UiPalette},
     control::{self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse},
@@ -2105,22 +2105,13 @@ impl App {
     }
 
     fn spawn_pane_instance(&mut self, spec: &PaneLaunchSpec, pane_index: usize) -> Result<PtyPane> {
-        self.spawn_pane_instance_with_lease(spec, pane_index, None)
-    }
-
-    fn spawn_pane_instance_with_lease(
-        &mut self,
-        spec: &PaneLaunchSpec,
-        pane_index: usize,
-        preferred_lease: Option<CodexSqliteLease>,
-    ) -> Result<PtyPane> {
         let launch = spec.resolved_command()?;
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
         let PaneCodexSqlite {
             env: extra_env,
             lease: codex_sqlite_lease,
-        } = self.pane_env(pane_index, &spec.env, preferred_lease)?;
+        } = self.pane_env(pane_index, &spec.env)?;
         PtyPane::spawn(
             &spec.profile_name,
             id,
@@ -2142,18 +2133,23 @@ impl App {
         &self,
         pane_index: usize,
         spec_env: &BTreeMap<String, String>,
-        preferred_lease: Option<CodexSqliteLease>,
     ) -> Result<PaneCodexSqlite> {
-        let mut pane_sqlite = self.codex_sqlite.for_pane(spec_env, preferred_lease)?;
+        let mut pane_sqlite = self.codex_sqlite.for_pane(spec_env)?;
 
         if let Some(control) = &self.control_handle {
             pane_sqlite.env.extend([
                 (
                     "GRIDBASH_CONTROL_ADDR".into(),
-                    control.endpoint().to_string(),
+                    control.endpoint().to_string().into(),
                 ),
-                ("GRIDBASH_CONTROL_TOKEN".into(), control.token().to_string()),
-                ("GRIDBASH_PANE_INDEX".into(), (pane_index + 1).to_string()),
+                (
+                    "GRIDBASH_CONTROL_TOKEN".into(),
+                    control.token().to_string().into(),
+                ),
+                (
+                    "GRIDBASH_PANE_INDEX".into(),
+                    (pane_index + 1).to_string().into(),
+                ),
             ]);
         }
 
@@ -5150,8 +5146,7 @@ impl App {
 
         let mut restarted = 0;
         for (index, spec) in specs {
-            let preferred_lease = self.panes[index].take_codex_sqlite_lease_for_restart();
-            let pane = match self.spawn_pane_instance_with_lease(&spec, index, preferred_lease) {
+            let pane = match self.spawn_pane_instance(&spec, index) {
                 Ok(pane) => pane,
                 Err(error) => {
                     self.status = format!("restart failed for pane {}: {error:#}", index + 1);

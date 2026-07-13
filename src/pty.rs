@@ -1,6 +1,8 @@
 use std::{
     collections::BTreeMap,
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::mpsc::{SyncSender, TrySendError, sync_channel},
@@ -112,7 +114,7 @@ pub struct PtyPane {
     pub active: bool,
     pub exited: bool,
     child_reaped: bool,
-    codex_sqlite_lease: Option<CodexSqliteLease>,
+    _codex_sqlite_lease: Option<CodexSqliteLease>,
 }
 
 impl PtyPane {
@@ -125,7 +127,7 @@ impl PtyPane {
         args: &[String],
         env: &BTreeMap<String, String>,
         cwd: &Path,
-        extra_env: &[(String, String)],
+        extra_env: &[(OsString, OsString)],
         codex_sqlite_lease: Option<CodexSqliteLease>,
         scrollback_rows: usize,
         process_priority: PaneProcessPriority,
@@ -211,7 +213,7 @@ impl PtyPane {
             active: false,
             exited: false,
             child_reaped: false,
-            codex_sqlite_lease,
+            _codex_sqlite_lease: codex_sqlite_lease,
         })
     }
 
@@ -436,15 +438,6 @@ impl PtyPane {
 
         let _ = self.reap_child_for(CHILD_REAP_AFTER_FORCE);
         self.exited = true;
-    }
-
-    pub(crate) fn take_codex_sqlite_lease_for_restart(&mut self) -> Option<CodexSqliteLease> {
-        self.reap_child_now();
-        if self.child_reaped {
-            self.codex_sqlite_lease.take()
-        } else {
-            None
-        }
     }
 
     fn reap_child_now(&mut self) -> bool {

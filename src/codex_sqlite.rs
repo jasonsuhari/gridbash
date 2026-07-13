@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     env,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
 };
@@ -25,12 +25,11 @@ pub(crate) struct CodexSqlitePool {
 
 pub(crate) struct CodexSqliteLease {
     home: PathBuf,
-    scope_id: String,
     _lock: File,
 }
 
 pub(crate) struct PaneCodexSqlite {
-    pub(crate) env: Vec<(String, String)>,
+    pub(crate) env: Vec<(OsString, OsString)>,
     pub(crate) lease: Option<CodexSqliteLease>,
 }
 
@@ -48,17 +47,12 @@ impl CodexSqlitePool {
         Ok(Self { root })
     }
 
-    pub(crate) fn for_pane(
-        &self,
-        pane_env: &BTreeMap<String, String>,
-        preferred: Option<CodexSqliteLease>,
-    ) -> Result<PaneCodexSqlite> {
+    pub(crate) fn for_pane(&self, pane_env: &BTreeMap<String, String>) -> Result<PaneCodexSqlite> {
         self.for_pane_with_inherited(
             pane_env,
             env::var_os(CODEX_SQLITE_HOME_ENV).as_deref(),
             env::var_os(GRIDBASH_MANAGED_CODEX_SQLITE_ENV).as_deref(),
             env::var_os(CODEX_HOME_ENV).as_deref(),
-            preferred,
         )
     }
 
@@ -68,7 +62,6 @@ impl CodexSqlitePool {
         inherited_sqlite_home: Option<&OsStr>,
         inherited_managed_home: Option<&OsStr>,
         inherited_codex_home: Option<&OsStr>,
-        preferred: Option<CodexSqliteLease>,
     ) -> Result<PaneCodexSqlite> {
         if has_explicit_sqlite_home(pane_env, inherited_sqlite_home, inherited_managed_home) {
             return Ok(PaneCodexSqlite {
@@ -79,11 +72,8 @@ impl CodexSqlitePool {
 
         let scope = codex_home_scope(pane_env, inherited_codex_home);
         let scope_id = stable_scope_id(&scope);
-        let lease = match preferred {
-            Some(lease) if lease.scope_id == scope_id => lease,
-            _ => self.acquire(&scope_id)?,
-        };
-        let home = lease.home.display().to_string();
+        let lease = self.acquire(&scope_id)?;
+        let home = lease.home.as_os_str().to_os_string();
         Ok(PaneCodexSqlite {
             env: vec![
                 (CODEX_SQLITE_HOME_ENV.into(), home.clone()),
@@ -123,11 +113,7 @@ impl CodexSqlitePool {
 
             match FileExt::try_lock(&lock) {
                 Ok(()) => {
-                    return Ok(CodexSqliteLease {
-                        home,
-                        scope_id: scope_id.into(),
-                        _lock: lock,
-                    });
+                    return Ok(CodexSqliteLease { home, _lock: lock });
                 }
                 Err(TryLockError::WouldBlock) => continue,
                 Err(TryLockError::Error(error)) => {
@@ -174,16 +160,14 @@ fn has_explicit_sqlite_home(
 fn codex_home_scope(
     pane_env: &BTreeMap<String, String>,
     inherited_codex_home: Option<&OsStr>,
-) -> String {
+) -> OsString {
     if let Some(value) = pane_env.get(CODEX_HOME_ENV) {
-        return non_empty(value)
-            .unwrap_or(DEFAULT_CODEX_HOME_SCOPE)
-            .to_string();
+        return non_empty(value).unwrap_or(DEFAULT_CODEX_HOME_SCOPE).into();
     }
 
     inherited_codex_home
         .filter(|value| non_empty_os_str(value))
-        .map(|value| value.to_string_lossy().into_owned())
+        .map(OsStr::to_os_string)
         .unwrap_or_else(|| DEFAULT_CODEX_HOME_SCOPE.into())
 }
 
@@ -192,17 +176,19 @@ fn non_empty(value: &str) -> Option<&str> {
 }
 
 fn non_empty_os_str(value: &OsStr) -> bool {
-    !value.to_string_lossy().trim().is_empty()
+    value
+        .to_str()
+        .map_or_else(|| !value.is_empty(), |value| !value.trim().is_empty())
 }
 
-fn stable_scope_id(value: &str) -> String {
+fn stable_scope_id(value: &OsStr) -> String {
     fn fnv1a(bytes: &[u8], seed: u64) -> u64 {
         bytes.iter().fold(seed, |hash, byte| {
             (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
         })
     }
 
-    let bytes = value.as_bytes();
+    let bytes = value.as_encoded_bytes();
     let first = fnv1a(bytes, 0xcbf2_9ce4_8422_2325);
     let second = fnv1a(bytes, 0x8422_2325_cbf2_9ce4);
     format!("{first:016x}{second:016x}")
@@ -262,11 +248,11 @@ mod tests {
         let pane_env = BTreeMap::new();
 
         let first = first_pool
-            .for_pane_with_inherited(&pane_env, None, None, None, None)
+            .for_pane_with_inherited(&pane_env, None, None, None)
             .expect("first lease");
         let first_home = sqlite_home(&first).to_path_buf();
         let second = second_pool
-            .for_pane_with_inherited(&pane_env, None, None, None, None)
+            .for_pane_with_inherited(&pane_env, None, None, None)
             .expect("second lease");
         let second_home = sqlite_home(&second).to_path_buf();
 
@@ -287,16 +273,29 @@ mod tests {
         );
 
         drop(first);
-        let mut recycled = second_pool
-            .for_pane_with_inherited(&pane_env, None, None, None, None)
+        let recycled = second_pool
+            .for_pane_with_inherited(&pane_env, None, None, None)
             .expect("recycled lease");
         assert_eq!(sqlite_home(&recycled), first_home);
+    }
 
-        let preferred = recycled.lease.take();
-        let replacement = second_pool
-            .for_pane_with_inherited(&pane_env, None, None, None, preferred)
-            .expect("preferred replacement lease");
-        assert_eq!(sqlite_home(&replacement), first_home);
+    #[test]
+    fn restart_allocation_excludes_lane_held_by_old_pane() {
+        let root = TestRoot::new();
+        let pool = root.pool();
+        let pane_env = BTreeMap::new();
+
+        let old_pane = pool
+            .for_pane_with_inherited(&pane_env, None, None, None)
+            .expect("old pane lease");
+        let old_home = sqlite_home(&old_pane).to_path_buf();
+
+        let replacement = pool
+            .for_pane_with_inherited(&pane_env, None, None, None)
+            .expect("replacement pane lease");
+
+        assert!(old_pane.lease.is_some());
+        assert_ne!(sqlite_home(&replacement), old_home);
     }
 
     #[test]
@@ -307,13 +306,7 @@ mod tests {
         let other_marker = OsStr::new("C:\\gridbash\\managed-sqlite");
 
         let inherited = pool
-            .for_pane_with_inherited(
-                &BTreeMap::new(),
-                Some(custom),
-                Some(other_marker),
-                None,
-                None,
-            )
+            .for_pane_with_inherited(&BTreeMap::new(), Some(custom), Some(other_marker), None)
             .expect("inherited override");
         assert!(inherited.env.is_empty());
         assert!(inherited.lease.is_none());
@@ -324,7 +317,7 @@ mod tests {
             custom.to_string_lossy().into(),
         );
         let explicit = pool
-            .for_pane_with_inherited(&explicit, None, None, None, None)
+            .for_pane_with_inherited(&explicit, None, None, None)
             .expect("pane override");
         assert!(explicit.env.is_empty());
         assert!(explicit.lease.is_none());
@@ -332,7 +325,7 @@ mod tests {
         let mut blank = BTreeMap::new();
         blank.insert(CODEX_SQLITE_HOME_ENV.into(), "   ".into());
         let blank = pool
-            .for_pane_with_inherited(&blank, Some(custom), None, None, None)
+            .for_pane_with_inherited(&blank, Some(custom), None, None)
             .expect("blank pane override");
         assert!(!blank.env.is_empty());
         assert!(blank.lease.is_some());
@@ -345,7 +338,7 @@ mod tests {
         let parent = OsStr::new("C:\\gridbash\\parent-sqlite");
 
         let pane = pool
-            .for_pane_with_inherited(&BTreeMap::new(), Some(parent), Some(parent), None, None)
+            .for_pane_with_inherited(&BTreeMap::new(), Some(parent), Some(parent), None)
             .expect("nested pane lease");
 
         assert_ne!(sqlite_home(&pane), Path::new(parent));
@@ -362,11 +355,31 @@ mod tests {
         second_env.insert(CODEX_HOME_ENV.into(), "C:\\codex-b".into());
 
         let first = pool
-            .for_pane_with_inherited(&first_env, None, None, None, None)
+            .for_pane_with_inherited(&first_env, None, None, None)
             .expect("first Codex home");
         let second = pool
-            .for_pane_with_inherited(&second_env, None, None, None, None)
+            .for_pane_with_inherited(&second_env, None, None, None)
             .expect("second Codex home");
+
+        assert_ne!(sqlite_home(&first).parent(), sqlite_home(&second).parent());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn separates_non_utf8_codex_home_scopes_without_loss() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root = TestRoot::new();
+        let pool = root.pool();
+        let first_home = OsString::from_vec(vec![b'/', 0x80]);
+        let second_home = OsString::from_vec(vec![b'/', 0x81]);
+
+        let first = pool
+            .for_pane_with_inherited(&BTreeMap::new(), None, None, Some(&first_home))
+            .expect("first non-UTF-8 Codex home");
+        let second = pool
+            .for_pane_with_inherited(&BTreeMap::new(), None, None, Some(&second_home))
+            .expect("second non-UTF-8 Codex home");
 
         assert_ne!(sqlite_home(&first).parent(), sqlite_home(&second).parent());
     }
