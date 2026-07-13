@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 use vt100::{Parser, Screen};
 
 use crate::{
+    codex_sqlite::CodexSqliteLease,
     config::{PaneProcessPriority, PaneWorkloadPolicy},
     layout::PaneId,
     process_priority::{PaneWorkloadClass, PaneWorkloadController},
@@ -32,6 +33,9 @@ const MAX_REPLAY_OUTPUT_CHARS: usize = 18_000;
 const MAX_OSC_SCAN: usize = 4096;
 const PTY_READ_BUFFER_BYTES: usize = 32 * 1024;
 const PTY_WRITE_QUEUE_MESSAGES: usize = 256;
+const CHILD_REAP_GRACE: Duration = Duration::from_millis(100);
+const CHILD_REAP_AFTER_FORCE: Duration = Duration::from_millis(400);
+const CHILD_REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone)]
 pub enum PtyEvent {
@@ -107,6 +111,8 @@ pub struct PtyPane {
     output_tail_chars: usize,
     pub active: bool,
     pub exited: bool,
+    child_reaped: bool,
+    codex_sqlite_lease: Option<CodexSqliteLease>,
 }
 
 impl PtyPane {
@@ -120,6 +126,7 @@ impl PtyPane {
         env: &BTreeMap<String, String>,
         cwd: &Path,
         extra_env: &[(String, String)],
+        codex_sqlite_lease: Option<CodexSqliteLease>,
         scrollback_rows: usize,
         process_priority: PaneProcessPriority,
         workload_policy: PaneWorkloadPolicy,
@@ -203,6 +210,8 @@ impl PtyPane {
             output_tail_chars: 0,
             active: false,
             exited: false,
+            child_reaped: false,
+            codex_sqlite_lease,
         })
     }
 
@@ -346,8 +355,7 @@ impl PtyPane {
             return false;
         }
 
-        if matches!(self.child.try_wait(), Ok(Some(_))) {
-            self.exited = true;
+        if self.reap_child_now() {
             return true;
         }
 
@@ -406,12 +414,63 @@ impl PtyPane {
     }
 
     pub fn terminate(&mut self) {
-        if self.exited {
+        if self.child_reaped {
+            return;
+        }
+
+        if self.reap_child_now() {
             return;
         }
 
         let _ = self.child.kill();
+        if self.reap_child_for(CHILD_REAP_GRACE) {
+            return;
+        }
+
+        #[cfg(unix)]
+        if let Some(process_id) = self.child.process_id() {
+            // SAFETY: the PID comes from the owned child process. SIGKILL is the
+            // bounded fallback after portable-pty's SIGHUP did not reap it.
+            let _ = unsafe { libc::kill(process_id as i32, libc::SIGKILL) };
+        }
+
+        let _ = self.reap_child_for(CHILD_REAP_AFTER_FORCE);
         self.exited = true;
+    }
+
+    pub(crate) fn take_codex_sqlite_lease_for_restart(&mut self) -> Option<CodexSqliteLease> {
+        self.reap_child_now();
+        if self.child_reaped {
+            self.codex_sqlite_lease.take()
+        } else {
+            None
+        }
+    }
+
+    fn reap_child_now(&mut self) -> bool {
+        if self.child_reaped {
+            return true;
+        }
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            self.child_reaped = true;
+            self.exited = true;
+            return true;
+        }
+        false
+    }
+
+    fn reap_child_for(&mut self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if self.reap_child_now() {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            thread::sleep(CHILD_REAP_POLL_INTERVAL.min(deadline - now));
+        }
     }
 
     fn append_plain_output(&mut self, plain: &str) {
@@ -1186,6 +1245,7 @@ mod tests {
             &BTreeMap::new(),
             &cwd,
             &[],
+            None,
             10_000,
             PaneProcessPriority::BelowNormal,
             PaneWorkloadPolicy::Adaptive,
@@ -1248,6 +1308,7 @@ mod tests {
             &BTreeMap::new(),
             &cwd,
             &[],
+            None,
             10_000,
             PaneProcessPriority::BelowNormal,
             PaneWorkloadPolicy::Adaptive,

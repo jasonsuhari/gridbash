@@ -389,6 +389,20 @@ GRIDBASH_AUTH_HOME > [auth].home > CLAUDE_PROFILES_HOME (legacy) > %USERPROFILE%
 
 Claude profiles launch with `CLAUDE_CONFIG_DIR=<profile-dir>`. Codex profiles launch with `CODEX_HOME=<profile-dir>`.
 
+GridBash also leases every pane a unique persistent `CODEX_SQLITE_HOME`, including
+terminal profiles where you start `codex` manually. Lanes are separated by
+`CODEX_HOME`, protected by cross-process file locks, and reused only after the
+previous pane releases its lease. This keeps concurrent Codex processes from
+contending for the same SQLite databases while shared auth, config, skills, and
+rollout files remain under `CODEX_HOME`. The first use of a new lane can take
+longer while Codex indexes existing rollouts; SQLite-only state such as goals,
+memories, and thread relationships remains local to that lane.
+
+A non-empty `CODEX_SQLITE_HOME` exported before GridBash starts opts out of
+automatic isolation and is left unchanged. Codex's `sqlite_home` config setting
+also keeps its normal precedence. Do not point concurrent panes at the same
+override, or the original lock contention can return.
+
 The default home changed from `%USERPROFILE%\.claude-profiles` to `%USERPROFILE%\.gridbash-auth`. Existing profiles are not moved automatically. Move them to the new directory, set `[auth].home` to the old directory, or keep using the legacy `CLAUDE_PROFILES_HOME` override.
 
 Auth assignment is manual by default. In manual mode, new panes use the configured default for their agent kind and keep any per-pane selection. When auto-cycle is enabled, new compatible panes are assigned round-robin across ready auth profiles of the matching kind. Changing the policy does not restart panes that are already running.
