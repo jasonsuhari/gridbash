@@ -18,6 +18,7 @@
     "npm/bin/",
     "docs/devlogs/",
     "docs/releases/",
+    "docs/AUTOMATED_REVIEW.md",
     "docs/RELEASING.md",
     "README.md",
     "LICENSE",
@@ -30,6 +31,7 @@
     "prepare": "node npm/scripts/prepare.js",
     "release": "node npm/scripts/release.js",
     "test:launcher": "node --test npm/scripts/gridbash-launcher.test.js",
+    "test:review-agent": "node --test npm/scripts/review-agent.test.js",
     "test": "cargo test"
   },
   "keywords": [
