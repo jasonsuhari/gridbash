@@ -10,6 +10,7 @@ pub enum PaneWorkloadClass {
     Background,
 }
 
+#[cfg(windows)]
 impl PaneWorkloadClass {
     fn weight(self) -> u32 {
         match self {
