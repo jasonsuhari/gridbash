@@ -3,7 +3,10 @@
   "version": "0.1.6",
   "description": "GridBash native application for macOS Intel.",
   "license": "MIT",
-  "repository": "github:jasonsuhari/gridbash",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jasonsuhari/gridbash.git"
+  },
   "os": ["darwin"],
   "cpu": ["x64"],
   "files": ["GridBash.app/"]

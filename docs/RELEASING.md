@@ -5,16 +5,20 @@ This repo has an agent-friendly release path:
 1. Land and verify the product change.
 2. Create a devlog.
 3. Run the `Release` GitHub Actions workflow.
-4. GitHub Actions creates the release commit and tag.
+4. For a versioned release, GitHub Actions creates the release commit and tag;
+   nightly builds stamp only their ephemeral build workspace.
 5. GitHub Actions publishes npm and creates the GitHub release.
 
-The release workflow can be run manually from GitHub Actions and also responds
-to pushed tags named `v*`.
+The release workflow can be run manually from GitHub Actions, runs nightly from
+`main`, and also responds to pushed tags named `v*`.
 
 ## One-Time Setup
 
-Prefer npm Trusted Publishing for the `Release` workflow. Configure the package
-on npmjs.com to trust this repository's GitHub Actions workflow.
+Prefer npm Trusted Publishing for the `Release` workflow. Configure the root
+package and all five native packages on npmjs.com to trust this repository's
+`Release` workflow (owner `jasonsuhari`, repository `gridbash`). New package
+names must be bootstrapped once with a short-lived npm token before npm can
+attach their trusted publisher settings.
 
 As a fallback, add an npm automation token as a GitHub repository secret:
 
@@ -46,8 +50,10 @@ Fill in the generated file under `docs/devlogs/`. Keep it factual:
 After the change is merged to `main`:
 
 1. Open the `Release` workflow in GitHub Actions.
-2. Select `Run workflow`.
-3. Set `version` to `patch`, `minor`, `major`, or an exact version like `0.2.0`.
+2. Select `Run workflow` and leave `channel` set to `release`.
+3. Set `version` to an exact prerelease such as `0.2.0-macos.1` while macOS
+   signing is not configured. `patch`, `minor`, and `major` are available after
+   the stable macOS gate is opened.
 4. Optionally set `notes` to a devlog path such as `docs/devlogs/YYYY-MM-DD-title.md`.
 5. Run the workflow.
 
@@ -75,6 +81,27 @@ is already live and updates an existing GitHub release with `--clobber` assets.
 If the whole workflow needs to be dispatched again for an exact version whose
 tag already exists, the prepare job skips version preparation and publishes the
 existing tag.
+
+### Nightlies
+
+The same `Release` workflow runs daily from `main` and supports a manual
+`channel: nightly` dispatch. It stamps an immutable version such as
+`0.2.0-nightly.20260713.42.gabcdef123456` only in the build workspace, so
+nightlies do not create commits or tags on `main`. The workflow skips a nightly
+when the same commit already has a published nightly, unless `force_nightly` is
+selected.
+
+Install the rolling channel with:
+
+```sh
+npm install --global gridbash@nightly
+```
+
+Cross-platform preview releases use npm's `next` channel instead:
+
+```sh
+npm install --global gridbash@next
+```
 
 Separately, if a `v*` tag is pushed from a local release fallback, the tag push
 path in the same workflow publishes npm and creates the GitHub release.
