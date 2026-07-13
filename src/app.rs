@@ -751,6 +751,7 @@ pub struct PaneSettingsView {
     pub auth_kind: Option<AgentKind>,
     pub auth_options: Vec<PaneAuthOption>,
     pub auth_cursor: usize,
+    pub selected_target: PaneSettingsTarget,
     pub goal: Option<PaneGoalView>,
     pub manager_configured: bool,
 }
@@ -763,20 +764,57 @@ pub struct PaneAuthOption {
     pub current: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaneSettingsTarget {
+    Auth,
+    Rename,
+    #[default]
+    Reload,
+    Sleep,
+    Goal,
+    StopGoal,
+}
+
+impl PaneSettingsTarget {
+    fn available(has_auth: bool, has_goal: bool) -> Vec<Self> {
+        let mut targets = Vec::with_capacity(6);
+        if has_auth {
+            targets.push(Self::Auth);
+        }
+        targets.extend([Self::Rename, Self::Reload, Self::Sleep, Self::Goal]);
+        if has_goal {
+            targets.push(Self::StopGoal);
+        }
+        targets
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct PaneSettingsState {
     open: bool,
     pane_index: usize,
     history_summary: Option<String>,
     auth_cursor: usize,
+    selected_target: PaneSettingsTarget,
 }
 
 impl PaneSettingsState {
-    fn open(&mut self, pane_index: usize, history_summary: String, auth_cursor: usize) {
+    fn open(
+        &mut self,
+        pane_index: usize,
+        history_summary: String,
+        auth_cursor: usize,
+        has_auth: bool,
+    ) {
         self.open = true;
         self.pane_index = pane_index;
         self.history_summary = Some(history_summary);
         self.auth_cursor = auth_cursor;
+        self.selected_target = if has_auth {
+            PaneSettingsTarget::Auth
+        } else {
+            PaneSettingsTarget::Reload
+        };
     }
 
     fn close(&mut self) {
@@ -786,6 +824,25 @@ impl PaneSettingsState {
 
     fn refresh_history(&mut self, history_summary: String) {
         self.history_summary = Some(history_summary);
+    }
+
+    fn selected_target(&self, has_auth: bool, has_goal: bool) -> PaneSettingsTarget {
+        match self.selected_target {
+            PaneSettingsTarget::Auth if !has_auth => PaneSettingsTarget::Reload,
+            PaneSettingsTarget::StopGoal if !has_goal => PaneSettingsTarget::Goal,
+            target => target,
+        }
+    }
+
+    fn move_target(&mut self, delta: isize, has_auth: bool, has_goal: bool) {
+        let targets = PaneSettingsTarget::available(has_auth, has_goal);
+        let selected = self.selected_target(has_auth, has_goal);
+        let current = targets
+            .iter()
+            .position(|target| *target == selected)
+            .unwrap_or(0) as isize;
+        let next = (current + delta).clamp(0, targets.len().saturating_sub(1) as isize) as usize;
+        self.selected_target = targets[next];
     }
 }
 
@@ -3534,13 +3591,18 @@ impl App {
             .as_ref()
             .and_then(|plan| plan.panes.get(pane_index))
             .and_then(|spec| spec.auth_name.as_deref());
-        let auth_cursor = self
-            .compatible_auth_profiles(pane_index)
-            .iter()
-            .position(|profile| Some(profile.name.as_str()) == current_auth)
-            .unwrap_or(0);
+        let (auth_cursor, has_auth) = {
+            let profiles = self.compatible_auth_profiles(pane_index);
+            (
+                profiles
+                    .iter()
+                    .position(|profile| Some(profile.name.as_str()) == current_auth)
+                    .unwrap_or(0),
+                !profiles.is_empty(),
+            )
+        };
         self.pane_settings
-            .open(pane_index, history_summary, auth_cursor);
+            .open(pane_index, history_summary, auth_cursor, has_auth);
         self.status = format!("pane {} activity summary open", pane_index + 1);
     }
 
@@ -3570,15 +3632,18 @@ impl App {
             return Ok(KeyOutcome::Render);
         }
         if pane_settings_rename_requested(&key) {
+            self.pane_settings.selected_target = PaneSettingsTarget::Rename;
             self.begin_rename_for(self.pane_settings.pane_index);
             return Ok(KeyOutcome::Render);
         }
         if matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z')) {
+            self.pane_settings.selected_target = PaneSettingsTarget::Sleep;
             let pane_index = self.pane_settings.pane_index;
             self.toggle_sleep_for_panes(&[pane_index]);
             return Ok(KeyOutcome::Render);
         }
         if matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G')) {
+            self.pane_settings.selected_target = PaneSettingsTarget::Goal;
             let pane_index = self.pane_settings.pane_index;
             self.pane_settings.close();
             self.open_goal_editor_for(pane_index);
@@ -3587,6 +3652,7 @@ impl App {
         if matches!(key.code, KeyCode::Char('u') | KeyCode::Char('U')) {
             let pane_index = self.pane_settings.pane_index;
             self.stop_pane_goal(pane_index);
+            self.pane_settings.selected_target = PaneSettingsTarget::Goal;
             return Ok(KeyOutcome::Render);
         }
 
@@ -3595,15 +3661,36 @@ impl App {
                 self.close_pane_settings();
                 true
             }
-            KeyCode::Left | KeyCode::Up => {
-                self.move_pane_auth_cursor(-1);
+            KeyCode::Up => {
+                self.move_pane_settings_target(-1);
                 true
             }
-            KeyCode::Right | KeyCode::Down => {
-                self.move_pane_auth_cursor(1);
+            KeyCode::Down => {
+                self.move_pane_settings_target(1);
                 true
             }
-            KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('a') | KeyCode::Char('A') => {
+            KeyCode::Left => {
+                if self.selected_pane_settings_target() == PaneSettingsTarget::Auth {
+                    self.move_pane_auth_cursor(-1);
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Right => {
+                if self.selected_pane_settings_target() == PaneSettingsTarget::Auth {
+                    self.move_pane_auth_cursor(1);
+                    true
+                } else {
+                    false
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.activate_selected_pane_setting()?;
+                true
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                self.pane_settings.selected_target = PaneSettingsTarget::Auth;
                 if self.selected_pane_auth_profile().is_some() {
                     self.apply_selected_pane_auth()?;
                 } else {
@@ -3612,6 +3699,7 @@ impl App {
                 true
             }
             KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.pane_settings.selected_target = PaneSettingsTarget::Reload;
                 self.reload_pane_history();
                 true
             }
@@ -3623,6 +3711,44 @@ impl App {
         } else {
             Ok(KeyOutcome::Continue)
         }
+    }
+
+    fn pane_settings_target_context(&self) -> (bool, bool) {
+        let pane_index = self.pane_settings.pane_index;
+        let has_auth = !self.compatible_auth_profiles(pane_index).is_empty();
+        let has_goal = self.manager_goal.is_some();
+        (has_auth, has_goal)
+    }
+
+    fn selected_pane_settings_target(&self) -> PaneSettingsTarget {
+        let (has_auth, has_goal) = self.pane_settings_target_context();
+        self.pane_settings.selected_target(has_auth, has_goal)
+    }
+
+    fn move_pane_settings_target(&mut self, delta: isize) {
+        let (has_auth, has_goal) = self.pane_settings_target_context();
+        self.pane_settings.move_target(delta, has_auth, has_goal);
+    }
+
+    fn activate_selected_pane_setting(&mut self) -> Result<()> {
+        let target = self.selected_pane_settings_target();
+        self.pane_settings.selected_target = target;
+        let pane_index = self.pane_settings.pane_index;
+        match target {
+            PaneSettingsTarget::Auth => self.apply_selected_pane_auth()?,
+            PaneSettingsTarget::Rename => self.begin_rename_for(pane_index),
+            PaneSettingsTarget::Reload => self.reload_pane_history(),
+            PaneSettingsTarget::Sleep => self.toggle_sleep_for_panes(&[pane_index]),
+            PaneSettingsTarget::Goal => {
+                self.pane_settings.close();
+                self.open_goal_editor_for(pane_index);
+            }
+            PaneSettingsTarget::StopGoal => {
+                self.stop_pane_goal(pane_index);
+                self.pane_settings.selected_target = PaneSettingsTarget::Goal;
+            }
+        }
+        Ok(())
     }
 
     fn compatible_auth_profiles(&self, pane_index: usize) -> Vec<&AuthProfile> {
@@ -4348,15 +4474,18 @@ impl App {
         }
 
         if self.pane_settings_reload_button_at(mouse.column, mouse.row) {
+            self.pane_settings.selected_target = PaneSettingsTarget::Reload;
             self.reload_pane_history();
             return true;
         }
         if self.pane_settings_sleep_button_at(mouse.column, mouse.row) {
+            self.pane_settings.selected_target = PaneSettingsTarget::Sleep;
             let pane_index = self.pane_settings.pane_index;
             self.toggle_sleep_for_panes(&[pane_index]);
             return true;
         }
         if self.pane_settings_goal_button_at(mouse.column, mouse.row) {
+            self.pane_settings.selected_target = PaneSettingsTarget::Goal;
             let pane_index = self.pane_settings.pane_index;
             self.pane_settings.close();
             self.open_goal_editor_for(pane_index);
@@ -4365,9 +4494,11 @@ impl App {
         if self.pane_settings_stop_goal_button_at(mouse.column, mouse.row) {
             let pane_index = self.pane_settings.pane_index;
             self.stop_pane_goal(pane_index);
+            self.pane_settings.selected_target = PaneSettingsTarget::Goal;
             return true;
         }
         if self.pane_settings_rename_button_at(mouse.column, mouse.row) {
+            self.pane_settings.selected_target = PaneSettingsTarget::Rename;
             self.begin_rename_for(self.pane_settings.pane_index);
             return true;
         }
@@ -5570,7 +5701,14 @@ impl App {
                 ready: profile.ready,
                 current: Some(profile.name.as_str()) == current_auth,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let goal = self.manager_goal.as_ref().map(|goal| PaneGoalView {
+            objective: goal.objective.clone(),
+            status: goal.status.clone(),
+        });
+        let selected_target = self
+            .pane_settings
+            .selected_target(!auth_options.is_empty(), goal.is_some());
         Some(PaneSettingsView {
             index,
             label: self.pane_label(index),
@@ -5591,10 +5729,8 @@ impl App {
             auth_kind: spec.and_then(|spec| spec.command.agent_kind),
             auth_options,
             auth_cursor: self.pane_settings.auth_cursor,
-            goal: self.manager_goal.as_ref().map(|goal| PaneGoalView {
-                objective: goal.objective.clone(),
-                status: goal.status.clone(),
-            }),
+            selected_target,
+            goal,
             manager_configured: self.config.manager.is_configured(),
         })
     }
@@ -8161,7 +8297,7 @@ mod tests {
     #[test]
     fn pane_settings_tracks_active_pane_history() {
         let mut settings = PaneSettingsState::default();
-        settings.open(2, "Assistant: ready".into(), 1);
+        settings.open(2, "Assistant: ready".into(), 1, true);
         assert!(settings.open);
         assert_eq!(settings.pane_index, 2);
         assert_eq!(
@@ -8169,6 +8305,7 @@ mod tests {
             Some("Assistant: ready")
         );
         assert_eq!(settings.auth_cursor, 1);
+        assert_eq!(settings.selected_target, PaneSettingsTarget::Auth);
 
         settings.refresh_history("User: rerun tests".into());
         assert_eq!(
@@ -8179,6 +8316,148 @@ mod tests {
         settings.close();
         assert!(!settings.open);
         assert!(settings.history_summary.is_none());
+    }
+
+    #[test]
+    fn pane_settings_moves_through_visible_targets() {
+        let mut settings = PaneSettingsState::default();
+        settings.open(0, "waiting for output".into(), 0, false);
+
+        assert_eq!(
+            settings.selected_target(false, false),
+            PaneSettingsTarget::Reload
+        );
+        settings.move_target(-1, false, false);
+        assert_eq!(settings.selected_target, PaneSettingsTarget::Rename);
+        settings.move_target(-1, false, false);
+        assert_eq!(settings.selected_target, PaneSettingsTarget::Rename);
+
+        settings.move_target(1, false, false);
+        settings.move_target(1, false, false);
+        settings.move_target(1, false, false);
+        settings.move_target(1, false, false);
+        assert_eq!(settings.selected_target, PaneSettingsTarget::Goal);
+    }
+
+    #[test]
+    fn pane_settings_key_handler_uses_vertical_arrows_for_controls() {
+        let cli = Cli::parse_from(["gridbash"]);
+        let mut app = App::new(cli, Config::default()).expect("app");
+        app.pane_settings
+            .open(0, "waiting for output".into(), 0, false);
+
+        assert_eq!(
+            app.handle_pane_settings_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE,))
+                .expect("down"),
+            KeyOutcome::Render
+        );
+        assert_eq!(app.pane_settings.selected_target, PaneSettingsTarget::Sleep);
+        assert_eq!(
+            app.handle_pane_settings_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+                .expect("up"),
+            KeyOutcome::Render
+        );
+        assert_eq!(
+            app.pane_settings.selected_target,
+            PaneSettingsTarget::Reload
+        );
+        assert_eq!(
+            app.handle_pane_settings_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE,))
+                .expect("left"),
+            KeyOutcome::Continue
+        );
+        assert_eq!(app.pane_settings.auth_cursor, 0);
+
+        assert_eq!(
+            app.handle_pane_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE,))
+                .expect("activate"),
+            KeyOutcome::Render
+        );
+        assert!(!app.pane_settings.open);
+        assert!(app.status.contains("no longer available"));
+    }
+
+    #[test]
+    fn pane_settings_normalizes_optional_targets() {
+        let mut settings = PaneSettingsState::default();
+        settings.open(0, "waiting for output".into(), 0, true);
+        assert_eq!(settings.selected_target, PaneSettingsTarget::Auth);
+
+        settings.selected_target = PaneSettingsTarget::StopGoal;
+        assert_eq!(
+            settings.selected_target(true, false),
+            PaneSettingsTarget::Goal
+        );
+        assert_eq!(
+            settings.selected_target(true, true),
+            PaneSettingsTarget::StopGoal
+        );
+
+        settings.selected_target = PaneSettingsTarget::Auth;
+        assert_eq!(
+            settings.selected_target(false, false),
+            PaneSettingsTarget::Reload
+        );
+    }
+
+    #[test]
+    fn pane_settings_includes_optional_targets_in_navigation_order() {
+        assert_eq!(
+            PaneSettingsTarget::available(false, false),
+            vec![
+                PaneSettingsTarget::Rename,
+                PaneSettingsTarget::Reload,
+                PaneSettingsTarget::Sleep,
+                PaneSettingsTarget::Goal,
+            ]
+        );
+        assert_eq!(
+            PaneSettingsTarget::available(true, false),
+            vec![
+                PaneSettingsTarget::Auth,
+                PaneSettingsTarget::Rename,
+                PaneSettingsTarget::Reload,
+                PaneSettingsTarget::Sleep,
+                PaneSettingsTarget::Goal,
+            ]
+        );
+        assert_eq!(
+            PaneSettingsTarget::available(false, true),
+            vec![
+                PaneSettingsTarget::Rename,
+                PaneSettingsTarget::Reload,
+                PaneSettingsTarget::Sleep,
+                PaneSettingsTarget::Goal,
+                PaneSettingsTarget::StopGoal,
+            ]
+        );
+        assert_eq!(
+            PaneSettingsTarget::available(true, true),
+            vec![
+                PaneSettingsTarget::Auth,
+                PaneSettingsTarget::Rename,
+                PaneSettingsTarget::Reload,
+                PaneSettingsTarget::Sleep,
+                PaneSettingsTarget::Goal,
+                PaneSettingsTarget::StopGoal,
+            ]
+        );
+
+        let mut settings = PaneSettingsState {
+            selected_target: PaneSettingsTarget::Goal,
+            ..PaneSettingsState::default()
+        };
+        settings.move_target(1, false, true);
+        assert_eq!(settings.selected_target, PaneSettingsTarget::StopGoal);
+        settings.move_target(10, false, true);
+        assert_eq!(settings.selected_target, PaneSettingsTarget::StopGoal);
+
+        settings.selected_target = PaneSettingsTarget::Auth;
+        settings.move_target(1, false, false);
+        assert_eq!(settings.selected_target, PaneSettingsTarget::Sleep);
+        settings.selected_target = PaneSettingsTarget::StopGoal;
+        settings.move_target(-1, false, false);
+        assert_eq!(settings.selected_target, PaneSettingsTarget::Sleep);
     }
 
     #[test]

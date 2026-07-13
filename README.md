@@ -305,7 +305,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+c | Expand and focus the command line, or close it when focused |
 | Alt+Shift+V | Listen for one dictated utterance; press again to cancel |
 | Alt+h or F1 | Open or close the in-app help and shortcut legend |
-| Alt+p | Open a focused-pane activity summary with its latest meaningful terminal output |
+| Alt+p | Open the focused-pane activity summary; use Up/Down and Enter to navigate its controls |
 | Alt+Shift+p | Open the previous panes list |
 | Alt+r | Rename the focused pane |
 | Alt+Shift+r | Rename the current tab |
@@ -317,19 +317,20 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+o | Open settings |
 | Alt+q | Quit |
 
-The focused-pane activity summary also includes sleep/wake controls for that pane
-and manager-goal controls for the current grid. Press `z` to sleep or wake the
-pane, `g` to create or edit the grid goal, and `u` to stop it. The grid manager
-reviews relevant live panes and sends each follow-up only to its validated awake,
+The focused-pane activity summary includes auth, rename, refresh, sleep/wake,
+and manager-goal controls for the current grid. Use `Up`/`Down` to select a
+control and `Enter` or `Space` to use it. The direct shortcuts remain available:
+`n` renames, `r` refreshes the activity snapshot, `z` sleeps or wakes the pane,
+`g` creates or edits the grid goal, and `u` stops it. The grid manager reviews
+relevant live panes and sends each follow-up only to its validated awake,
 running targets.
 
 Each pane's top border shows its latest activity summary instead of repeating
 the folder, branch, and launch profile. When a grid manager goal is set, its
 objective takes that spot across the grid until the goal is removed.
 
-In the activity summary, press `Enter`, `Space`, or `r` to refresh the latest
-captured terminal result. Press `Esc`, `q`, or `Alt+p` to close it, or
-`Alt+o` to switch to overall settings.
+Press `Esc`, `q`, or `Alt+p` to close the activity summary, or `Alt+o` to switch
+to overall settings.
 
 When the focused pane has exited, GridBash shows a recovery dialog. Press `Enter`,
 `r`, or `t` to restart it, or press `z` to put it to sleep. `Alt+Shift+t` restarts
@@ -412,7 +413,7 @@ Auth settings controls:
 | r | Refresh local account and usage status |
 | Esc / q | Close settings |
 
-For a Claude or Codex pane, open Pane Activity with `Alt+p`, use Left/Right to choose a compatible auth profile, and press Enter to apply it and restart that pane. Press `r` there to refresh the activity snapshot.
+For a Claude or Codex pane, open Pane Activity with `Alt+p`, use Up/Down to select the auth control, use Left/Right to choose a compatible auth profile, and press Enter to apply it and restart that pane. Press `r` there to refresh the activity snapshot.
 
 Usage status is best-effort. GridBash reads local auth metadata, masks account emails, and uses short-timeout `curl.exe` (Windows) or `curl` (macOS) requests only while the Auth settings view is refreshed.
 
