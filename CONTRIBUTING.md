@@ -38,6 +38,14 @@ xcode-select --install
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
+On Debian or Ubuntu, install the native build dependencies before Rust:
+
+```bash
+sudo apt-get update
+sudo apt-get install build-essential pkg-config libasound2-dev cmake clang
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
 Clone and build:
 
 ```powershell
@@ -49,15 +57,18 @@ cargo build
 Run from source:
 
 ```powershell
-cargo run -- 2x3 --profile powershell
+cargo run
 ```
 
-Install the npm shim from a local checkout:
+Install the npm command from a local checkout:
 
 ```powershell
-npm install -g .
+npm run install:local
 gridbash --list-profiles
 ```
+
+This installs from a packed copy so the global command does not point at a
+temporary worktree checkout.
 
 ## Validation
 
@@ -102,7 +113,7 @@ Please coordinate first before working on:
 Use the bug report issue template. A strong report includes:
 
 - GridBash version or commit.
-- Windows version.
+- OS and version.
 - Host terminal.
 - Shell or agent profile used.
 - Exact command that launched GridBash.
