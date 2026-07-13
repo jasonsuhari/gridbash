@@ -963,7 +963,6 @@ struct CommandLineState {
     input: String,
     cursor: usize,
     output_lines: Vec<String>,
-    output_expanded: bool,
     running: bool,
 }
 
@@ -984,9 +983,16 @@ impl CommandLineState {
             input: String::new(),
             cursor: 0,
             output_lines: Vec::new(),
-            output_expanded: false,
             running: false,
         }
+    }
+
+    fn toggle_focus(&mut self) {
+        self.focused = !self.focused;
+    }
+
+    fn output_expanded(&self) -> bool {
+        self.focused
     }
 
     fn insert_text(&mut self, text: &str) {
@@ -1720,10 +1726,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     } else {
-        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     }
 }
@@ -3053,21 +3059,12 @@ impl App {
                 Ok(Some(false))
             }
             'c' => {
-                self.command_line.focused = !self.command_line.focused;
+                self.command_line.toggle_focus();
                 self.status = self.focus_status();
                 Ok(Some(false))
             }
             'v' if is_voice_shortcut(ch, modifiers) => {
                 self.toggle_voice_input();
-                Ok(Some(false))
-            }
-            'e' => {
-                self.command_line.output_expanded = !self.command_line.output_expanded;
-                self.status = if self.command_line.output_expanded {
-                    "command output expanded".into()
-                } else {
-                    "command output hidden".into()
-                };
                 Ok(Some(false))
             }
             'g' => {
@@ -5583,7 +5580,7 @@ impl App {
     }
 
     pub fn command_output_expanded(&self) -> bool {
-        self.command_line.output_expanded
+        self.command_line.output_expanded()
     }
 
     pub fn command_output_lines(&self) -> &[String] {
@@ -7528,6 +7525,21 @@ mod tests {
         assert_eq!(command.cursor_chars(), 3);
         assert!(command.backspace());
         assert_eq!(command.input, "abc");
+    }
+
+    #[test]
+    fn command_line_focus_controls_output_visibility() {
+        let mut command = CommandLineState::new(PathBuf::from("C:\\repo"));
+        assert!(!command.focused);
+        assert!(!command.output_expanded());
+
+        command.toggle_focus();
+        assert!(command.focused);
+        assert!(command.output_expanded());
+
+        command.toggle_focus();
+        assert!(!command.focused);
+        assert!(!command.output_expanded());
     }
 
     #[test]
