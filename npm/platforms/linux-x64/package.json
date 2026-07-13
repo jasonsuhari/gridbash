@@ -1,14 +1,22 @@
 {
   "name": "gridbash-linux-x64",
-  "version": "0.1.6",
+  "version": "0.2.0-macos.1",
   "description": "GridBash native binary for Linux x64.",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jasonsuhari/gridbash.git"
   },
-  "os": ["linux"],
-  "cpu": ["x64"],
-  "libc": ["glibc"],
-  "files": ["bin/"]
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "files": [
+    "bin/"
+  ]
 }

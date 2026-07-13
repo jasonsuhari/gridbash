@@ -1,13 +1,19 @@
 {
   "name": "gridbash-darwin-arm64",
-  "version": "0.1.6",
+  "version": "0.2.0-macos.1",
   "description": "GridBash native application for macOS Apple Silicon.",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jasonsuhari/gridbash.git"
   },
-  "os": ["darwin"],
-  "cpu": ["arm64"],
-  "files": ["GridBash.app/"]
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "GridBash.app/"
+  ]
 }

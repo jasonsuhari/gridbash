@@ -1,6 +1,6 @@
 {
   "name": "gridbash",
-  "version": "0.1.6",
+  "version": "0.2.0-macos.1",
   "description": "Cross-platform terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side.",
   "license": "MIT",
   "homepage": "https://jasonsuhari.github.io/gridbash/",
@@ -71,10 +71,10 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "gridbash-win32-x64": "0.1.6",
-    "gridbash-linux-x64": "0.1.6",
-    "gridbash-linux-arm64": "0.1.6",
-    "gridbash-darwin-arm64": "0.1.6",
-    "gridbash-darwin-x64": "0.1.6"
+    "gridbash-win32-x64": "0.2.0-macos.1",
+    "gridbash-linux-x64": "0.2.0-macos.1",
+    "gridbash-linux-arm64": "0.2.0-macos.1",
+    "gridbash-darwin-arm64": "0.2.0-macos.1",
+    "gridbash-darwin-x64": "0.2.0-macos.1"
   }
 }

@@ -1,13 +1,19 @@
 {
   "name": "gridbash-win32-x64",
-  "version": "0.1.6",
+  "version": "0.2.0-macos.1",
   "description": "GridBash native binary for Windows x64.",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jasonsuhari/gridbash.git"
   },
-  "os": ["win32"],
-  "cpu": ["x64"],
-  "files": ["bin/"]
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/"
+  ]
 }
