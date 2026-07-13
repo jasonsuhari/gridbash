@@ -1,0 +1,1165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GridBash Product Launch</title>
+    <style>
+      @property --star-count {
+        syntax: "<integer>";
+        inherits: false;
+        initial-value: 0;
+      }
+
+      @font-face {
+        font-family: "Cascadia Mono";
+        src: local("Cascadia Mono");
+      }
+
+      :root {
+        --canvas: #0b1118;
+        --panel: #121720;
+        --foreground: #f0f4f9;
+        --muted: #8fa2b7;
+        --green: #29d392;
+        --blue: #48a5ff;
+        --amber: #ffca5c;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 1920px;
+        height: 1080px;
+        margin: 0;
+        overflow: hidden;
+        background-color: #0b1118;
+        color: #f0f4f9;
+        font-family: "Cascadia Mono", monospace;
+      }
+
+      #main {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background-color: #0b1118;
+      }
+
+      .scene {
+        position: absolute;
+        inset: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background-color: #0b1118;
+        transform-origin: 50% 50%;
+      }
+
+      #scene-1 {
+        z-index: 1;
+        opacity: 1;
+      }
+
+      #scene-2,
+      #scene-3,
+      #scene-4,
+      #scene-5,
+      #scene-6 {
+        z-index: 2;
+        opacity: 0;
+      }
+
+      .scene::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        z-index: 80;
+        pointer-events: none;
+        opacity: 0.14;
+        background-image:
+          repeating-linear-gradient(0deg, rgba(240, 244, 249, 0.035) 0, rgba(240, 244, 249, 0.035) 1px, rgba(11, 17, 24, 0) 1px, rgba(11, 17, 24, 0) 4px),
+          radial-gradient(circle at 20% 30%, rgba(41, 211, 146, 0.14), rgba(41, 211, 146, 0) 44%);
+      }
+
+      .scene-content {
+        position: relative;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        height: 100%;
+        padding: 58px 70px 72px;
+        gap: 26px;
+      }
+
+      .camera-full,
+      .product-full {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+      }
+
+      .camera-full video,
+      .product-full video,
+      .product-full img,
+      .camera-card video,
+      .product-shell video,
+      .product-shell img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      .camera-full video {
+        filter: saturate(0.94) contrast(1.06) brightness(0.72);
+      }
+
+      .camera-card {
+        position: absolute;
+        overflow: hidden;
+        border: 2px solid #29d392;
+        border-radius: 18px;
+        background-color: #121720;
+        box-shadow: 0 30px 80px rgba(11, 17, 24, 0.78);
+      }
+
+      .camera-card video {
+        filter: saturate(0.95) contrast(1.04) brightness(0.83);
+      }
+
+      .dispatch-rail {
+        position: relative;
+        z-index: 30;
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        align-items: center;
+        gap: 22px;
+        width: 100%;
+        color: #29d392;
+        font-size: 25px;
+        font-weight: 700;
+        letter-spacing: 0.085em;
+        text-transform: uppercase;
+      }
+
+      .dispatch-rail .rule {
+        height: 3px;
+        background-color: #29d392;
+        transform-origin: left center;
+      }
+
+      .dispatch-rail .counter {
+        color: #8fa2b7;
+      }
+
+      .display {
+        margin: 0;
+        font-family: "Archivo Black", sans-serif;
+        font-weight: 400;
+        letter-spacing: -0.045em;
+        line-height: 0.9;
+        text-transform: uppercase;
+      }
+
+      .operational-label {
+        display: inline-flex;
+        align-items: center;
+        width: max-content;
+        min-height: 48px;
+        padding: 10px 16px;
+        border: 2px solid rgba(143, 162, 183, 0.62);
+        border-radius: 8px;
+        background-color: rgba(18, 23, 32, 0.88);
+        color: #f0f4f9;
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: 0.055em;
+        text-transform: uppercase;
+        box-shadow: 0 12px 36px rgba(11, 17, 24, 0.46);
+      }
+
+      .accent-green {
+        color: #29d392;
+      }
+
+      .accent-blue {
+        color: #48a5ff;
+      }
+
+      .accent-amber {
+        color: #ffca5c;
+      }
+
+      /* Scene 1 */
+      #scene-1 .camera-full::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(circle at 74% 54%, rgba(11, 17, 24, 0.08), rgba(11, 17, 24, 0.76) 58%),
+          linear-gradient(90deg, rgba(11, 17, 24, 0.18), rgba(11, 17, 24, 0.58));
+      }
+
+      #scene-1 .scene-content {
+        justify-content: space-between;
+      }
+
+      .hook-world {
+        position: relative;
+        display: grid;
+        grid-template-columns: 1.05fr 0.95fr;
+        align-items: end;
+        flex: 1;
+        width: 100%;
+      }
+
+      .hook-meta {
+        align-self: end;
+        padding-bottom: 116px;
+      }
+
+      .hook-meta .kicker {
+        margin-bottom: 20px;
+        color: #8fa2b7;
+        font-size: 25px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+      }
+
+      .hook-meta .small-copy {
+        max-width: 620px;
+        color: #f0f4f9;
+        font-size: 34px;
+        line-height: 1.35;
+      }
+
+      .hook-number-wrap {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        justify-content: center;
+        min-height: 620px;
+        padding-right: 30px;
+      }
+
+      .hook-number {
+        color: #ffca5c;
+        font-size: 340px;
+        text-shadow: 0 24px 80px rgba(255, 202, 92, 0.22);
+      }
+
+      .hook-title {
+        max-width: 760px;
+        color: #f0f4f9;
+        font-size: 98px;
+        text-align: right;
+      }
+
+      .session-ticks {
+        position: absolute;
+        right: 30px;
+        bottom: 72px;
+        display: flex;
+        gap: 12px;
+      }
+
+      .session-tick {
+        width: 44px;
+        height: 12px;
+        border-radius: 4px;
+        background-color: #29d392;
+        box-shadow: 0 0 20px rgba(41, 211, 146, 0.24);
+      }
+
+      /* Scene 2 */
+      #scene-2 {
+        background-color: #0b1118;
+      }
+
+      #scene-2 .camera-card {
+        top: 205px;
+        right: 70px;
+        width: 1110px;
+        height: 624px;
+      }
+
+      .terminal-stack {
+        position: absolute;
+        top: 224px;
+        left: 70px;
+        z-index: 20;
+        display: grid;
+        grid-template-columns: 270px 270px;
+        gap: 18px;
+        width: 560px;
+      }
+
+      .terminal-card {
+        min-height: 146px;
+        padding: 18px;
+        border: 2px solid rgba(143, 162, 183, 0.34);
+        border-radius: 12px;
+        background-color: rgba(18, 23, 32, 0.96);
+        box-shadow: 0 18px 48px rgba(11, 17, 24, 0.62);
+      }
+
+      .terminal-card .terminal-name {
+        margin-bottom: 20px;
+        color: #8fa2b7;
+        font-size: 19px;
+        font-weight: 700;
+        text-transform: uppercase;
+      }
+
+      .terminal-card .terminal-command {
+        color: #29d392;
+        font-size: 23px;
+        line-height: 1.35;
+      }
+
+      .problem-stamp {
+        position: absolute;
+        left: 70px;
+        bottom: 260px;
+        z-index: 24;
+        color: #ffca5c;
+        font-size: 67px;
+      }
+
+      .grid-silhouette {
+        position: absolute;
+        left: 86px;
+        bottom: 250px;
+        z-index: 22;
+        display: grid;
+        grid-template-columns: repeat(3, 70px);
+        grid-template-rows: repeat(2, 48px);
+        gap: 8px;
+        opacity: 0;
+      }
+
+      .grid-silhouette span {
+        border: 2px solid #29d392;
+        border-radius: 6px;
+        background-color: rgba(41, 211, 146, 0.13);
+      }
+
+      /* Scene 3 */
+      #scene-3 .product-shell {
+        position: absolute;
+        top: 196px;
+        left: 70px;
+        z-index: 16;
+        width: 1260px;
+        height: 710px;
+        overflow: hidden;
+        border: 3px solid #29d392;
+        border-radius: 18px;
+        background-color: #121720;
+        box-shadow: 0 36px 96px rgba(11, 17, 24, 0.78);
+      }
+
+      #scene-3 .product-motion {
+        width: 100%;
+        height: 100%;
+      }
+
+      #scene-3 .camera-card {
+        top: 278px;
+        right: 70px;
+        z-index: 18;
+        width: 500px;
+        height: 282px;
+        border-color: #48a5ff;
+      }
+
+      .product-wordmark {
+        position: absolute;
+        right: 70px;
+        bottom: 248px;
+        z-index: 22;
+        width: 500px;
+        color: #f0f4f9;
+        font-size: 104px;
+        text-align: right;
+      }
+
+      .product-definition {
+        position: absolute;
+        right: 70px;
+        bottom: 158px;
+        z-index: 22;
+        width: 500px;
+        color: #8fa2b7;
+        font-size: 27px;
+        line-height: 1.45;
+        text-align: right;
+      }
+
+      /* Scene 4 */
+      #scene-4 .product-full {
+        inset: 90px 50px 92px;
+        width: auto;
+        height: auto;
+        border: 3px solid #29d392;
+        border-radius: 18px;
+        background-color: #121720;
+        box-shadow: 0 36px 100px rgba(11, 17, 24, 0.78);
+      }
+
+      #scene-4 .product-full video {
+        object-fit: contain;
+      }
+
+      .proof-rail {
+        position: absolute;
+        top: 40px;
+        left: 58px;
+        z-index: 28;
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        color: #48a5ff;
+        font-size: 24px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .proof-counter {
+        position: absolute;
+        top: 42px;
+        right: 58px;
+        z-index: 28;
+        padding: 10px 16px;
+        border-radius: 8px;
+        background-color: #ffca5c;
+        color: #0b1118;
+        font-size: 24px;
+        font-weight: 700;
+      }
+
+      .callout {
+        position: absolute;
+        z-index: 30;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+
+      .callout .callout-rule {
+        width: 108px;
+        height: 3px;
+        background-color: #29d392;
+        transform-origin: left center;
+      }
+
+      .callout-session {
+        top: 250px;
+        left: 82px;
+      }
+
+      .callout-focus {
+        top: 334px;
+        right: 74px;
+        flex-direction: row-reverse;
+      }
+
+      .callout-select {
+        top: 516px;
+        right: 74px;
+        flex-direction: row-reverse;
+      }
+
+      .callout-broadcast {
+        bottom: 122px;
+        left: 94px;
+      }
+
+      .scan-rule {
+        position: absolute;
+        top: 92px;
+        bottom: 94px;
+        left: 52px;
+        z-index: 24;
+        width: 4px;
+        background-color: #29d392;
+        box-shadow: 0 0 36px rgba(41, 211, 146, 0.8);
+      }
+
+      /* Scene 5 */
+      #scene-5 .product-full {
+        filter: brightness(0.46) saturate(0.86);
+      }
+
+      #scene-5 .camera-card {
+        top: 228px;
+        left: 70px;
+        z-index: 18;
+        width: 720px;
+        height: 405px;
+      }
+
+      .branch-map {
+        position: absolute;
+        top: 214px;
+        right: 78px;
+        z-index: 26;
+        display: flex;
+        flex-direction: column;
+        width: 960px;
+        gap: 34px;
+      }
+
+      .branch-row {
+        display: grid;
+        grid-template-columns: 1fr 290px;
+        align-items: center;
+        gap: 22px;
+      }
+
+      .branch-line {
+        height: 4px;
+        background-color: #29d392;
+        transform-origin: left center;
+        box-shadow: 0 0 24px rgba(41, 211, 146, 0.3);
+      }
+
+      .branch-label {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+        padding: 14px 18px;
+        border: 2px solid rgba(41, 211, 146, 0.72);
+        border-radius: 8px;
+        background-color: rgba(18, 23, 32, 0.94);
+      }
+
+      .branch-label strong {
+        color: #f0f4f9;
+        font-size: 22px;
+      }
+
+      .branch-label span {
+        color: #8fa2b7;
+        font-size: 17px;
+      }
+
+      .no-fights {
+        position: absolute;
+        right: 78px;
+        bottom: 238px;
+        z-index: 28;
+        color: #ffca5c;
+        font-size: 74px;
+      }
+
+      /* Scene 6 */
+      #s6-camera {
+        z-index: 4;
+        opacity: 0;
+      }
+
+      #s6-camera video {
+        filter: saturate(0.82) contrast(1.06) brightness(0.38);
+      }
+
+      #s6-camera::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(circle at 50% 48%, rgba(11, 17, 24, 0.18), rgba(11, 17, 24, 0.86) 72%);
+      }
+
+      .github-proof {
+        position: absolute;
+        inset: 0;
+        z-index: 28;
+        width: 100%;
+        height: 100%;
+        padding: 108px 64px 0;
+        box-sizing: border-box;
+      }
+
+      .github-viewport {
+        position: relative;
+        width: 100%;
+        height: 682px;
+        overflow: hidden;
+        border: 2px solid rgba(143, 162, 183, 0.56);
+        border-radius: 18px;
+        background-color: #121720;
+        box-shadow: 0 30px 96px rgba(11, 17, 24, 0.72);
+      }
+
+      .github-viewport::after {
+        content: "LIVE REPOSITORY PROOF";
+        position: absolute;
+        left: 22px;
+        top: 22px;
+        padding: 10px 16px;
+        border: 2px solid #29d392;
+        border-radius: 8px;
+        background-color: rgba(18, 23, 32, 0.94);
+        color: #f0f4f9;
+        font-family: "Cascadia Mono", monospace;
+        font-size: 19px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+      }
+
+      .github-repo-image {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        object-position: 50% 0;
+        transform-origin: 76% 9%;
+        will-change: transform;
+      }
+
+      .github-proof-rail {
+        display: flex;
+        align-items: center;
+        width: 100%;
+        min-height: 82px;
+        margin-top: 12px;
+        padding: 10px 18px;
+        border: 2px solid #29d392;
+        border-radius: 12px;
+        background-color: rgba(18, 23, 32, 0.96);
+        box-shadow: 0 18px 54px rgba(11, 17, 24, 0.64);
+      }
+
+      .github-star-proof {
+        display: flex;
+        align-items: baseline;
+        min-width: 230px;
+        opacity: 0;
+        color: #f0f4f9;
+        font-family: "Cascadia Mono", monospace;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .github-star-glyph {
+        margin-right: 13px;
+        color: #ffca5c;
+        font-size: 35px;
+      }
+
+      .github-star-count {
+        --star-count: 0;
+        counter-reset: stars var(--star-count);
+        font-family: "Archivo Black", sans-serif;
+        font-size: 66px;
+        letter-spacing: -0.045em;
+        line-height: 0.9;
+      }
+
+      .github-star-count::after {
+        content: counter(stars);
+      }
+
+      .github-star-label {
+        margin-left: 15px;
+        color: #8fa2b7;
+        font-size: 23px;
+        letter-spacing: 0.08em;
+      }
+
+      .github-proof-rule {
+        width: 3px;
+        height: 48px;
+        margin: 0 25px 0 4px;
+        opacity: 0;
+        background-color: #29d392;
+        transform-origin: center top;
+      }
+
+      .github-license {
+        flex: 1;
+        opacity: 0;
+        color: #f0f4f9;
+        font-size: 29px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+      }
+
+      .github-os-row {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .github-os-chip {
+        min-width: 118px;
+        padding: 11px 15px;
+        opacity: 0;
+        border: 2px solid rgba(143, 162, 183, 0.56);
+        border-radius: 8px;
+        background-color: #121720;
+        color: #f0f4f9;
+        font-size: 21px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-align: center;
+      }
+
+      .install-world {
+        z-index: 20;
+        opacity: 0;
+      }
+
+      .install-world .dispatch-rail > *,
+      .install-world .cta-world > * {
+        opacity: 0;
+      }
+
+      .cta-world {
+        position: relative;
+        z-index: 24;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        flex: 1;
+        gap: 26px;
+      }
+
+      .cta-title {
+        color: #f0f4f9;
+        font-size: 118px;
+        text-align: center;
+      }
+
+      .command-plate {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 1320px;
+        min-height: 160px;
+        padding: 34px 54px;
+        border: 3px solid #29d392;
+        border-radius: 18px;
+        background-color: rgba(18, 23, 32, 0.94);
+        box-shadow: 0 30px 96px rgba(11, 17, 24, 0.72);
+        color: #f0f4f9;
+        font-size: 56px;
+        font-weight: 700;
+        letter-spacing: -0.025em;
+      }
+
+      .command-plate .prompt {
+        margin-right: 22px;
+        color: #29d392;
+      }
+
+      .repo-url {
+        color: #ffca5c;
+        font-size: 31px;
+        font-weight: 700;
+      }
+
+      .completion-rule {
+        width: 740px;
+        height: 5px;
+        border-radius: 3px;
+        background-color: #29d392;
+        transform-origin: left center;
+        box-shadow: 0 0 28px rgba(41, 211, 146, 0.38);
+      }
+
+      /* Captions */
+      #caption-layer {
+        position: absolute;
+        inset: 0;
+        z-index: 120;
+        pointer-events: none;
+      }
+
+      .caption-group {
+        position: absolute;
+        left: 0;
+        bottom: 62px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        min-height: 112px;
+        padding: 0 150px;
+        opacity: 0;
+        visibility: hidden;
+      }
+
+      .caption-pill {
+        display: flex;
+        align-items: baseline;
+        justify-content: center;
+        flex-wrap: wrap;
+        max-width: 1540px;
+        padding: 18px 28px 20px;
+        border: 2px solid rgba(143, 162, 183, 0.34);
+        border-radius: 14px;
+        background-color: rgba(11, 17, 24, 0.88);
+        box-shadow: 0 18px 48px rgba(11, 17, 24, 0.5);
+      }
+
+      .caption-word {
+        display: inline-block;
+        margin: 0 0.22em;
+        color: #f0f4f9;
+        font-family: "Archivo Black", sans-serif;
+        font-size: 58px;
+        font-weight: 400;
+        letter-spacing: -0.025em;
+        line-height: 1.02;
+        text-transform: uppercase;
+        will-change: transform, color;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="main"
+      data-composition-id="main"
+      data-width="1920"
+      data-height="1080"
+      data-start="0"
+      data-duration="45.16"
+    >
+      <section id="scene-1" class="scene" data-layout-allow-overflow data-layout-allow-overlap>
+        <div class="camera-full">
+          <video id="camera-hook" class="clip" data-start="0" data-duration="5.4" data-track-index="0" src="assets/takes/01-hook.mp4" muted playsinline></video>
+        </div>
+        <div class="scene-content">
+          <div class="dispatch-rail">
+            <span id="s1-rail-label">GRIDBASH / TOKENMAX DISPATCH</span>
+            <span id="s1-rail-rule" class="rule"></span>
+            <span id="s1-counter" class="counter">SESSION 10</span>
+          </div>
+          <div class="hook-world">
+            <div class="hook-meta">
+              <div id="s1-kicker" class="kicker">CLAUDE OPERATOR STATUS</div>
+              <div id="s1-copy" class="small-copy">Parallel agents deserve a parallel terminal workflow.</div>
+            </div>
+            <div class="hook-number-wrap">
+              <div id="s1-number" class="display hook-number">10</div>
+              <h1 id="s1-title" class="display hook-title">Claude sessions</h1>
+              <div class="session-ticks" aria-hidden="true">
+                <span class="session-tick"></span><span class="session-tick"></span><span class="session-tick"></span><span class="session-tick"></span><span class="session-tick"></span>
+                <span class="session-tick"></span><span class="session-tick"></span><span class="session-tick"></span><span class="session-tick"></span><span class="session-tick"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="scene-2" class="scene" data-layout-allow-overflow data-layout-allow-overlap>
+        <div class="scene-content">
+          <div class="dispatch-rail">
+            <span id="s2-rail-label">GRIDBASH / CONTEXT LOAD</span>
+            <span id="s2-rail-rule" class="rule"></span>
+            <span id="s2-counter" class="counter">WINDOWS 06</span>
+          </div>
+        </div>
+        <div id="s2-camera" class="camera-card">
+          <video id="camera-motivation" class="clip" data-start="6.32" data-duration="7.43" data-track-index="0" src="assets/takes/02-motivation.mp4" muted playsinline></video>
+        </div>
+        <div class="terminal-stack">
+          <div class="terminal-card"><div class="terminal-name">CODEX / GRIDBASH</div><div class="terminal-command">$ review current branch</div></div>
+          <div class="terminal-card"><div class="terminal-name">CLAUDE / API</div><div class="terminal-command">$ implement feature</div></div>
+          <div class="terminal-card"><div class="terminal-name">GEMINI / DOCS</div><div class="terminal-command">$ research edge cases</div></div>
+          <div class="terminal-card"><div class="terminal-name">SHELL / TESTS</div><div class="terminal-command">$ cargo test</div></div>
+        </div>
+        <div class="grid-silhouette" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+        <h2 id="s2-stamp" class="display problem-stamp">Too many windows.</h2>
+      </section>
+
+      <section id="scene-3" class="scene" data-layout-allow-overflow data-layout-allow-overlap>
+        <div class="scene-content">
+          <div class="dispatch-rail">
+            <span id="s3-rail-label">GRIDBASH / AGENT GRID</span>
+            <span id="s3-rail-rule" class="rule"></span>
+            <span id="s3-counter" class="counter">GRID 2 x 3</span>
+          </div>
+        </div>
+        <div id="s3-product-shell" class="product-shell" data-layout-allow-overflow>
+          <div id="s3-product-motion" class="product-motion">
+            <video id="product-reveal" class="clip" data-start="13.75" data-duration="6.29" data-track-index="1" src="assets/product-demo.mp4" data-media-start="0" muted playsinline></video>
+          </div>
+        </div>
+        <div id="s3-camera" class="camera-card">
+          <video id="camera-product" class="clip" data-start="13.75" data-duration="5.2" data-track-index="0" src="assets/takes/03-product.mp4" muted playsinline></video>
+        </div>
+        <h2 id="s3-wordmark" class="display product-wordmark"><span class="accent-green">Grid</span>Bash</h2>
+        <div id="s3-definition" class="product-definition">CLI coding agents, side by side, in one selectable terminal grid.</div>
+      </section>
+
+      <section id="scene-4" class="scene" data-layout-allow-overflow data-layout-allow-overlap>
+        <div class="product-full">
+          <video id="product-proof" class="clip" data-start="20.04" data-duration="9.71" data-track-index="1" src="assets/product-demo.mp4" data-media-start="7.0" muted playsinline></video>
+        </div>
+        <div id="s4-proof-rail" class="proof-rail">LIVE GRID / REAL TERMINAL SESSIONS</div>
+        <div id="s4-proof-counter" class="proof-counter">6 LIVE PANES</div>
+        <div id="s4-callout-session" class="callout callout-session"><span class="operational-label">REAL SESSIONS</span><span class="callout-rule"></span></div>
+        <div id="s4-callout-focus" class="callout callout-focus"><span class="operational-label accent-blue">FOCUS ONE</span><span class="callout-rule"></span></div>
+        <div id="s4-callout-select" class="callout callout-select"><span class="operational-label accent-green">SELECT A FEW</span><span class="callout-rule"></span></div>
+        <div id="s4-callout-broadcast" class="callout callout-broadcast"><span class="operational-label">BROADCAST</span><span class="callout-rule"></span></div>
+        <div id="s4-scan" class="scan-rule" aria-hidden="true"></div>
+      </section>
+
+      <section id="scene-5" class="scene" data-layout-allow-overflow data-layout-allow-overlap>
+        <div class="product-full"><img src="assets/product-demo-poster.png" alt="GridBash six-pane product grid" /></div>
+        <div class="scene-content">
+          <div class="dispatch-rail">
+            <span id="s5-rail-label">GRIDBASH / REPO ISOLATION</span>
+            <span id="s5-rail-rule" class="rule"></span>
+            <span id="s5-counter" class="counter">WORKTREE 04</span>
+          </div>
+        </div>
+        <div id="s5-camera" class="camera-card">
+          <video id="camera-worktrees" class="clip" data-start="29.75" data-duration="6.4" data-track-index="0" src="assets/takes/06-worktrees.mp4" muted playsinline></video>
+        </div>
+        <div class="branch-map">
+          <div class="branch-row"><span class="branch-line"></span><span class="branch-label"><strong>WORKTREE 01</strong><span>gridbash / review</span></span></div>
+          <div class="branch-row"><span class="branch-line"></span><span class="branch-label"><strong>WORKTREE 02</strong><span>gridbash / implementation</span></span></div>
+          <div class="branch-row"><span class="branch-line"></span><span class="branch-label"><strong>WORKTREE 03</strong><span>gridbash / tests</span></span></div>
+          <div class="branch-row"><span class="branch-line"></span><span class="branch-label"><strong>WORKTREE 04</strong><span>gridbash / docs</span></span></div>
+        </div>
+        <h2 id="s5-stamp" class="display no-fights">No file fights.</h2>
+      </section>
+
+      <section id="scene-6" class="scene" data-layout-allow-overflow data-layout-allow-overlap>
+        <div id="s6-camera" class="camera-full">
+          <video id="camera-cta" class="clip" data-start="37.18" data-duration="7.9" data-track-index="0" src="assets/takes/07-cta.mp4" muted playsinline></video>
+        </div>
+        <div id="s6-proof" class="github-proof" data-layout-allow-overflow>
+          <div id="s6-repo-viewport" class="github-viewport">
+            <img id="s6-repo-image" class="github-repo-image" src="capture/github/screenshots/scroll-000.png" alt="GitHub repository page for jasonsuhari/gridbash showing 46 stars" />
+          </div>
+          <div id="s6-proof-rail" class="github-proof-rail">
+            <div id="s6-star-proof" class="github-star-proof">
+              <span class="github-star-glyph">★</span>
+              <span id="s6-star-count" class="github-star-count" aria-label="46"></span>
+              <span class="github-star-label">STARS</span>
+            </div>
+            <span id="s6-proof-rule" class="github-proof-rule"></span>
+            <span id="s6-license" class="github-license">OPEN SOURCE · MIT</span>
+            <div class="github-os-row">
+              <span id="s6-os-mac" class="github-os-chip">MAC</span>
+              <span id="s6-os-linux" class="github-os-chip">LINUX</span>
+              <span id="s6-os-windows" class="github-os-chip">WINDOWS</span>
+            </div>
+          </div>
+        </div>
+        <div id="s6-install" class="scene-content install-world">
+          <div class="dispatch-rail">
+            <span id="s6-rail-label">GRIDBASH / INSTALL</span>
+            <span id="s6-rail-rule" class="rule"></span>
+            <span id="s6-counter" class="counter">READY TO RUN</span>
+          </div>
+          <div class="cta-world">
+            <h2 id="s6-title" class="display cta-title">Run the grid.</h2>
+            <div id="s6-command" class="command-plate"><span class="prompt">$</span><span>npm install -g gridbash</span></div>
+            <div id="s6-url" class="repo-url">github.com/jasonsuhari/gridbash</div>
+            <div id="s6-completion" class="completion-rule"></div>
+          </div>
+        </div>
+      </section>
+
+      <div id="caption-layer" data-layout-allow-occlusion></div>
+
+      <audio id="voice" class="clip" data-start="0" data-duration="45.12" data-track-index="10" src="assets/voice.wav" data-volume="0.88"></audio>
+      <audio id="music" class="clip" data-start="0" data-duration="45.16" data-track-index="11" src="assets/music/close-up-mixkit.mp3" data-volume="0.13"></audio>
+
+      <audio id="sfx-hook" class="clip" data-start="1.74" data-duration="0.235" data-track-index="20" src="assets/sfx/route.mp3" data-volume="0.18"></audio>
+      <audio id="sfx-problem" class="clip" data-start="6.02" data-duration="0.81" data-track-index="21" src="assets/sfx/branch-whoosh.mp3" data-volume="0.12"></audio>
+      <audio id="sfx-product" class="clip" data-start="13.75" data-duration="4.10" data-track-index="22" src="assets/sfx/hero-impact.mp3" data-volume="0.17"></audio>
+      <audio id="sfx-proof" class="clip" data-start="19.78" data-duration="0.81" data-track-index="21" src="assets/sfx/branch-whoosh.mp3" data-volume="0.09"></audio>
+      <audio id="sfx-select-1" class="clip" data-start="22.31" data-duration="0.549" data-track-index="23" src="assets/sfx/select.mp3" data-volume="0.11"></audio>
+      <audio id="sfx-select-2" class="clip" data-start="23.20" data-duration="0.549" data-track-index="23" src="assets/sfx/select.mp3" data-volume="0.10"></audio>
+      <audio id="sfx-select-3" class="clip" data-start="24.10" data-duration="0.549" data-track-index="23" src="assets/sfx/select.mp3" data-volume="0.09"></audio>
+      <audio id="sfx-select-4" class="clip" data-start="24.96" data-duration="0.549" data-track-index="23" src="assets/sfx/select.mp3" data-volume="0.08"></audio>
+      <audio id="sfx-broadcast" class="clip" data-start="25.88" data-duration="0.235" data-track-index="20" src="assets/sfx/route.mp3" data-volume="0.15"></audio>
+      <audio id="sfx-worktree" class="clip" data-start="29.48" data-duration="0.81" data-track-index="21" src="assets/sfx/branch-whoosh.mp3" data-volume="0.14"></audio>
+      <audio id="sfx-github-proof" class="clip" data-start="39.30" data-duration="0.549" data-track-index="23" src="assets/sfx/select.mp3" data-volume="0.09"></audio>
+      <audio id="sfx-os-mac" class="clip" data-start="40.30" data-duration="0.235" data-track-index="20" src="assets/sfx/route.mp3" data-volume="0.08"></audio>
+      <audio id="sfx-os-linux" class="clip" data-start="40.82" data-duration="0.235" data-track-index="20" src="assets/sfx/route.mp3" data-volume="0.075"></audio>
+      <audio id="sfx-os-windows" class="clip" data-start="41.58" data-duration="0.235" data-track-index="20" src="assets/sfx/route.mp3" data-volume="0.07"></audio>
+      <audio id="sfx-cta" class="clip" data-start="42.15" data-duration="3.01" data-media-start="0" data-track-index="22" src="assets/sfx/hero-impact.mp3" data-volume="0.10"></audio>
+      <audio id="sfx-complete" class="clip" data-start="44.74" data-duration="0.235" data-track-index="20" src="assets/sfx/route.mp3" data-volume="0.14"></audio>
+    </div>
+
+    <script src="assets/gsap.min.js"></script>
+    <script src="assets/captions.js"></script>
+    <script>
+      window.__timelines = window.__timelines || {};
+
+      var tl = gsap.timeline({ paused: true });
+
+      function enter(selector, fromVars, toVars, at) {
+        tl.fromTo(selector, fromVars, Object.assign({ immediateRender: false }, toVars), at);
+      }
+
+      function push(oldSelector, newSelector, at, duration, axis) {
+        var oldVars = { duration: duration, ease: "power3.inOut", filter: "blur(10px)" };
+        var newFrom = { opacity: 1, filter: "blur(10px)" };
+        var newTo = { opacity: 1, duration: duration, ease: "power3.inOut", filter: "blur(0px)" };
+        if (axis === "y") {
+          oldVars.y = -1080;
+          newFrom.y = 1080;
+          newTo.y = 0;
+        } else {
+          oldVars.x = -1920;
+          newFrom.x = 1920;
+          newTo.x = 0;
+        }
+        tl.set(newSelector, { opacity: 1 }, at);
+        tl.to(oldSelector, oldVars, at);
+        tl.fromTo(newSelector, newFrom, newTo, at);
+        tl.set(oldSelector, { opacity: 0, x: 0, y: 0, filter: "blur(0px)" }, at + duration);
+      }
+
+      function zoomThrough(oldSelector, newSelector, at) {
+        tl.set(newSelector, { opacity: 1 }, at);
+        tl.to(oldSelector, { scale: 2.2, opacity: 0, filter: "blur(10px)", duration: 0.48, ease: "power3.in" }, at);
+        tl.fromTo(newSelector, { scale: 0.72, opacity: 0, filter: "blur(10px)" }, { scale: 1, opacity: 1, filter: "blur(0px)", duration: 0.48, ease: "expo.out", immediateRender: false }, at + 0.08);
+        tl.set(oldSelector, { opacity: 0, scale: 1, filter: "blur(0px)" }, at + 0.56);
+      }
+
+      /* Scene 1 entrances and one finite ambient mechanism. */
+      enter("#s1-rail-label", { x: -48, opacity: 0 }, { x: 0, opacity: 1, duration: 0.52, ease: "expo.out" }, 0.18);
+      enter("#s1-rail-rule", { scaleX: 0 }, { scaleX: 1, duration: 0.68, ease: "power3.out" }, 0.22);
+      enter("#s1-counter", { x: 36, opacity: 0 }, { x: 0, opacity: 1, duration: 0.42, ease: "circ.out" }, 0.42);
+      enter("#s1-kicker", { y: 24, opacity: 0 }, { y: 0, opacity: 1, duration: 0.48, ease: "power2.out" }, 0.58);
+      enter("#s1-copy", { x: -34, opacity: 0 }, { x: 0, opacity: 1, duration: 0.62, ease: "sine.out" }, 0.76);
+      enter("#s1-number", { x: 130, scale: 0.78, opacity: 0, rotation: 3 }, { x: 0, scale: 1, opacity: 1, rotation: 0, duration: 0.34, ease: "back.out(1.28)" }, 1.74);
+      enter("#s1-title", { y: 52, opacity: 0 }, { y: 0, opacity: 1, duration: 0.44, ease: "expo.out" }, 1.92);
+      enter(".session-tick", { scaleX: 0, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.26, ease: "power4.out", stagger: 0.045 }, 2.08);
+      tl.to(".hook-number-wrap", { scale: 1.025, duration: 0.9, ease: "sine.inOut", yoyo: true, repeat: 3 }, 2.45);
+
+      /* Transition and scene 2. */
+      push("#scene-1", "#scene-2", 6.32, 0.40, "x");
+      enter("#s2-rail-label", { x: -54, opacity: 0 }, { x: 0, opacity: 1, duration: 0.46, ease: "expo.out" }, 6.48);
+      enter("#s2-rail-rule", { scaleX: 0 }, { scaleX: 1, duration: 0.58, ease: "power4.out" }, 6.54);
+      enter("#s2-counter", { scale: 0.82, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.38, ease: "back.out(1.2)" }, 6.74);
+      enter("#s2-camera", { x: 160, opacity: 0 }, { x: 0, opacity: 1, duration: 0.66, ease: "power3.out" }, 6.56);
+      enter(".terminal-card", { x: -90, opacity: 0, rotation: -1.5 }, { x: 0, opacity: 1, rotation: 0, duration: 0.52, ease: "circ.out", stagger: 0.11 }, 7.18);
+      enter("#s2-stamp", { y: 54, opacity: 0, scale: 0.9 }, { y: 0, opacity: 1, scale: 1, duration: 0.42, ease: "back.out(1.18)" }, 10.92);
+      enter(".grid-silhouette", { scale: 0.74, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.38, ease: "expo.out" }, 12.74);
+
+      /* Product peak. */
+      zoomThrough("#scene-2", "#scene-3", 13.75);
+      enter("#s3-rail-label", { x: -60, opacity: 0 }, { x: 0, opacity: 1, duration: 0.44, ease: "expo.out" }, 13.92);
+      enter("#s3-rail-rule", { scaleX: 0 }, { scaleX: 1, duration: 0.56, ease: "power4.out" }, 13.98);
+      enter("#s3-counter", { x: 44, opacity: 0 }, { x: 0, opacity: 1, duration: 0.36, ease: "circ.out" }, 14.18);
+      enter("#s3-product-shell", { x: -170, opacity: 0, scale: 0.92 }, { x: 0, opacity: 1, scale: 1, duration: 0.7, ease: "power4.out" }, 14.06);
+      enter("#s3-camera", { x: 110, opacity: 0 }, { x: 0, opacity: 1, duration: 0.52, ease: "power2.out" }, 14.38);
+      enter("#s3-wordmark", { y: 54, opacity: 0, scale: 0.88 }, { y: 0, opacity: 1, scale: 1, duration: 0.48, ease: "back.out(1.16)" }, 14.72);
+      enter("#s3-definition", { x: 50, opacity: 0 }, { x: 0, opacity: 1, duration: 0.58, ease: "sine.out" }, 15.12);
+      tl.to("#s3-product-motion", { scale: 1.025, duration: 5.4, ease: "none" }, 14.4);
+
+      /* Full product proof. */
+      push("#scene-3", "#scene-4", 20.04, 0.36, "x");
+      enter("#s4-proof-rail", { x: -80, opacity: 0 }, { x: 0, opacity: 1, duration: 0.46, ease: "expo.out" }, 20.2);
+      enter("#s4-proof-counter", { y: -34, opacity: 0 }, { y: 0, opacity: 1, duration: 0.4, ease: "back.out(1.2)" }, 20.34);
+      enter("#s4-callout-session", { x: -70, opacity: 0 }, { x: 0, opacity: 1, duration: 0.5, ease: "power3.out" }, 20.54);
+      enter("#s4-callout-focus", { x: 84, opacity: 0 }, { x: 0, opacity: 1, duration: 0.46, ease: "circ.out" }, 22.18);
+      enter("#s4-callout-select", { x: 88, opacity: 0 }, { x: 0, opacity: 1, duration: 0.44, ease: "expo.out" }, 23.86);
+      enter("#s4-callout-broadcast", { y: 50, opacity: 0 }, { y: 0, opacity: 1, duration: 0.42, ease: "back.out(1.12)" }, 25.72);
+      enter(".callout-rule", { scaleX: 0 }, { scaleX: 1, duration: 0.44, ease: "power4.out", stagger: 0.12 }, 20.7);
+      enter("#s4-scan", { x: -20, opacity: 0 }, { x: 1780, opacity: 0.9, duration: 1.26, ease: "power1.inOut" }, 27.46);
+
+      /* Worktree transform. */
+      push("#scene-4", "#scene-5", 29.75, 0.42, "y");
+      enter("#s5-rail-label", { x: -60, opacity: 0 }, { x: 0, opacity: 1, duration: 0.46, ease: "expo.out" }, 29.92);
+      enter("#s5-rail-rule", { scaleX: 0 }, { scaleX: 1, duration: 0.58, ease: "power4.out" }, 29.98);
+      enter("#s5-counter", { x: 42, opacity: 0 }, { x: 0, opacity: 1, duration: 0.4, ease: "circ.out" }, 30.18);
+      enter("#s5-camera", { x: -130, opacity: 0 }, { x: 0, opacity: 1, duration: 0.62, ease: "power3.out" }, 30.08);
+      enter(".branch-line", { scaleX: 0 }, { scaleX: 1, duration: 0.72, ease: "power4.out", stagger: 0.12 }, 30.42);
+      enter(".branch-label", { x: 90, opacity: 0 }, { x: 0, opacity: 1, duration: 0.48, ease: "expo.out", stagger: 0.12 }, 30.78);
+      enter("#s5-stamp", { scale: 0.82, opacity: 0, rotation: 1.5 }, { scale: 1, opacity: 1, rotation: 0, duration: 0.44, ease: "back.out(1.24)" }, 35.14);
+
+      /* GitHub proof, then install CTA. */
+      push("#scene-5", "#scene-6", 37.18, 0.44, "y");
+      enter("#s6-repo-viewport", { y: 32, opacity: 0 }, { y: 0, opacity: 1, duration: 0.58, ease: "power3.out" }, 37.38);
+      enter("#s6-proof-rail", { y: 24, opacity: 0 }, { y: 0, opacity: 1, duration: 0.5, ease: "expo.out" }, 37.64);
+      enter("#s6-star-proof", { x: -34, opacity: 0 }, { x: 0, opacity: 1, duration: 0.46, ease: "circ.out" }, 37.92);
+      enter("#s6-proof-rule", { scaleY: 0, opacity: 0 }, { scaleY: 1, opacity: 1, duration: 0.5, ease: "power4.out" }, 38.02);
+      enter("#s6-license", { x: -28, opacity: 0 }, { x: 0, opacity: 1, duration: 0.48, ease: "sine.out" }, 38.16);
+      tl.fromTo("#s6-repo-image", { x: 0, y: 0, scale: 1 }, { x: -12, y: -8, scale: 1.025, duration: 4.56, ease: "none", immediateRender: false }, 37.55);
+      tl.fromTo("#s6-star-count", { "--star-count": 0 }, { "--star-count": 46, duration: 1.2, ease: "power3.out", immediateRender: false }, 38.1);
+      enter("#s6-os-mac", { y: 30, scale: 0.84, opacity: 0 }, { y: 0, scale: 1, opacity: 1, duration: 0.32, ease: "back.out(1.2)" }, 40.3);
+      enter("#s6-os-linux", { x: 30, scale: 0.84, opacity: 0 }, { x: 0, scale: 1, opacity: 1, duration: 0.32, ease: "expo.out" }, 40.82);
+      enter("#s6-os-windows", { y: -30, scale: 0.84, opacity: 0 }, { y: 0, scale: 1, opacity: 1, duration: 0.34, ease: "circ.out" }, 41.58);
+
+      tl.fromTo("#s6-proof", { y: 0, opacity: 1, filter: "blur(0px)" }, { y: -120, opacity: 0, filter: "blur(10px)", duration: 0.46, ease: "power3.inOut", immediateRender: false }, 42.15);
+      tl.fromTo("#s6-camera", { opacity: 0, scale: 1.04, filter: "blur(8px)" }, { opacity: 1, scale: 1, filter: "blur(0px)", duration: 0.46, ease: "power3.inOut", immediateRender: false }, 42.15);
+      enter("#s6-install", { y: 42, opacity: 0 }, { y: 0, opacity: 1, duration: 0.5, ease: "power3.out" }, 42.15);
+      enter("#s6-rail-label", { x: -60, opacity: 0 }, { x: 0, opacity: 1, duration: 0.48, ease: "expo.out" }, 42.27);
+      enter("#s6-rail-rule", { scaleX: 0, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.62, ease: "power4.out" }, 42.3);
+      enter("#s6-counter", { x: 44, opacity: 0 }, { x: 0, opacity: 1, duration: 0.4, ease: "circ.out" }, 42.46);
+      enter("#s6-title", { y: -70, opacity: 0, scale: 0.88 }, { y: 0, opacity: 1, scale: 1, duration: 0.52, ease: "back.out(1.16)" }, 42.36);
+      enter("#s6-command", { scaleX: 0.72, scaleY: 0.92, opacity: 0 }, { scaleX: 1, scaleY: 1, opacity: 1, duration: 0.58, ease: "expo.out" }, 42.72);
+      enter("#s6-url", { x: -44, opacity: 0 }, { x: 0, opacity: 1, duration: 0.48, ease: "sine.out" }, 43.46);
+      enter("#s6-completion", { scaleX: 0, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.64, ease: "power4.out" }, 44.42);
+      function activeColor(text) {
+        var value = text.toLowerCase().replace(/[^a-z0-9-]/g, "");
+        if (["gridbash", "claude", "broadcast", "worktree", "worktrees"].indexOf(value) >= 0) return "#29d392";
+        if (["focus", "terminal", "terminals", "pane", "panes"].indexOf(value) >= 0) return "#48a5ff";
+        if (["10", "mac", "linux", "windows", "open", "source"].indexOf(value) >= 0) return "#ffca5c";
+        return "#29d392";
+      }
+
+      var captionLayer = document.getElementById("caption-layer");
+      var captionData = window.GRIDBASH_CAPTIONS;
+      captionData.groups.forEach(function (group, groupIndex) {
+        var groupEl = document.createElement("div");
+        groupEl.id = "caption-group-" + groupIndex;
+        groupEl.className = "caption-group";
+        var pill = document.createElement("div");
+        pill.className = "caption-pill";
+
+        group.word_indexes.forEach(function (wordIndex) {
+          var word = captionData.words[wordIndex];
+          var span = document.createElement("span");
+          span.id = "caption-word-" + wordIndex;
+          span.className = "caption-word";
+          span.textContent = word.text;
+          pill.appendChild(span);
+        });
+
+        groupEl.appendChild(pill);
+        captionLayer.appendChild(groupEl);
+        tl.set(groupEl, { opacity: 0, visibility: "hidden" }, 0);
+        tl.set(groupEl, { visibility: "visible" }, group.start);
+        tl.fromTo(groupEl, { opacity: 0, y: 18, scale: 0.97 }, { opacity: 1, y: 0, scale: 1, duration: 0.14, ease: "power3.out", immediateRender: false }, group.start);
+
+        group.word_indexes.forEach(function (wordIndex, localIndex) {
+          var word = captionData.words[wordIndex];
+          var wordSelector = "#caption-word-" + wordIndex;
+          if (localIndex > 0) {
+            var previousSelector = "#caption-word-" + group.word_indexes[localIndex - 1];
+            tl.set(previousSelector, { color: "#f0f4f9", scale: 1 }, word.start);
+          }
+          tl.set(wordSelector, { color: activeColor(word.text), scale: 1.04 }, word.start);
+          tl.set(wordSelector, { color: "#f0f4f9", scale: 1 }, word.end);
+        });
+
+        var exitStart = Math.max(group.start + 0.14, group.end - 0.12);
+        tl.to(groupEl, { opacity: 0, scale: 0.96, duration: 0.12, ease: "power2.in" }, exitStart);
+        tl.set(groupEl, { opacity: 0, visibility: "hidden" }, group.end);
+      });
+
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

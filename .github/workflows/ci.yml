@@ -55,6 +55,8 @@ jobs:
 
       - run: node --test npm/scripts/update-star-history.test.js
 
+      - run: node --test npm/scripts/version.test.js
+
       - run: node npm/scripts/prepare.js
 
       - name: Verify packaged Linux voice helper

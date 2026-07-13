@@ -1,0 +1,63 @@
+{
+  "source": "raw/jason-talking-head.mp4",
+  "transcript": "transcripts/jason-talking-head.json",
+  "duration": 45.16,
+  "takes": [
+    {
+      "key": "01-hook",
+      "source_start": 2.28,
+      "source_end": 7.65,
+      "timeline_start": 0.0,
+      "duration": 5.37,
+      "timeline_end": 5.37
+    },
+    {
+      "key": "02-motivation",
+      "source_start": 99.98,
+      "source_end": 107.41,
+      "timeline_start": 6.32,
+      "duration": 7.43,
+      "timeline_end": 13.75
+    },
+    {
+      "key": "03-product",
+      "source_start": 14.32,
+      "source_end": 19.52,
+      "timeline_start": 13.75,
+      "duration": 5.2,
+      "timeline_end": 18.95
+    },
+    {
+      "key": "04-terminal",
+      "source_start": 30.76,
+      "source_end": 33.8,
+      "timeline_start": 20.04,
+      "duration": 3.04,
+      "timeline_end": 23.08
+    },
+    {
+      "key": "05-routing",
+      "source_start": 37.98,
+      "source_end": 44.56,
+      "timeline_start": 23.08,
+      "duration": 6.58,
+      "timeline_end": 29.66
+    },
+    {
+      "key": "06-worktrees",
+      "source_start": 49.74,
+      "source_end": 56.12,
+      "timeline_start": 29.75,
+      "duration": 6.38,
+      "timeline_end": 36.13
+    },
+    {
+      "key": "07-cta",
+      "source_start": 112.24,
+      "source_end": 120.12,
+      "timeline_start": 37.18,
+      "duration": 7.88,
+      "timeline_end": 45.06
+    }
+  ]
+}

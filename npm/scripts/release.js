@@ -1,6 +1,7 @@
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+const { setProjectVersion } = require("./version");
 
 const root = path.resolve(__dirname, "..", "..");
 const args = process.argv.slice(2);
@@ -81,10 +82,6 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(path.join(root, file), "utf8"));
 }
 
-function writeJson(file, value) {
-  fs.writeFileSync(path.join(root, file), `${JSON.stringify(value, null, 2)}\n`);
-}
-
 function npmCommand() {
   return process.platform === "win32" ? "npm.cmd" : "npm";
 }
@@ -113,35 +110,6 @@ function nextVersion(current, requested) {
     default:
       fail("first argument must be patch, minor, major, or an explicit x.y.z version");
   }
-}
-
-function updateCargoVersion(version) {
-  const cargoPath = path.join(root, "Cargo.toml");
-  const raw = fs.readFileSync(cargoPath, "utf8");
-  if (!/^version = "([^"]+)"/m.test(raw)) {
-    fail("could not find Cargo.toml package version");
-  }
-
-  const updated = raw.replace(/^version = "([^"]+)"/m, `version = "${version}"`);
-  if (updated !== raw) {
-    fs.writeFileSync(cargoPath, updated);
-  }
-}
-
-function updateNativePackageVersions(version) {
-  const platformRoot = path.join(root, "npm", "platforms");
-  const manifests = fs
-    .readdirSync(platformRoot, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => path.join(platformRoot, entry.name, "package.json"))
-    .filter((manifest) => fs.existsSync(manifest));
-
-  for (const manifest of manifests) {
-    const value = JSON.parse(fs.readFileSync(manifest, "utf8"));
-    value.version = version;
-    fs.writeFileSync(manifest, `${JSON.stringify(value, null, 2)}\n`);
-  }
-  return manifests;
 }
 
 function latestDevlog() {
@@ -339,13 +307,7 @@ assertTagFree(tag);
 
 console.log(`release: ${packageJson.version} -> ${version}`);
 
-packageJson.version = version;
-for (const dependency of Object.keys(packageJson.optionalDependencies || {})) {
-  packageJson.optionalDependencies[dependency] = version;
-}
-writeJson("package.json", packageJson);
-updateCargoVersion(version);
-const nativeManifests = updateNativePackageVersions(version);
+const { nativeManifests } = setProjectVersion(root, version);
 const notesPath = releaseNotesPath(version);
 
 run("cargo", ["check"]);

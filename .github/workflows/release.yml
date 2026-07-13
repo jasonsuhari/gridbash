@@ -3,33 +3,51 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "patch, minor, major, or an exact version; macOS previews use x.y.z-macos.N"
+      channel:
+        description: "Create a versioned release or an ephemeral nightly from main."
         required: true
+        type: choice
+        options:
+          - release
+          - nightly
+        default: release
+      version:
+        description: "For releases: patch, minor, major, or an exact version. macOS previews use x.y.z-macos.N."
+        required: false
         default: "patch"
       notes:
-        description: "Devlog or release notes path. Defaults to latest docs/devlogs entry."
+        description: "For releases: devlog or release notes path. Defaults to the latest devlog."
         required: false
         default: ""
       skip_checks:
-        description: "Skip release validation checks. Use only for emergency retries."
+        description: "For releases: skip preparation checks. Use only for emergency retries."
         required: false
         type: boolean
         default: false
+      force_nightly:
+        description: "For nightlies: publish again even when main has not changed."
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: "17 08 * * *"
   push:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-  id-token: write
+concurrency:
+  group: release-${{ (github.event_name == 'schedule' || inputs.channel == 'nightly') && 'nightly' || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   prepare:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.channel == 'release'
     runs-on: windows-latest
+    permissions:
+      contents: write
     outputs:
       tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,34 +76,104 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           $requested = "${{ inputs.version }}"
-          $existingTag = "v$requested"
-          git fetch origin "refs/tags/${existingTag}:refs/tags/${existingTag}" --force 2>$null
-          $tagExists = $LASTEXITCODE -eq 0
-          if (-not $tagExists) {
-            git rev-parse --verify $existingTag *> $null
+          $tagExists = $false
+          if ($requested -match "^\d+\.\d+\.\d+(?:-.+)?$") {
+            $existingTag = "v$requested"
+            git fetch origin "refs/tags/${existingTag}:refs/tags/${existingTag}" --force 2>$null
             $tagExists = $LASTEXITCODE -eq 0
+            if (-not $tagExists) {
+              git rev-parse --verify $existingTag *> $null
+              $tagExists = $LASTEXITCODE -eq 0
+            }
           }
 
           if ($tagExists) {
             Write-Output "$existingTag already exists; publishing that tag."
-            "tag=$existingTag" >> $env:GITHUB_OUTPUT
-            exit 0
+            $version = $requested
+          } else {
+            $releaseArgs = @($requested, "--push", "--yes")
+            if ("${{ inputs.notes }}") {
+              $releaseArgs += @("--notes", "${{ inputs.notes }}")
+            }
+            if ("${{ inputs.skip_checks }}" -eq "true") {
+              $releaseArgs += "--skip-checks"
+            }
+
+            node npm/scripts/release.js @releaseArgs
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+            $version = node -p "require('./package.json').version"
           }
 
-          $releaseArgs = @($requested, "--push", "--yes")
-          if ("${{ inputs.notes }}") {
-            $releaseArgs += @("--notes", "${{ inputs.notes }}")
-          }
-          if ("${{ inputs.skip_checks }}" -eq "true") {
-            $releaseArgs += "--skip-checks"
-          }
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
 
-          node npm/scripts/release.js @releaseArgs
-          "tag=v$requested" >> $env:GITHUB_OUTPUT
+  nightly-meta:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      publish: ${{ steps.meta.outputs.publish }}
+      ref: ${{ steps.meta.outputs.ref }}
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Choose immutable nightly version
+        id: meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE_NIGHTLY: ${{ github.event_name == 'workflow_dispatch' && inputs.force_nightly || false }}
+        run: |
+          set -euo pipefail
+          date_utc="$(date -u +%Y%m%d)"
+          main_sha="$(git rev-parse HEAD)"
+          version="$(node npm/scripts/version.js nightly "$date_utc" "$GITHUB_RUN_NUMBER" "$main_sha")"
+          short_sha="${main_sha:0:12}"
+          current="$(npm view gridbash dist-tags.nightly 2>/dev/null || true)"
+          publish=true
+
+          if [[ "$FORCE_NIGHTLY" != "true" && "$current" == *".g${short_sha}" ]] && gh release view "v$current" >/dev/null 2>&1; then
+            echo "main is unchanged from $current; skipping publication."
+            publish=false
+          fi
+
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "ref=$main_sha" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Nightly"
+            echo
+            echo "- Version: $version"
+            echo "- Commit: $main_sha"
+            echo "- Publish: $publish"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build-native:
-    needs: prepare
-    if: ${{ always() && (github.event_name == 'push' || needs.prepare.result == 'success') }}
+    needs: [prepare, nightly-meta]
+    if: >-
+      always() &&
+      (
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.channel == 'release' && needs.prepare.result == 'success') ||
+        (
+          (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly')) &&
+          needs.nightly-meta.result == 'success' &&
+          needs.nightly-meta.outputs.publish == 'true'
+        )
+      )
     strategy:
       fail-fast: false
       matrix:
@@ -101,19 +189,29 @@ jobs:
           - runner: macos-15-intel
             platform_key: darwin-x64
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     env:
+      IS_NIGHTLY: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly') }}
       MACOSX_DEPLOYMENT_TARGET: "13.0"
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.outputs.tag || github.ref_name }}
+      RELEASE_REF: ${{ github.event_name == 'push' && github.ref_name || (github.event_name == 'workflow_dispatch' && inputs.channel == 'release') && needs.prepare.outputs.tag || needs.nightly-meta.outputs.ref }}
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || (github.event_name == 'workflow_dispatch' && inputs.channel == 'release') && needs.prepare.outputs.tag || needs.nightly-meta.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.nightly-meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ env.RELEASE_REF }}
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+
+      - name: Stamp nightly version
+        if: env.IS_NIGHTLY == 'true'
+        run: node npm/scripts/version.js set "${{ env.RELEASE_VERSION }}"
 
       - name: Install Linux voice build dependencies
         if: runner.os == 'Linux'
@@ -133,6 +231,8 @@ jobs:
 
       - run: node --test npm/scripts/gridbash-launcher.test.js
 
+      - run: node --test npm/scripts/version.test.js
+
       - run: node npm/scripts/prepare.js
 
       - name: Verify packaged Linux voice helper
@@ -148,21 +248,36 @@ jobs:
           name: native-${{ matrix.platform_key }}
           path: npm/platforms/${{ matrix.platform_key }}/*.tgz
           if-no-files-found: error
+          retention-days: 7
 
   publish:
-    needs: [prepare, build-native]
+    needs: [prepare, nightly-meta, build-native]
     if: ${{ always() && needs.build-native.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
     env:
-      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && needs.prepare.outputs.tag || github.ref_name }}
+      IS_NIGHTLY: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly') }}
+      RELEASE_REF: ${{ github.event_name == 'push' && github.ref_name || (github.event_name == 'workflow_dispatch' && inputs.channel == 'release') && needs.prepare.outputs.tag || needs.nightly-meta.outputs.ref }}
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || (github.event_name == 'workflow_dispatch' && inputs.channel == 'release') && needs.prepare.outputs.tag || needs.nightly-meta.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.nightly-meta.outputs.version }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_TAG }}
+          ref: ${{ env.RELEASE_REF }}
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+
+      - name: Use an npm CLI with trusted publishing support
+        run: npm install --global npm@11
+
+      - name: Stamp nightly version
+        if: env.IS_NIGHTLY == 'true'
+        run: node npm/scripts/version.js set "${{ env.RELEASE_VERSION }}"
 
       - uses: actions/download-artifact@v4
         with:
@@ -174,6 +289,7 @@ jobs:
         id: root-pack
         shell: bash
         run: |
+          set -euo pipefail
           tarball="$(npm pack --ignore-scripts | tail -n 1)"
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
 
@@ -184,9 +300,12 @@ jobs:
           ROOT_TARBALL: ${{ steps.root-pack.outputs.tarball }}
         run: |
           set -euo pipefail
+          shopt -s nullglob
           version="${RELEASE_TAG#v}"
           dist_tag="latest"
-          if [[ "$version" == *-* ]]; then
+          if [[ "$version" == *"-nightly."* ]]; then
+            dist_tag="nightly"
+          elif [[ "$version" == *-* ]]; then
             dist_tag="next"
           fi
 
@@ -196,12 +315,60 @@ jobs:
             unset NODE_AUTH_TOKEN
           fi
 
+          expected=(
+            gridbash-win32-x64
+            gridbash-linux-x64
+            gridbash-linux-arm64
+            gridbash-darwin-arm64
+            gridbash-darwin-x64
+          )
+          native_tarballs=(artifacts/*.tgz)
+          if [[ "${#native_tarballs[@]}" -ne "${#expected[@]}" ]]; then
+            echo "expected ${#expected[@]} native tarballs, found ${#native_tarballs[@]}" >&2
+            exit 1
+          fi
+
+          declare -A tarball_by_name=()
+          package_field() {
+            local tarball="$1"
+            local field="$2"
+            tar -xOf "$tarball" package/package.json |
+              node -e "const fs=require('fs'); console.log(JSON.parse(fs.readFileSync(0,'utf8'))[process.argv[1]])" "$field"
+          }
+
+          for tarball in "${native_tarballs[@]}"; do
+            name="$(package_field "$tarball" name)"
+            package_version="$(package_field "$tarball" version)"
+            if [[ "$package_version" != "$version" ]]; then
+              echo "$tarball contains $name@$package_version; expected $version" >&2
+              exit 1
+            fi
+            case " ${expected[*]} " in
+              *" $name "*) ;;
+              *)
+                echo "unexpected native package: $name" >&2
+                exit 1
+                ;;
+            esac
+            if [[ -n "${tarball_by_name[$name]:-}" ]]; then
+              echo "duplicate native package: $name" >&2
+              exit 1
+            fi
+            tarball_by_name[$name]="$tarball"
+          done
+
+          root_name="$(package_field "$ROOT_TARBALL" name)"
+          root_version="$(package_field "$ROOT_TARBALL" version)"
+          if [[ "$root_name" != "gridbash" || "$root_version" != "$version" ]]; then
+            echo "root tarball contains $root_name@$root_version; expected gridbash@$version" >&2
+            exit 1
+          fi
+
           publish_if_missing() {
             local tarball="$1"
-            local manifest name package_version published
-            manifest="$(tar -xOf "$tarball" package/package.json)"
-            name="$(node -e 'const fs=require("fs"); console.log(JSON.parse(fs.readFileSync(0,"utf8")).name)' <<<"$manifest")"
-            package_version="$(node -e 'const fs=require("fs"); console.log(JSON.parse(fs.readFileSync(0,"utf8")).version)' <<<"$manifest")"
+            local name package_version published
+            name="$(package_field "$tarball" name)"
+            package_version="$(package_field "$tarball" version)"
             published="$(npm view "$name@$package_version" version 2>/dev/null || true)"
             if [[ "$published" == "$package_version" ]]; then
               echo "$name@$package_version already published; skipping."
@@ -210,8 +377,12 @@ jobs:
             npm publish "$tarball" --access public --provenance --tag "$dist_tag"
           }
 
-          for tarball in artifacts/*.tgz; do
-            publish_if_missing "$tarball"
+          for name in "${expected[@]}"; do
+            if [[ -z "${tarball_by_name[$name]:-}" ]]; then
+              echo "missing native package: $name" >&2
+              exit 1
+            fi
+            publish_if_missing "${tarball_by_name[$name]}"
           done
           publish_if_missing "$ROOT_TARBALL"
 
@@ -222,20 +393,46 @@ jobs:
           ROOT_TARBALL: ${{ steps.root-pack.outputs.tarball }}
         run: |
           set -euo pipefail
+          version="${RELEASE_TAG#v}"
           notes="docs/releases/$RELEASE_TAG.md"
-          if [[ ! -f "$notes" ]]; then
+
+          if [[ "$IS_NIGHTLY" == "true" ]]; then
+            notes="RELEASE_NOTES.md"
+            {
+              echo "# GridBash $version"
+              echo
+              echo "Automated cross-platform build from commit $RELEASE_REF."
+              echo
+              echo "Install this build with:"
+              echo
+              echo '~~~sh'
+              echo "npm install --global gridbash@nightly"
+              echo '~~~'
+              echo
+              echo "Nightlies are prerelease builds for testing current main."
+            } > "$notes"
+          elif [[ ! -f "$notes" ]]; then
             printf '# %s\n\nAutomated release for %s.\n' "$RELEASE_TAG" "$RELEASE_TAG" > RELEASE_NOTES.md
             notes="RELEASE_NOTES.md"
           fi
 
           assets=(artifacts/*.tgz "$ROOT_TARBALL")
+          release_flags=()
+          if [[ "$version" == *-* ]]; then
+            release_flags+=(--prerelease)
+          else
+            release_flags+=(--latest)
+          fi
+
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
-            gh release edit "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$notes" --prerelease
+            gh release edit "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$notes" "${release_flags[@]}"
           else
-            gh release create "$RELEASE_TAG" "${assets[@]}" \
-              --title "$RELEASE_TAG" \
-              --notes-file "$notes" \
-              --verify-tag \
-              --prerelease
+            create_flags=(--title "$RELEASE_TAG" --notes-file "$notes")
+            if [[ "$IS_NIGHTLY" == "true" ]]; then
+              create_flags+=(--target "$RELEASE_REF")
+            else
+              create_flags+=(--verify-tag)
+            fi
+            gh release create "$RELEASE_TAG" "${assets[@]}" "${create_flags[@]}" "${release_flags[@]}"
           fi

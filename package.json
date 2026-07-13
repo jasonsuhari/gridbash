@@ -34,6 +34,7 @@
     "test:launcher": "node --test npm/scripts/gridbash-launcher.test.js",
     "test:review-agent": "node --test npm/scripts/review-agent.test.js",
     "test:star-history": "node --test npm/scripts/update-star-history.test.js",
+    "test:version": "node --test npm/scripts/version.test.js",
     "test": "cargo test"
   },
   "keywords": [
