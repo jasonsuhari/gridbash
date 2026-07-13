@@ -501,6 +501,8 @@ GridBash is inspired by agent-first multiplexers such as Mato and terminal works
 ## Community
 
 - Read `CONTRIBUTING.md` before opening a pull request.
+- See [`docs/AUTOMATED_REVIEW.md`](docs/AUTOMATED_REVIEW.md) for the automatic
+  pull request review agent, security model, and optional managed alternatives.
 - See `docs/ROADMAP.md` for the release roadmap.
 - Use GitHub Issues for actionable bugs, tasks, and feature requests.
 - Use GitHub Discussions for questions, ideas, and longer design conversation.

@@ -117,6 +117,11 @@ Do not open public issues for security vulnerabilities. Follow `SECURITY.md`.
 
 Good pull requests are small, reviewable, and explain the user-visible effect of the change.
 
+Ready pull requests receive an automatic semantic review in addition to the
+normal CI checks. See `docs/AUTOMATED_REVIEW.md` for its scope, security model,
+and manual re-run command. Treat the generated report as a review aid rather
+than a substitute for maintainer judgment.
+
 Before opening a pull request:
 
 - Rebase or merge from the latest `main`.
