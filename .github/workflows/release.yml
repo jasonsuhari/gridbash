@@ -374,7 +374,7 @@ jobs:
               echo "$name@$package_version already published; skipping."
               return
             fi
-            npm publish "$tarball" --access public --provenance --tag "$dist_tag"
+            npm publish "./$tarball" --access public --provenance --tag "$dist_tag"
           }
 
           for name in "${expected[@]}"; do
@@ -387,6 +387,7 @@ jobs:
           publish_if_missing "$ROOT_TARBALL"
 
       - name: Create or update GitHub release
+        if: ${{ !cancelled() }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
