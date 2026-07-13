@@ -243,7 +243,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(
-            " | Alt+h help | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+e output | Alt+p panes | Alt+P pane | Alt+x swap | Alt+z sleep | Alt+q quit",
+            " | Alt+h help | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c CLI | Alt+Shift+V voice | Alt+p panes | Alt+P pane | Alt+x swap | Alt+z sleep | Alt+q quit",
         ),
     ]);
     frame.render_widget(
@@ -2367,7 +2367,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
         ("Alt+n", "open a new tab"),
         ("Alt+t", "switch to next tab"),
         ("Alt+Shift+r", "rename current tab"),
-        ("Alt+c", "focus the command bar"),
+        ("Alt+c", "expand or close the command line"),
         ("Alt+p", "open focused-pane settings"),
         ("Alt+Shift+p", "show previous panes"),
         ("Alt+l", "resize the grid"),
