@@ -83,8 +83,8 @@ _Refreshed daily by the [Star History workflow](https://github.com/jasonsuhari/g
 - Pane-contained drag selection that copies selected terminal text without crossing into sibling panes.
 - Sleeping panes stay visually hidden until hovered, then wake without crossing input into other panes.
 - Normal terminal keys pass through to the focused pane, or to selected panes when multiple panes are selected.
-- Modeless Alt shortcuts for pane focus, selection, rename, settings, pane-local goals, and quit.
-- Pane-local manager goals can review and follow up in one pane without observing or routing work across sibling panes.
+- Modeless Alt shortcuts for pane focus, selection, rename, settings, grid manager goals, and quit.
+- Grid manager goals review live pane output and route targeted follow-ups across the current grid.
 - Compact dark theme with focus, selection, sleep, exit, usage, and quiet-output cues.
 - Pane headers show live terminal activity, with a configured manager goal taking priority.
 - Built-in launch profiles for common CLI coding agents.
@@ -311,22 +311,23 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+Shift+r | Rename the current tab |
 | Alt+Shift+t | Restart exited focused pane; when multiple panes are selected, restart exited selected panes |
 | Alt+z | Put the focused pane to sleep; when multiple panes are selected, sleep the selected panes |
-| Alt+g | Create or edit the focused pane's manager goal |
-| Alt+u | Stop the focused pane's manager goal |
+| Alt+g | Create or edit the current grid's manager goal |
+| Alt+u | Stop the current grid's manager goal |
 | Hover sleeping pane | Wake the pane and make its terminal contents visible again |
 | Alt+o | Open settings |
 | Alt+q | Quit |
 
 The focused-pane activity summary includes auth, rename, refresh, sleep/wake,
-and manager-goal controls. Use `Up`/`Down` to select a control and `Enter` or
-`Space` to use it. The direct shortcuts remain available: `n` renames, `r`
-refreshes the activity snapshot, `z` sleeps or wakes the pane, `g` creates or
-edits its manager goal, and `u` stops the goal. A pane manager only reads and
-writes the pane that owns its goal.
+and manager-goal controls for the current grid. Use `Up`/`Down` to select a
+control and `Enter` or `Space` to use it. The direct shortcuts remain available:
+`n` renames, `r` refreshes the activity snapshot, `z` sleeps or wakes the pane,
+`g` creates or edits the grid goal, and `u` stops it. The grid manager reviews
+relevant live panes and sends each follow-up only to its validated awake,
+running targets.
 
 Each pane's top border shows its latest activity summary instead of repeating
-the folder, branch, and launch profile. When a manager goal is set, the goal
-objective takes that spot until the goal is removed.
+the folder, branch, and launch profile. When a grid manager goal is set, its
+objective takes that spot across the grid until the goal is removed.
 
 Press `Esc`, `q`, or `Alt+p` to close the activity summary, or `Alt+o` to switch
 to overall settings.
@@ -498,12 +499,16 @@ when the system is contested; every pane continues running. Set
 `[defaults].pane_workload = "unrestricted"` to disable adaptive sharing, or change
 the Workload policy under Performance settings while GridBash is running.
 
-Pane managers use the OpenAI-compatible chat-completions endpoint, model, and API
-key under `[manager]`. These values can also be edited from the Manager tab in
+The grid manager uses the OpenAI-compatible chat-completions endpoint, model, and
+API key under `[manager]`. These values can also be edited from the Manager tab in
 GridBash settings; the key is masked in the UI and stored in the local GridBash
-config. Press `Alt+g` or use focused-pane activity controls to create a goal. Reviews and
-follow-ups remain bound to that pane even when panes are selected, reordered, or
-moved between tabs.
+config. Press `Alt+g` or use focused-pane activity controls to create a goal for
+the current grid. Reviews include pane-numbered output, and validated follow-ups
+remain bound to their intended PTYs when panes are reordered.
+
+Starting a grid goal sends pane role/folder metadata and bounded recent output
+from every awake pane in that grid to the configured manager API. Sleeping and
+exited panes are never command targets, and their output is omitted from reviews.
 
 ## Design Goals
 
