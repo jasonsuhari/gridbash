@@ -73,6 +73,10 @@ Additional labels:
 - `platform:windows`
 - `type:test`, `type:design`, `type:maintenance`
 
+New issues are classified by `.github/workflows/issue-labeler.yml`. The
+automation adds only missing type, triage-status, area, and Windows-platform
+labels; priorities and resolution labels remain maintainer decisions.
+
 ## Milestones
 
 - `v0.2 Nostromo`: public launch polish.

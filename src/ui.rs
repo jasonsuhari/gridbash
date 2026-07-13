@@ -10,8 +10,8 @@ use vt100::Cell;
 use crate::{
     app::{
         App, ExitedPaneRecoveryView, FollowUpDialog, GoalEditorView, GridPalette, PaneSelection,
-        PaneSettingsView, PreviousPaneView, PreviousPanesView, RenamePaneView, RenameTabView,
-        SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
+        PaneSettingsTarget, PaneSettingsView, PreviousPaneView, PreviousPanesView, RenamePaneView,
+        RenameTabView, SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
     },
     auth::{AgentKind, AuthProfile},
     composer::GridPickerMode,
@@ -765,12 +765,21 @@ fn pane_settings_lines(
                 .get(view.auth_cursor)
                 .map(|option| option.name.as_str())
                 .unwrap_or("none");
+            let selected = view.selected_target == PaneSettingsTarget::Auth;
             lines.push(Line::from(Span::styled(
                 fixed_width(
-                    &format!(" {} auth: {auth}", kind.display_name()),
+                    &format!(
+                        "{} {} auth: {auth}",
+                        if selected { ">" } else { " " },
+                        kind.display_name()
+                    ),
                     width as usize,
                 ),
-                Style::default().fg(SETTINGS_TEXT),
+                Style::default().fg(SETTINGS_TEXT).bg(if selected {
+                    SETTINGS_ROW_ACTIVE
+                } else {
+                    SETTINGS_BG
+                }),
             )));
         }
         lines.push(Line::from(Span::styled(
@@ -780,14 +789,39 @@ fn pane_settings_lines(
             ),
             Style::default().fg(SETTINGS_TEXT),
         )));
-        lines.push(pane_settings_rename_line(width, palette));
-        lines.push(pane_settings_reload_line(width, palette));
-        lines.push(pane_settings_sleep_line(width, view.sleeping, palette));
-        lines.push(pane_settings_goal_line(width, view.goal.is_some(), palette));
+        lines.push(pane_settings_rename_line(
+            width,
+            palette,
+            view.selected_target == PaneSettingsTarget::Rename,
+        ));
+        lines.push(pane_settings_reload_line(
+            width,
+            palette,
+            view.selected_target == PaneSettingsTarget::Reload,
+        ));
+        lines.push(pane_settings_sleep_line(
+            width,
+            view.sleeping,
+            palette,
+            view.selected_target == PaneSettingsTarget::Sleep,
+        ));
+        lines.push(pane_settings_goal_line(
+            width,
+            view.goal.is_some(),
+            palette,
+            view.selected_target == PaneSettingsTarget::Goal,
+        ));
         if view.goal.is_some() {
-            lines.push(pane_settings_stop_goal_line(width, palette));
+            lines.push(pane_settings_stop_goal_line(
+                width,
+                palette,
+                view.selected_target == PaneSettingsTarget::StopGoal,
+            ));
         }
-        lines.push(pane_settings_command_bar(width, view.auth_kind.is_some()));
+        lines.push(pane_settings_command_bar(
+            width,
+            !view.auth_options.is_empty(),
+        ));
         return lines;
     }
 
@@ -828,20 +862,25 @@ fn pane_settings_lines(
             } else {
                 "login needed"
             };
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled("< ", Style::default().fg(Color::Yellow)),
-                Span::styled(
-                    truncate_text(
-                        &format!("{} | {} | {}{}", option.name, account, status, current),
-                        width.saturating_sub(8) as usize,
-                    ),
-                    Style::default()
-                        .fg(kind_color(kind))
-                        .add_modifier(Modifier::BOLD),
+            let selected = view.selected_target == PaneSettingsTarget::Auth;
+            let account = truncate_text(
+                &format!("{} | {} | {}{}", option.name, account, status, current),
+                width.saturating_sub(8) as usize,
+            );
+            lines.push(Line::from(Span::styled(
+                fixed_width(
+                    &format!("{} < {account} >", if selected { ">" } else { " " }),
+                    width as usize,
                 ),
-                Span::styled(" >", Style::default().fg(Color::Yellow)),
-            ]));
+                Style::default()
+                    .fg(kind_color(kind))
+                    .bg(if selected {
+                        SETTINGS_ROW_ACTIVE
+                    } else {
+                        SETTINGS_BG
+                    })
+                    .add_modifier(Modifier::BOLD),
+            )));
         } else {
             lines.push(Line::from(vec![
                 Span::raw("  "),
@@ -873,14 +912,22 @@ fn pane_settings_lines(
     if view.auth_kind.is_none() {
         lines.push(Line::from(""));
     }
-    lines.push(pane_settings_rename_line(width, palette));
-    lines.push(pane_settings_reload_line(width, palette));
+    lines.push(pane_settings_rename_line(
+        width,
+        palette,
+        view.selected_target == PaneSettingsTarget::Rename,
+    ));
+    lines.push(pane_settings_reload_line(
+        width,
+        palette,
+        view.selected_target == PaneSettingsTarget::Reload,
+    ));
     lines.push(settings_section(
         "PANE CONTROLS",
         if view.manager_configured {
-            "manager API ready"
+            "grid manager ready to orchestrate panes"
         } else {
-            "configure Manager in global settings"
+            "configure the grid Manager in global settings"
         },
         width,
     ));
@@ -889,32 +936,49 @@ fn pane_settings_lines(
             Span::raw("  "),
             Span::styled(
                 truncate_text(
-                    &format!("goal: {} | {}", goal.objective, goal.status),
+                    &format!("grid goal: {} | {}", goal.objective, goal.status),
                     width.saturating_sub(2) as usize,
                 ),
                 Style::default().fg(Color::LightCyan),
             ),
         ]));
     }
-    lines.push(pane_settings_sleep_line(width, view.sleeping, palette));
-    lines.push(pane_settings_goal_line(width, view.goal.is_some(), palette));
+    lines.push(pane_settings_sleep_line(
+        width,
+        view.sleeping,
+        palette,
+        view.selected_target == PaneSettingsTarget::Sleep,
+    ));
+    lines.push(pane_settings_goal_line(
+        width,
+        view.goal.is_some(),
+        palette,
+        view.selected_target == PaneSettingsTarget::Goal,
+    ));
     if view.goal.is_some() {
-        lines.push(pane_settings_stop_goal_line(width, palette));
+        lines.push(pane_settings_stop_goal_line(
+            width,
+            palette,
+            view.selected_target == PaneSettingsTarget::StopGoal,
+        ));
     }
     if view.auth_kind.is_none() {
         lines.push(Line::from(""));
     }
-    lines.push(pane_settings_command_bar(width, view.auth_kind.is_some()));
+    lines.push(pane_settings_command_bar(
+        width,
+        !view.auth_options.is_empty(),
+    ));
 
     lines
 }
 
-fn pane_settings_rename_line(width: u16, palette: &GridPalette) -> Line<'static> {
-    pane_settings_action_line("[ Rename pane ]", width, palette.selected())
+fn pane_settings_rename_line(width: u16, palette: &GridPalette, selected: bool) -> Line<'static> {
+    pane_settings_action_line("[ Rename pane ]", width, palette.selected(), selected)
 }
 
-fn pane_settings_reload_line(width: u16, palette: &GridPalette) -> Line<'static> {
-    pane_settings_action_line("[ Refresh activity ]", width, palette.focus())
+fn pane_settings_reload_line(width: u16, palette: &GridPalette, selected: bool) -> Line<'static> {
+    pane_settings_action_line("[ Refresh activity ]", width, palette.focus(), selected)
 }
 
 fn render_goal_editor(frame: &mut Frame<'_>, area: Rect, editor: &GoalEditorView) {
@@ -927,7 +991,7 @@ fn render_goal_editor(frame: &mut Frame<'_>, area: Rect, editor: &GoalEditorView
     };
     frame.render_widget(Clear, prompt_area);
     let input = if editor.input.is_empty() {
-        "Describe the goal for this pane...".into()
+        "Describe the goal for this grid...".into()
     } else {
         format!("{}_", editor.input)
     };
@@ -950,7 +1014,7 @@ fn render_goal_editor(frame: &mut Frame<'_>, area: Rect, editor: &GoalEditorView
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::LightCyan))
-        .title(format!(" Pane {} manager goal ", editor.pane_number));
+        .title(" Grid manager goal ");
     frame.render_widget(
         Paragraph::new(lines)
             .block(block)
@@ -959,7 +1023,12 @@ fn render_goal_editor(frame: &mut Frame<'_>, area: Rect, editor: &GoalEditorView
     );
 }
 
-fn pane_settings_sleep_line(width: u16, sleeping: bool, palette: &GridPalette) -> Line<'static> {
+fn pane_settings_sleep_line(
+    width: u16,
+    sleeping: bool,
+    palette: &GridPalette,
+    selected: bool,
+) -> Line<'static> {
     pane_settings_action_line(
         if sleeping {
             "[ Wake pane ]"
@@ -968,28 +1037,49 @@ fn pane_settings_sleep_line(width: u16, sleeping: bool, palette: &GridPalette) -
         },
         width,
         palette.quiet(),
+        selected,
     )
 }
 
-fn pane_settings_goal_line(width: u16, has_goal: bool, palette: &GridPalette) -> Line<'static> {
+fn pane_settings_goal_line(
+    width: u16,
+    has_goal: bool,
+    palette: &GridPalette,
+    selected: bool,
+) -> Line<'static> {
     pane_settings_action_line(
         if has_goal {
-            "[ Edit manager goal ]"
+            "[ Edit grid goal ]"
         } else {
-            "[ Set manager goal ]"
+            "[ Set grid goal ]"
         },
         width,
         palette.accent(),
+        selected,
     )
 }
 
-fn pane_settings_stop_goal_line(width: u16, palette: &GridPalette) -> Line<'static> {
-    pane_settings_action_line("[ Stop manager goal ]", width, palette.exited())
+fn pane_settings_stop_goal_line(
+    width: u16,
+    palette: &GridPalette,
+    selected: bool,
+) -> Line<'static> {
+    pane_settings_action_line("[ Stop grid goal ]", width, palette.exited(), selected)
 }
 
-fn pane_settings_action_line(label: &str, width: u16, background: Color) -> Line<'static> {
+fn pane_settings_action_line(
+    label: &str,
+    width: u16,
+    background: Color,
+    selected: bool,
+) -> Line<'static> {
+    let label = if selected {
+        format!("> {label} <")
+    } else {
+        label.to_string()
+    };
     let text = if width as usize <= label.len() + 4 {
-        fixed_width(label, width as usize)
+        fixed_width(&label, width as usize)
     } else {
         let left = ((width as usize).saturating_sub(label.len())) / 2;
         let right = (width as usize).saturating_sub(left + label.len());
@@ -999,22 +1089,28 @@ fn pane_settings_action_line(label: &str, width: u16, background: Color) -> Line
     Line::from(Span::styled(
         text,
         Style::default()
-            .fg(Color::Black)
-            .bg(background)
+            .fg(if selected {
+                SETTINGS_TEXT
+            } else {
+                Color::Black
+            })
+            .bg(if selected {
+                SETTINGS_ROW_ACTIVE
+            } else {
+                background
+            })
             .add_modifier(Modifier::BOLD),
     ))
 }
 
 fn pane_settings_command_bar(width: u16, has_auth: bool) -> Line<'static> {
-    if width < 58 {
+    if width < 64 {
         return Line::from(vec![
             Span::raw("  "),
-            command_key("z"),
-            Span::styled(" sleep  ", Style::default().fg(Color::Gray)),
-            command_key("g"),
-            Span::styled(" goal  ", Style::default().fg(Color::Gray)),
-            command_key("u"),
-            Span::styled(" stop  ", Style::default().fg(Color::Gray)),
+            command_key("Up/Down"),
+            Span::styled(" select  ", Style::default().fg(Color::Gray)),
+            command_key("Enter"),
+            Span::styled(" use  ", Style::default().fg(Color::Gray)),
             command_key("Esc"),
             Span::styled(" close", Style::default().fg(Color::Gray)),
         ]);
@@ -1022,16 +1118,10 @@ fn pane_settings_command_bar(width: u16, has_auth: bool) -> Line<'static> {
 
     let mut spans = vec![
         Span::raw("  "),
-        command_key("n"),
-        Span::styled(" rename  ", Style::default().fg(Color::Gray)),
-        command_key("r"),
-        Span::styled(" refresh  ", Style::default().fg(Color::Gray)),
-        command_key("z"),
-        Span::styled(" sleep/wake  ", Style::default().fg(Color::Gray)),
-        command_key("g"),
-        Span::styled(" goal  ", Style::default().fg(Color::Gray)),
-        command_key("u"),
-        Span::styled(" stop  ", Style::default().fg(Color::Gray)),
+        command_key("Up/Down"),
+        Span::styled(" select  ", Style::default().fg(Color::Gray)),
+        command_key(if width >= 72 { "Enter/Space" } else { "Enter" }),
+        Span::styled(" use  ", Style::default().fg(Color::Gray)),
     ];
     if has_auth {
         spans.push(command_key("Left/Right"));
@@ -1990,8 +2080,8 @@ fn manager_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         settings_tabs(SettingsTab::Manager),
         Line::from(""),
         settings_section(
-            "PANE MANAGER API",
-            "one isolated goal manager per pane",
+            "GRID MANAGER API",
+            "one goal manager orchestrates all awake panes in the current grid",
             width,
         ),
         Line::from(vec![
@@ -2401,7 +2491,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
         ("Alt+r", "rename focused pane"),
         ("Alt+Shift+t", "restart exited panes"),
         ("Alt+z", "sleep or wake panes"),
-        ("Alt+g / Alt+u", "start or stop pane goal"),
+        ("Alt+g / Alt+u", "start or stop grid goal"),
         ("Alt+o", "open global settings/profiles"),
         ("Alt+Shift+V", "dictate without submitting"),
         ("Alt+q", "quit GridBash"),
@@ -3005,6 +3095,7 @@ mod tests {
             auth_kind: None,
             auth_options: Vec::new(),
             auth_cursor: 0,
+            selected_target: PaneSettingsTarget::Reload,
             goal: None,
             manager_configured: false,
         };
@@ -3074,6 +3165,85 @@ mod tests {
             pane_settings_stop_goal_rect(Rect::new(5, 10, 40, 14), false, false),
             None
         );
+    }
+
+    #[test]
+    fn selected_pane_setting_has_a_focus_marker_and_active_background() {
+        let selected = pane_settings_action_line("[ Refresh activity ]", 40, Color::Yellow, true);
+        assert!(
+            selected.spans[0]
+                .content
+                .contains("> [ Refresh activity ] <")
+        );
+        assert_eq!(selected.spans[0].style.fg, Some(SETTINGS_TEXT));
+        assert_eq!(selected.spans[0].style.bg, Some(SETTINGS_ROW_ACTIVE));
+        assert!(
+            selected.spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+
+        let unselected =
+            pane_settings_action_line("[ Refresh activity ]", 40, Color::Yellow, false);
+        assert!(!unselected.spans[0].content.contains("> ["));
+        assert_eq!(unselected.spans[0].style.bg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn pane_settings_command_bar_describes_arrow_navigation() {
+        let text = pane_settings_command_bar(100, true)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("Up/Down"));
+        assert!(text.contains("Enter/Space"));
+        assert!(text.contains("Left/Right"));
+
+        let no_auth = pane_settings_command_bar(100, false)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(!no_auth.contains("Left/Right"));
+    }
+
+    #[test]
+    fn pane_settings_render_one_selected_row_at_compact_and_wide_widths() {
+        let view = PaneSettingsView {
+            index: 0,
+            label: "1".into(),
+            folder: "gridbash".into(),
+            worktree: None,
+            history_summary: "Assistant: ready".into(),
+            focused: true,
+            selected: false,
+            sleeping: false,
+            exited: false,
+            auth_kind: None,
+            auth_options: Vec::new(),
+            auth_cursor: 0,
+            selected_target: PaneSettingsTarget::Reload,
+            goal: None,
+            manager_configured: false,
+        };
+
+        for width in [32, 80] {
+            let lines = pane_settings_lines(&view, width, &GridPalette::default());
+            let active = lines
+                .iter()
+                .flat_map(|line| line.spans.iter())
+                .filter(|span| span.style.bg == Some(SETTINGS_ROW_ACTIVE))
+                .collect::<Vec<_>>();
+
+            assert_eq!(active.len(), 1, "width {width}");
+            assert!(
+                active[0].content.contains("Refresh activity"),
+                "width {width}"
+            );
+        }
     }
 
     #[test]
