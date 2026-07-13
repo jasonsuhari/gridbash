@@ -3,28 +3,31 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>GridBash by Jason Suhari | CLI Agent Terminal Grid</title>
-    <meta name="description" content="GridBash by Jason Suhari is a Windows-native terminal grid for running Codex, Claude, Gemini, Aider, Git Bash, PowerShell, and custom CLI agents side by side.">
-    <meta name="keywords" content="GridBash, Jason Suhari, jasonsuhari gridbash, CLI agent terminal grid, AI coding agent multiplexer, Windows terminal multiplexer, Codex terminal grid, Claude terminal grid, Gemini CLI terminal grid, ConPTY terminal grid">
+    <title>GridBash | Every Coding Agent. One Terminal.</title>
+    <meta name="description" content="GridBash is the open source terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side on Windows, macOS, and Linux.">
+    <meta name="keywords" content="GridBash, Jason Suhari, CLI agent terminal grid, AI coding agent multiplexer, Codex terminal grid, Claude Code terminal grid, multi-agent terminal, Rust TUI">
     <meta name="author" content="Jason Suhari">
+    <meta name="theme-color" content="#10110e">
     <meta name="robots" content="index, follow, max-image-preview:large">
     <link rel="canonical" href="https://jasonsuhari.github.io/gridbash/">
     <link rel="me" href="https://github.com/jasonsuhari">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231a1c16'/%3E%3Crect x='6' y='6' width='8' height='8' rx='2' fill='%239bd66f'/%3E%3Crect x='18' y='6' width='8' height='8' rx='2' fill='%23577542'/%3E%3Crect x='6' y='18' width='8' height='8' rx='2' fill='%23577542'/%3E%3Crect x='18' y='18' width='8' height='8' rx='2' fill='%239bd66f'/%3E%3C/svg%3E">
     <link rel="preload" as="image" href="assets/gridbash-launch-teaser-poster.png">
 
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="GridBash">
-    <meta property="og:title" content="GridBash by Jason Suhari | CLI Agent Terminal Grid">
-    <meta property="og:description" content="Run Codex, Claude, Gemini, Aider, Git Bash, PowerShell, and custom CLI agents side by side in one Windows-native terminal grid.">
+    <meta property="og:title" content="GridBash | Every Coding Agent. One Terminal.">
+    <meta property="og:description" content="Run Codex, Claude, Gemini, and the rest of your CLI agent stack side by side in one fast terminal grid.">
     <meta property="og:url" content="https://jasonsuhari.github.io/gridbash/">
     <meta property="og:image" content="https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-social-preview.png">
     <meta property="og:image:width" content="1280">
     <meta property="og:image:height" content="640">
 
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="GridBash by Jason Suhari | CLI Agent Terminal Grid">
-    <meta name="twitter:description" content="A Windows-native terminal grid for running CLI coding agents side by side.">
+    <meta name="twitter:title" content="GridBash | Every Coding Agent. One Terminal.">
+    <meta name="twitter:description" content="The open source terminal grid for agent-heavy development.">
     <meta name="twitter:image" content="https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-social-preview.png">
+    <script>document.documentElement.classList.add("js");</script>
 
     <script type="application/ld+json">
       {
@@ -32,15 +35,15 @@
         "@type": "SoftwareApplication",
         "name": "GridBash",
         "alternateName": "GridBash by Jason Suhari",
-        "description": "GridBash is a Windows-native terminal grid for running Codex, Claude, Gemini, Aider, Git Bash, PowerShell, and custom CLI agents side by side.",
+        "description": "GridBash is a cross-platform terminal grid for running CLI coding agents side by side.",
         "url": "https://jasonsuhari.github.io/gridbash/",
         "codeRepository": "https://github.com/jasonsuhari/gridbash",
         "downloadUrl": "https://www.npmjs.com/package/gridbash",
         "image": "https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-social-preview.png",
         "applicationCategory": "DeveloperApplication",
         "applicationSubCategory": "Terminal multiplexer",
-        "operatingSystem": "Windows x64",
-        "softwareVersion": "0.1.5",
+        "operatingSystem": "Windows, Linux, macOS",
+        "softwareVersion": "0.1.6",
         "programmingLanguage": "Rust",
         "license": "https://github.com/jasonsuhari/gridbash/blob/main/LICENSE",
         "author": {
@@ -66,10 +69,10 @@
         "mainEntity": [
           {
             "@type": "Question",
-            "name": "What is GridBash by Jason Suhari?",
+            "name": "What is GridBash?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "GridBash by Jason Suhari is a Windows-native terminal grid for running CLI coding agents and shells side by side."
+              "text": "GridBash is a cross-platform terminal grid for running CLI coding agents and shells side by side."
             }
           },
           {
@@ -77,7 +80,7 @@
             "name": "Which CLI agents does GridBash support?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "GridBash includes launch profiles for Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, Git Bash, PowerShell, cmd, and custom commands."
+              "text": "GridBash includes launch profiles for Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, and custom commands."
             }
           },
           {
@@ -85,25 +88,66 @@
             "name": "How do I install GridBash?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Install the Windows x64 npm package with npm install -g gridbash, then run gridbash from a terminal."
+              "text": "Install the stable Windows x64 package with npm install -g gridbash, or download the v0.2 cross-platform preview from GitHub Releases."
             }
           }
         ]
       }
     </script>
+
     <style>
+      @font-face {
+        font-family: "Geist";
+        src: url("assets/fonts/geist-variable.woff2") format("woff2");
+        font-style: normal;
+        font-weight: 100 900;
+        font-display: swap;
+      }
+
+      @font-face {
+        font-family: "Geist Mono";
+        src: url("assets/fonts/geist-mono-variable.woff2") format("woff2");
+        font-style: normal;
+        font-weight: 100 900;
+        font-display: swap;
+      }
+
       :root {
         color-scheme: dark;
-        --bg: #11120f;
-        --panel: #191b17;
-        --panel-strong: #22251f;
-        --text: #f7f3e8;
-        --muted: #b9b5a8;
-        --line: rgba(247, 243, 232, 0.16);
-        --accent: #9be56f;
-        --accent-strong: #c9ff93;
-        --code: #0b0c0a;
-        --shadow: rgba(0, 0, 0, 0.35);
+        --bg: #10110e;
+        --bg-soft: #151711;
+        --surface: #1a1c16;
+        --surface-strong: #22251d;
+        --text: #f4f2e9;
+        --muted: #aaa99f;
+        --faint: #75766d;
+        --line: rgba(244, 242, 233, 0.13);
+        --line-strong: rgba(244, 242, 233, 0.23);
+        --accent: #9bd66f;
+        --accent-bright: #b7ef88;
+        --accent-ink: #15200f;
+        --shadow: rgba(4, 6, 2, 0.38);
+        --radius: 14px;
+        --page: min(1240px, calc(100% - 48px));
+      }
+
+      @media (prefers-color-scheme: light) {
+        :root {
+          color-scheme: light;
+          --bg: #f3f1e8;
+          --bg-soft: #ebe9df;
+          --surface: #faf8f0;
+          --surface-strong: #e3e4d8;
+          --text: #171912;
+          --muted: #5f6158;
+          --faint: #7a7d72;
+          --line: rgba(23, 25, 18, 0.14);
+          --line-strong: rgba(23, 25, 18, 0.24);
+          --accent: #63973e;
+          --accent-bright: #76aa50;
+          --accent-ink: #f7faef;
+          --shadow: rgba(33, 40, 26, 0.18);
+        }
       }
 
       * {
@@ -112,346 +156,1135 @@
 
       html {
         scroll-behavior: smooth;
+        scrollbar-color: var(--accent) var(--bg);
       }
 
       body {
         margin: 0;
         min-width: 320px;
-        background:
-          linear-gradient(180deg, rgba(155, 229, 111, 0.08), transparent 420px),
-          var(--bg);
+        overflow-x: hidden;
+        background: var(--bg);
         color: var(--text);
-        font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-family: "Geist", "Aptos", "Segoe UI", sans-serif;
         line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      body::before {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        pointer-events: none;
+        content: "";
+        opacity: 0.025;
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.8'/%3E%3C/svg%3E");
+      }
+
+      img,
+      video {
+        display: block;
+        max-width: 100%;
       }
 
       a {
         color: inherit;
-        text-decoration-color: rgba(155, 229, 111, 0.65);
-        text-underline-offset: 0.18em;
+        text-decoration: none;
       }
 
-      a:hover {
-        text-decoration-color: var(--accent);
+      button {
+        color: inherit;
+        font: inherit;
       }
 
-      .shell {
-        width: min(1160px, calc(100% - 32px));
-        margin: 0 auto;
+      ::selection {
+        background: var(--accent);
+        color: var(--accent-ink);
       }
 
-      .nav {
+      :focus-visible {
+        outline: 2px solid var(--accent-bright);
+        outline-offset: 4px;
+      }
+
+      .page {
+        width: var(--page);
+        margin-inline: auto;
+      }
+
+      .mono {
+        font-family: "Geist Mono", "Cascadia Code", Consolas, monospace;
+      }
+
+      .site-nav {
+        position: absolute;
+        top: 0;
+        right: 0;
+        left: 0;
+        z-index: 10;
+        height: 72px;
+      }
+
+      .site-nav__inner {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 20px;
-        min-height: 68px;
+        height: 100%;
         border-bottom: 1px solid var(--line);
       }
 
       .brand {
         display: flex;
         align-items: center;
-        gap: 12px;
-        min-width: 0;
+        gap: 11px;
+        font-size: 1.02rem;
         font-weight: 700;
-        letter-spacing: 0;
+        letter-spacing: -0.03em;
       }
 
-      .mark {
+      .brand__mark {
+        position: relative;
+        display: grid;
         width: 34px;
         height: 34px;
-        display: grid;
-        place-items: center;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: var(--panel);
-        color: var(--accent);
-        font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-        font-weight: 800;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 3px;
+        padding: 6px;
+        border: 1px solid var(--line-strong);
+        border-radius: 9px;
+        background: var(--surface);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      }
+
+      .brand__mark span {
+        border-radius: 2px;
+        background: var(--accent);
+      }
+
+      .brand__mark span:nth-child(2),
+      .brand__mark span:nth-child(3) {
+        opacity: 0.38;
       }
 
       .nav-links {
         display: flex;
         align-items: center;
-        gap: 18px;
+        gap: 28px;
         color: var(--muted);
-        font-size: 0.95rem;
+        font-size: 0.9rem;
+        font-weight: 550;
         white-space: nowrap;
       }
 
-      .hero {
-        display: grid;
-        grid-template-columns: minmax(0, 0.95fr) minmax(420px, 1.05fr);
-        gap: 48px;
-        align-items: center;
-        padding: 60px 0 46px;
+      .nav-links a:not(.nav-cta) {
+        transition: color 180ms ease;
       }
 
-      .eyebrow {
-        margin: 0 0 14px;
-        color: var(--accent);
-        font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+      .nav-links a:not(.nav-cta):hover {
+        color: var(--text);
+      }
+
+      .nav-cta,
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        border: 1px solid var(--line-strong);
+        border-radius: 11px;
+        font-weight: 700;
+        transition: transform 180ms ease, background-color 180ms ease, border-color 180ms ease;
+      }
+
+      .nav-cta {
+        min-height: 38px;
+        padding: 0 16px;
+        background: var(--text);
+        color: var(--bg);
+      }
+
+      .nav-cta:hover,
+      .button:hover {
+        transform: translateY(-2px);
+      }
+
+      .nav-cta:active,
+      .button:active,
+      .install-command:active {
+        transform: translateY(1px) scale(0.99);
+      }
+
+      .hero {
+        position: relative;
+        display: grid;
+        min-height: 100dvh;
+        grid-template-columns: minmax(0, 0.88fr) minmax(500px, 1.12fr);
+        gap: clamp(36px, 6vw, 92px);
+        align-items: center;
+        padding-top: 108px;
+        padding-bottom: 44px;
+      }
+
+      .hero::before {
+        position: absolute;
+        top: 12%;
+        left: 48%;
+        width: 38vw;
+        height: 38vw;
+        max-width: 620px;
+        max-height: 620px;
+        border-radius: 50%;
+        background: radial-gradient(circle, color-mix(in srgb, var(--accent) 18%, transparent), transparent 68%);
+        filter: blur(24px);
+        pointer-events: none;
+        content: "";
+      }
+
+      .hero-copy {
+        position: relative;
+        z-index: 2;
+        align-self: center;
+      }
+
+      .hero-kicker {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 22px;
+        color: var(--accent-bright);
+        font-size: 0.76rem;
+        font-weight: 700;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+      }
+
+      .hero-kicker::before {
+        width: 28px;
+        height: 1px;
+        background: currentColor;
+        content: "";
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+
+      h1 {
+        max-width: 700px;
+        margin-bottom: 24px;
+        font-size: clamp(3.4rem, 5.4vw, 5.8rem);
+        font-weight: 750;
+        line-height: 0.9;
+        letter-spacing: -0.075em;
+      }
+
+      .hero-accent {
+        display: inline-block;
+        color: var(--accent-bright);
+        white-space: nowrap;
+      }
+
+      .hero-lead {
+        max-width: 510px;
+        margin-bottom: 28px;
+        color: var(--muted);
+        font-size: clamp(1.03rem, 1.5vw, 1.2rem);
+        line-height: 1.55;
+      }
+
+      .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-bottom: 22px;
+      }
+
+      .button {
+        gap: 10px;
+        padding: 0 19px;
+        background: var(--surface);
+        color: var(--text);
+      }
+
+      .button--primary {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: var(--accent-ink);
+      }
+
+      .button--primary:hover {
+        background: var(--accent-bright);
+        border-color: var(--accent-bright);
+      }
+
+      .button__arrow {
+        display: inline-block;
+        transition: transform 180ms ease;
+      }
+
+      .button:hover .button__arrow {
+        transform: translateX(3px);
+      }
+
+      .install-command {
+        display: flex;
+        width: min(100%, 430px);
+        min-height: 54px;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 0 17px;
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        background: color-mix(in srgb, var(--surface) 84%, transparent);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+        cursor: pointer;
+        text-align: left;
+        transition: border-color 180ms ease, transform 180ms ease, background-color 180ms ease;
+      }
+
+      .install-command:hover {
+        border-color: var(--accent);
+        background: var(--surface-strong);
+      }
+
+      .install-command code {
+        overflow: hidden;
+        font-size: 0.88rem;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .install-command__status {
+        flex: 0 0 auto;
+        color: var(--accent-bright);
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .hero-visual {
+        position: relative;
+        z-index: 2;
+        min-width: 0;
+        perspective: 1200px;
+      }
+
+      .terminal-frame {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius);
+        background: #0c0d0b;
+        box-shadow: 0 40px 100px var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+        transform: rotateY(var(--tilt-x, -2deg)) rotateX(var(--tilt-y, 1deg));
+        transform-origin: center;
+        transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+      }
+
+      .terminal-frame::after {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: linear-gradient(115deg, transparent 35%, rgba(255, 255, 255, 0.055), transparent 64%);
+        content: "";
+        transform: translateX(-80%);
+      }
+
+      .terminal-frame:hover::after {
+        animation: sheen 900ms cubic-bezier(0.16, 1, 0.3, 1);
+      }
+
+      .terminal-bar {
+        display: flex;
+        height: 42px;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        color: #8d9186;
+        font-family: "Geist Mono", "Cascadia Code", Consolas, monospace;
+        font-size: 0.7rem;
+      }
+
+      .terminal-bar__keys {
+        color: var(--accent-bright);
+      }
+
+      .terminal-frame video {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        object-fit: cover;
+      }
+
+      .visual-note {
+        position: absolute;
+        right: -16px;
+        bottom: -25px;
+        width: min(250px, 43%);
+        padding: 16px;
+        border: 1px solid var(--line-strong);
+        border-radius: 12px;
+        background: color-mix(in srgb, var(--surface) 92%, transparent);
+        box-shadow: 0 20px 48px var(--shadow);
+        backdrop-filter: blur(18px);
+      }
+
+      .visual-note strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 0.88rem;
+      }
+
+      .visual-note span {
+        color: var(--muted);
+        font-size: 0.75rem;
+      }
+
+      .ticker {
+        overflow: hidden;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+        background: var(--bg-soft);
+      }
+
+      .ticker__track {
+        display: flex;
+        width: max-content;
+        animation: ticker 28s linear infinite;
+      }
+
+      .ticker__group {
+        display: flex;
+        flex: none;
+        align-items: center;
+      }
+
+      .ticker__item {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        padding: 19px 30px;
+        color: var(--muted);
         font-size: 0.82rem;
         font-weight: 700;
         letter-spacing: 0.08em;
         text-transform: uppercase;
       }
 
-      h1 {
-        max-width: 780px;
-        margin: 0;
-        font-size: clamp(2.8rem, 7vw, 5.9rem);
-        line-height: 0.94;
-        letter-spacing: 0;
+      .ticker__item::after {
+        width: 1px;
+        height: 17px;
+        background: var(--line-strong);
+        content: "";
       }
 
-      .lead {
-        max-width: 620px;
-        margin: 22px 0 0;
-        color: var(--muted);
-        font-size: 1.12rem;
+      .nav-cta__short {
+        display: none;
       }
 
-      .actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 12px;
-        margin-top: 28px;
+      .section {
+        padding-block: clamp(92px, 12vw, 168px);
       }
 
-      .button {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        min-height: 44px;
-        padding: 0 18px;
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: var(--panel);
-        color: var(--text);
+      .section-kicker {
+        margin-bottom: 18px;
+        color: var(--accent-bright);
+        font-family: "Geist Mono", "Cascadia Code", Consolas, monospace;
+        font-size: 0.75rem;
         font-weight: 700;
-        text-decoration: none;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
       }
 
-      .button.primary {
-        background: var(--accent);
-        border-color: var(--accent);
-        color: #11120f;
+      .section-title {
+        max-width: 880px;
+        margin-bottom: 24px;
+        font-size: clamp(2.7rem, 5.5vw, 5.8rem);
+        font-weight: 720;
+        line-height: 0.98;
+        letter-spacing: -0.065em;
       }
 
-      .button:active {
-        transform: translateY(1px);
+      .section-lead {
+        max-width: 620px;
+        margin-bottom: 0;
+        color: var(--muted);
+        font-size: clamp(1rem, 1.5vw, 1.18rem);
       }
 
-      .hero-media {
-        overflow: hidden;
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        background: var(--panel);
-        box-shadow: 0 30px 80px var(--shadow);
-      }
-
-      .hero-media img {
-        display: block;
-        width: 100%;
-        height: auto;
-      }
-
-      .command {
-        margin-top: 22px;
-        padding: 16px;
-        border: 1px solid var(--line);
-        border-radius: 10px;
-        background: var(--code);
-        color: var(--accent-strong);
-        font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
-        font-size: 0.94rem;
-        overflow-x: auto;
-        white-space: nowrap;
-      }
-
-      .strip {
+      .problem {
         display: grid;
-        grid-template-columns: repeat(4, 1fr);
-        gap: 1px;
-        overflow: hidden;
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        background: var(--line);
+        grid-template-columns: minmax(0, 1.1fr) minmax(360px, 0.9fr);
+        gap: clamp(48px, 8vw, 120px);
+        align-items: end;
       }
 
-      .metric {
-        min-height: 118px;
-        padding: 22px;
-        background: var(--panel);
+      .problem__statement {
+        max-width: 700px;
       }
 
-      .metric strong {
+      .problem__number {
+        display: block;
+        margin-bottom: 18px;
+        color: var(--accent-bright);
+        font-family: "Geist Mono", "Cascadia Code", Consolas, monospace;
+        font-size: clamp(5rem, 14vw, 12rem);
+        font-weight: 700;
+        line-height: 0.75;
+        letter-spacing: -0.09em;
+      }
+
+      .problem__statement h2 {
+        max-width: 680px;
+        margin-bottom: 24px;
+        font-size: clamp(2.6rem, 5vw, 5.3rem);
+        line-height: 0.98;
+        letter-spacing: -0.065em;
+      }
+
+      .problem__statement p {
+        max-width: 550px;
+        margin-bottom: 0;
+        color: var(--muted);
+        font-size: 1.08rem;
+      }
+
+      .problem__aside {
+        padding: 26px 0 4px 28px;
+        border-left: 1px solid var(--line-strong);
+      }
+
+      .problem__aside p {
+        margin-bottom: 18px;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .problem__aside strong {
         display: block;
         margin-bottom: 6px;
-        color: var(--accent-strong);
-        font-size: 1.55rem;
+        color: var(--text);
+        font-size: 1.05rem;
       }
 
-      .metric span {
-        color: var(--muted);
+      .showcase {
+        padding-block: clamp(32px, 6vw, 72px) clamp(92px, 12vw, 168px);
       }
 
-      section {
-        padding: 58px 0;
+      .showcase-frame {
+        overflow: hidden;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius);
+        background: #0c0d0b;
+        box-shadow: 0 36px 100px var(--shadow);
       }
 
-      .section-head {
+      .showcase-frame img {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        object-fit: cover;
+        transition: transform 900ms cubic-bezier(0.16, 1, 0.3, 1), filter 500ms ease;
+      }
+
+      .showcase-frame:hover img {
+        filter: saturate(1.08) contrast(1.03);
+        transform: scale(1.015);
+      }
+
+      .showcase-caption {
         display: grid;
-        grid-template-columns: 0.8fr 1.2fr;
-        gap: 32px;
-        align-items: start;
-        margin-bottom: 28px;
-      }
-
-      h2 {
-        margin: 0;
-        font-size: clamp(2rem, 4vw, 3.4rem);
-        line-height: 1;
-        letter-spacing: 0;
-      }
-
-      .section-head p,
-      .plain p,
-      .faq p {
-        margin: 0;
+        grid-template-columns: 1.1fr 0.9fr;
+        gap: 40px;
+        padding-top: 24px;
         color: var(--muted);
-        font-size: 1.04rem;
+        font-size: 0.9rem;
       }
 
-      .grid {
+      .showcase-caption strong {
+        color: var(--text);
+      }
+
+      .showcase-caption span:last-child {
+        text-align: right;
+      }
+
+      .features {
+        border-top: 1px solid var(--line);
+      }
+
+      .features-head {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: 1.1fr 0.9fr;
+        gap: 72px;
+        align-items: end;
+        margin-bottom: 58px;
+      }
+
+      .features-head .section-title {
+        margin-bottom: 0;
+      }
+
+      .features-head .section-lead {
+        justify-self: end;
+      }
+
+      .feature-grid {
+        display: grid;
+        grid-template-columns: repeat(12, 1fr);
         gap: 14px;
       }
 
-      .tile {
-        min-height: 178px;
-        padding: 22px;
+      .feature {
+        position: relative;
+        min-height: 280px;
+        overflow: hidden;
+        padding: 30px;
         border: 1px solid var(--line);
-        border-radius: 12px;
-        background: var(--panel);
+        border-radius: var(--radius);
+        background: var(--surface);
+        transition: transform 300ms cubic-bezier(0.16, 1, 0.3, 1), border-color 300ms ease, background-color 300ms ease;
       }
 
-      .tile.wide {
-        grid-column: span 2;
-        background: var(--panel-strong);
+      .feature:hover {
+        border-color: color-mix(in srgb, var(--accent) 65%, var(--line));
+        background: var(--surface-strong);
+        transform: translateY(-5px);
       }
 
-      .tile h3,
-      .faq h3 {
-        margin: 0 0 10px;
-        font-size: 1.18rem;
+      .feature:nth-child(1) {
+        grid-column: span 7;
+        min-height: 390px;
       }
 
-      .tile p {
-        margin: 0;
+      .feature:nth-child(2) {
+        grid-column: span 5;
+        min-height: 390px;
+      }
+
+      .feature:nth-child(3) {
+        grid-column: span 4;
+      }
+
+      .feature:nth-child(4) {
+        grid-column: span 8;
+      }
+
+      .feature__tag {
+        margin-bottom: 64px;
+        color: var(--accent-bright);
+        font-family: "Geist Mono", "Cascadia Code", Consolas, monospace;
+        font-size: 0.72rem;
+        font-weight: 700;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .feature h3 {
+        max-width: 460px;
+        margin-bottom: 13px;
+        font-size: clamp(1.55rem, 2.5vw, 2.35rem);
+        line-height: 1.04;
+        letter-spacing: -0.045em;
+      }
+
+      .feature p {
+        max-width: 480px;
+        margin-bottom: 0;
         color: var(--muted);
       }
 
-      .plain {
+      .feature__graphic {
+        position: absolute;
+        right: 22px;
+        bottom: 22px;
+        display: grid;
+        width: 146px;
+        height: 112px;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 5px;
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        opacity: 0.65;
+        transform: rotate(-4deg);
+        transition: transform 400ms cubic-bezier(0.16, 1, 0.3, 1), opacity 300ms ease;
+      }
+
+      .feature:hover .feature__graphic {
+        opacity: 1;
+        transform: rotate(0deg) scale(1.03);
+      }
+
+      .feature__graphic span {
+        border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+        border-radius: 4px;
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+
+      .workflow {
+        border-top: 1px solid var(--line);
+      }
+
+      .workflow-layout {
+        display: grid;
+        grid-template-columns: minmax(300px, 0.72fr) minmax(0, 1.28fr);
+        gap: clamp(58px, 10vw, 150px);
+        align-items: start;
+      }
+
+      .workflow-intro {
+        position: sticky;
+        top: 108px;
+      }
+
+      .workflow-intro .section-title {
+        font-size: clamp(2.7rem, 4.7vw, 4.9rem);
+      }
+
+      .steps {
+        display: grid;
+        gap: 0;
+      }
+
+      .step {
+        display: grid;
+        min-height: 230px;
+        grid-template-columns: 56px 1fr;
+        gap: 26px;
+        align-content: center;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .step:first-child {
+        border-top: 1px solid var(--line);
+      }
+
+      .step__index {
+        color: var(--accent-bright);
+        font-family: "Geist Mono", "Cascadia Code", Consolas, monospace;
+        font-size: 0.82rem;
+      }
+
+      .step h3 {
+        margin-bottom: 10px;
+        font-size: clamp(1.6rem, 2.6vw, 2.5rem);
+        letter-spacing: -0.045em;
+      }
+
+      .step p {
+        max-width: 520px;
+        margin-bottom: 16px;
+        color: var(--muted);
+      }
+
+      .step code {
+        color: var(--accent-bright);
+        font-family: "Geist Mono", "Cascadia Code", Consolas, monospace;
+        font-size: 0.82rem;
+      }
+
+      .proof {
+        padding-block: 0 clamp(92px, 12vw, 168px);
+      }
+
+      .proof-panel {
+        display: grid;
+        grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+        gap: 64px;
+        align-items: center;
+        padding: clamp(34px, 6vw, 78px);
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius);
+        background: var(--surface);
+      }
+
+      .proof-panel h2 {
+        max-width: 680px;
+        margin-bottom: 18px;
+        font-size: clamp(2.8rem, 5.4vw, 5.8rem);
+        line-height: 0.95;
+        letter-spacing: -0.065em;
+      }
+
+      .proof-panel p {
+        max-width: 520px;
+        margin-bottom: 0;
+        color: var(--muted);
+      }
+
+      .proof-list {
         display: grid;
         grid-template-columns: 1fr 1fr;
-        gap: 40px;
-        align-items: start;
+        gap: 28px 34px;
       }
 
-      .list {
-        display: grid;
-        gap: 10px;
-        margin: 18px 0 0;
-        padding: 0;
-        list-style: none;
+      .proof-item strong {
+        display: block;
+        margin-bottom: 5px;
+        color: var(--accent-bright);
+        font-family: "Geist Mono", "Cascadia Code", Consolas, monospace;
+        font-size: 1.05rem;
       }
 
-      .list li {
-        padding: 12px 0;
-        border-top: 1px solid var(--line);
+      .proof-item span {
         color: var(--muted);
+        font-size: 0.86rem;
       }
 
-      .faq {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: 14px;
-      }
-
-      footer {
-        padding: 34px 0 46px;
+      .final-cta {
+        position: relative;
+        overflow: hidden;
         border-top: 1px solid var(--line);
-        color: var(--muted);
+        padding-block: clamp(100px, 15vw, 200px);
+        text-align: center;
       }
 
-      footer .shell {
+      .final-cta::before {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 70vw;
+        height: 70vw;
+        border-radius: 50%;
+        background: radial-gradient(circle, color-mix(in srgb, var(--accent) 14%, transparent), transparent 66%);
+        content: "";
+        pointer-events: none;
+        transform: translate(-50%, -50%);
+      }
+
+      .final-cta__inner {
+        position: relative;
+        z-index: 2;
+      }
+
+      .final-cta h2 {
+        max-width: 940px;
+        margin: 0 auto 22px;
+        font-size: clamp(3.2rem, 8vw, 8rem);
+        line-height: 0.88;
+        letter-spacing: -0.075em;
+      }
+
+      .final-cta p {
+        max-width: 530px;
+        margin: 0 auto 34px;
+        color: var(--muted);
+        font-size: 1.08rem;
+      }
+
+      .final-actions {
         display: flex;
-        justify-content: space-between;
-        gap: 20px;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 12px;
+      }
+
+      .footer {
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.82rem;
+      }
+
+      .footer__inner {
+        display: grid;
+        grid-template-columns: 1fr auto auto;
+        gap: 28px;
+        align-items: center;
+        min-height: 88px;
+      }
+
+      .footer a {
+        transition: color 180ms ease;
+      }
+
+      .footer a:hover {
+        color: var(--text);
+      }
+
+      .js .reveal {
+        opacity: 0;
+        transform: translateY(28px);
+        transition: opacity 700ms cubic-bezier(0.16, 1, 0.3, 1), transform 700ms cubic-bezier(0.16, 1, 0.3, 1);
+      }
+
+      .js .reveal.is-visible {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      @keyframes hero-in {
+        from {
+          opacity: 0;
+          transform: translateY(26px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @keyframes frame-in {
+        from {
+          opacity: 0;
+          transform: translateX(36px) scale(0.97);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0) scale(1);
+        }
+      }
+
+      @keyframes ticker {
+        to {
+          transform: translateX(-50%);
+        }
+      }
+
+      @keyframes sheen {
+        to {
+          transform: translateX(80%);
+        }
+      }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .hero-kicker,
+        h1,
+        .hero-lead,
+        .hero-actions,
+        .install-command {
+          opacity: 0;
+          animation: hero-in 700ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+
+        h1 { animation-delay: 80ms; }
+        .hero-lead { animation-delay: 150ms; }
+        .hero-actions { animation-delay: 220ms; }
+        .install-command { animation-delay: 290ms; }
+
+        .hero-visual {
+          opacity: 0;
+          animation: frame-in 900ms 180ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
       }
 
       @media (max-width: 900px) {
-        .hero,
-        .section-head,
-        .plain {
-          grid-template-columns: 1fr;
-        }
-
         .hero {
-          gap: 28px;
-          padding-top: 42px;
-        }
-
-        .hero-media {
-          order: -1;
-        }
-
-        .strip,
-        .grid,
-        .faq {
+          min-height: auto;
           grid-template-columns: 1fr;
+          padding-top: 140px;
+          padding-bottom: 90px;
         }
 
-        .tile.wide {
-          grid-column: auto;
-        }
-
-        .nav {
-          align-items: flex-start;
-          flex-direction: column;
-          justify-content: center;
-          padding: 14px 0;
-        }
-      }
-
-      @media (max-width: 560px) {
-        .shell {
-          width: min(100% - 22px, 1160px);
-        }
-
-        .nav-links {
-          flex-wrap: wrap;
-          gap: 10px 14px;
+        .hero-copy {
+          max-width: 760px;
         }
 
         h1 {
-          font-size: clamp(2.5rem, 18vw, 4rem);
+          max-width: 760px;
         }
 
-        .actions {
-          flex-direction: column;
+        .hero-visual {
+          width: 94%;
+          margin-left: auto;
+        }
+
+        .problem,
+        .workflow-layout {
+          gap: 64px;
+        }
+
+        .feature:nth-child(n) {
+          grid-column: span 6;
+        }
+      }
+
+      @media (max-width: 767px) {
+        :root {
+          --page: calc(100% - 32px);
+        }
+
+        .site-nav {
+          height: 66px;
+        }
+
+        .brand__wordmark {
+          font-size: 0.94rem;
+        }
+
+        .nav-links a:not(.nav-cta) {
+          display: none;
+        }
+
+        .nav-cta {
+          min-height: 36px;
+          padding-inline: 13px;
+          font-size: 0.82rem;
+        }
+
+        .nav-cta__long {
+          display: none;
+        }
+
+        .nav-cta__short {
+          display: inline;
+        }
+
+        .hero {
+          width: 100%;
+          min-width: 0;
+          gap: 28px;
+          padding: 94px 16px 36px;
+        }
+
+        .hero-copy {
+          min-width: 0;
+        }
+
+        .hero::before {
+          top: 38%;
+          left: 18%;
+          width: 80vw;
+          height: 80vw;
+        }
+
+        h1 {
+          margin-bottom: 20px;
+          font-size: clamp(3rem, 13vw, 4.2rem);
+        }
+
+        .hero-lead {
+          max-width: 36ch;
+        }
+
+        .hero-actions {
+          display: grid;
+          grid-template-columns: 1fr;
         }
 
         .button {
           width: 100%;
+          padding-inline: 12px;
+          font-size: 0.86rem;
         }
 
-        footer .shell {
-          flex-direction: column;
+        .install-command {
+          width: 100%;
+          min-width: 0;
+        }
+
+        .install-command code {
+          min-width: 0;
+        }
+
+        .hero-visual {
+          width: 100%;
+        }
+
+        .terminal-frame {
+          transform: none;
+        }
+
+        .terminal-bar {
+          height: 36px;
+          font-size: 0.62rem;
+        }
+
+        .visual-note {
+          right: 10px;
+          bottom: 10px;
+          width: 58%;
+          padding: 12px;
+        }
+
+        .section {
+          padding-block: 88px;
+        }
+
+        .problem,
+        .features-head,
+        .workflow-layout,
+        .proof-panel,
+        .showcase-caption {
+          grid-template-columns: 1fr;
+        }
+
+        .problem,
+        .features-head,
+        .workflow-layout,
+        .proof-panel {
+          gap: 40px;
+        }
+
+        .problem__aside {
+          padding: 24px 0 0;
+          border-top: 1px solid var(--line-strong);
+          border-left: 0;
+        }
+
+        .showcase-caption {
+          gap: 8px;
+        }
+
+        .showcase-caption span:last-child {
+          text-align: left;
+        }
+
+        .features-head .section-lead {
+          justify-self: start;
+        }
+
+        .feature-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .feature:nth-child(n) {
+          min-height: 310px;
+          grid-column: auto;
+        }
+
+        .workflow-intro {
+          position: static;
+        }
+
+        .step {
+          min-height: 200px;
+          grid-template-columns: 38px 1fr;
+          gap: 16px;
+        }
+
+        .proof-panel {
+          padding: 30px 24px;
+        }
+
+        .proof-list {
+          gap: 22px;
+        }
+
+        .footer__inner {
+          grid-template-columns: 1fr 1fr;
+          padding-block: 24px;
+        }
+
+        .footer__inner span:first-child {
+          grid-column: 1 / -1;
+        }
+      }
+
+      @media (max-width: 420px) {
+        .hero-actions {
+          grid-template-columns: 1fr;
+        }
+
+        .problem__number {
+          font-size: 6rem;
+        }
+
+        .proof-list {
+          grid-template-columns: 1fr;
         }
       }
 
@@ -460,130 +1293,313 @@
           scroll-behavior: auto;
         }
 
-        .button:active {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          scroll-behavior: auto !important;
+          transition-duration: 0.01ms !important;
+        }
+
+        .js .reveal {
+          opacity: 1;
+          transform: none;
+        }
+
+        .ticker__track {
+          animation: none;
+        }
+
+        .terminal-frame {
           transform: none;
         }
       }
     </style>
   </head>
+
   <body>
-    <header class="shell nav">
-      <a class="brand" href="https://jasonsuhari.github.io/gridbash/" aria-label="GridBash home">
-        <span class="mark">GB</span>
-        <span>GridBash by Jason Suhari</span>
-      </a>
-      <nav class="nav-links" aria-label="Primary navigation">
-        <a href="https://github.com/jasonsuhari/gridbash">GitHub</a>
-        <a href="https://www.npmjs.com/package/gridbash">npm</a>
-        <a href="#install">Install</a>
-        <a href="#faq">FAQ</a>
-      </nav>
+    <header class="site-nav">
+      <div class="page site-nav__inner">
+        <a class="brand" href="https://jasonsuhari.github.io/gridbash/" aria-label="GridBash home">
+          <span class="brand__mark" aria-hidden="true"><span></span><span></span><span></span><span></span></span>
+          <span class="brand__wordmark">GridBash</span>
+        </a>
+        <nav class="nav-links" aria-label="Primary navigation">
+          <a href="#why">Why GridBash</a>
+          <a href="#features">Features</a>
+          <a href="https://www.npmjs.com/package/gridbash">npm stable</a>
+          <a class="nav-cta" href="https://github.com/jasonsuhari/gridbash"><span class="nav-cta__long">Star on GitHub</span><span class="nav-cta__short">GitHub</span></a>
+        </nav>
+      </div>
     </header>
 
     <main>
-      <section class="shell hero" aria-labelledby="hero-title">
-        <div>
-          <p class="eyebrow">Windows-native CLI agent terminal grid</p>
-          <h1 id="hero-title">Run every CLI coding agent side by side.</h1>
-          <p class="lead">GridBash runs Codex, Claude, Gemini, Aider, shells, and custom commands in one fast PTY-backed grid.</p>
-          <div class="actions">
-            <a class="button primary" href="https://github.com/jasonsuhari/gridbash">Open GitHub repo</a>
-            <a class="button" href="https://www.npmjs.com/package/gridbash">View npm package</a>
+      <section class="page hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="hero-kicker mono">Open source terminal orchestration</p>
+          <h1 id="hero-title">Every agent.<br><span class="hero-accent">One terminal.</span></h1>
+          <p class="hero-lead">Run your entire CLI agent stack side by side. Prompt one pane, selected panes, or all of them at once.</p>
+          <div class="hero-actions">
+            <a class="button button--primary" href="https://www.npmjs.com/package/gridbash">Install stable (Windows) <span class="button__arrow" aria-hidden="true">→</span></a>
+            <a class="button" href="https://github.com/jasonsuhari/gridbash">Star on GitHub</a>
           </div>
-          <div id="install" class="command">npm install -g gridbash</div>
+          <button class="install-command" type="button" data-copy="npm install -g gridbash" aria-label="Copy npm command for the Windows stable package">
+            <code>npm install -g gridbash</code>
+            <span class="install-command__status">Copy</span>
+          </button>
         </div>
-        <a class="hero-media" href="https://github.com/jasonsuhari/gridbash/blob/main/docs/assets/gridbash-launch-teaser.mp4" aria-label="Watch the GridBash launch teaser">
-          <img src="assets/gridbash-launch-teaser-poster.png" width="1920" height="1080" alt="GridBash launch teaser showing six CLI coding agents in one terminal grid">
-        </a>
+
+        <div class="hero-visual" data-tilt>
+          <div class="terminal-frame">
+            <div class="terminal-bar">
+              <span>gridbash 2x3 --profile codex</span>
+              <span class="terminal-bar__keys">ALT + M</span>
+            </div>
+            <video autoplay muted loop playsinline poster="assets/gridbash-launch-teaser-poster.png" aria-label="GridBash running six CLI coding agents in one terminal grid">
+              <source src="assets/gridbash-launch-teaser.mp4" type="video/mp4">
+            </video>
+          </div>
+          <div class="visual-note">
+            <strong>100 real PTY panes</strong>
+            <span>Windows, Linux, and macOS</span>
+          </div>
+        </div>
       </section>
 
-      <div class="shell strip" aria-label="GridBash feature summary">
-        <div class="metric">
-          <strong>100</strong>
-          <span>PTY-backed panes in one terminal process.</span>
-        </div>
-        <div class="metric">
-          <strong>ConPTY</strong>
-          <span>Windows-native terminal IO through portable-pty.</span>
-        </div>
-        <div class="metric">
-          <strong>Agents</strong>
-          <span>Built-in profiles for Codex, Claude, Gemini, Aider, and more.</span>
-        </div>
-        <div class="metric">
-          <strong>Worktrees</strong>
-          <span>Optional isolated checkouts for parallel agent work.</span>
+      <div class="ticker" aria-label="Supported agent profiles">
+        <div class="ticker__track">
+          <div class="ticker__group">
+            <span class="ticker__item">Codex</span>
+            <span class="ticker__item">Claude Code</span>
+            <span class="ticker__item">Gemini</span>
+            <span class="ticker__item">Aider</span>
+            <span class="ticker__item">OpenCode</span>
+            <span class="ticker__item">Goose</span>
+            <span class="ticker__item">Amp</span>
+            <span class="ticker__item">Copilot</span>
+          </div>
+          <div class="ticker__group" aria-hidden="true">
+            <span class="ticker__item">Codex</span>
+            <span class="ticker__item">Claude Code</span>
+            <span class="ticker__item">Gemini</span>
+            <span class="ticker__item">Aider</span>
+            <span class="ticker__item">OpenCode</span>
+            <span class="ticker__item">Goose</span>
+            <span class="ticker__item">Amp</span>
+            <span class="ticker__item">Copilot</span>
+          </div>
         </div>
       </div>
 
-      <section class="shell" aria-labelledby="why-title">
-        <div class="section-head">
-          <h2 id="why-title">A terminal multiplexer for AI coding agents.</h2>
-          <p>GridBash keeps agent sessions visible, lets you target prompts to selected panes, and avoids the window sprawl that comes with modern CLI-agent workflows.</p>
+      <section id="why" class="page section problem" aria-labelledby="problem-title">
+        <div class="problem__statement reveal">
+          <span class="problem__number">10</span>
+          <h2 id="problem-title">agents should not mean 10 windows.</h2>
+          <p>GridBash gives agent-heavy development one shared control surface without flattening every session into the same context.</p>
         </div>
-        <div class="grid">
-          <article class="tile wide">
-            <h3>Selected-pane input</h3>
-            <p>Type into one pane, a chosen subset, or the whole grid without sending prompts where they do not belong.</p>
-          </article>
-          <article class="tile">
-            <h3>Real terminal panes</h3>
-            <p>Every pane is backed by a real Windows PTY, not a fake log viewer.</p>
-          </article>
-          <article class="tile">
-            <h3>Agent profiles</h3>
-            <p>Launch Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp, Cursor, Copilot, Git Bash, PowerShell, cmd, or custom commands.</p>
-          </article>
-          <article class="tile wide">
-            <h3>Safer parallel work</h3>
-            <p>Use `--worktrees` to open every pane in a repo-local git worktree, so agents can explore fixes in isolated checkouts.</p>
-          </article>
+        <aside class="problem__aside reveal">
+          <p><strong>See the whole grid.</strong>Keep every run, review, and shell visible from one process.</p>
+          <p><strong>Choose who hears you.</strong>Send input to one pane, selected panes, or the full grid.</p>
+          <p><strong>Keep work isolated.</strong>Launch repo-local git worktrees for safer parallel changes.</p>
+        </aside>
+      </section>
+
+      <section class="page showcase" aria-label="GridBash product view">
+        <a class="showcase-frame reveal" href="assets/gridbash-openvid-demo.mp4" aria-label="Watch the full GridBash demo">
+          <img src="assets/gridbash-openvid-demo-poster.png" width="1920" height="1080" loading="lazy" alt="GridBash terminal interface with multiple coding agents arranged in a grid">
+        </a>
+        <div class="showcase-caption reveal">
+          <span><strong>One process. Real terminals.</strong> No browser tabs and no fake log panes.</span>
+          <span>Built in Rust with Ratatui and portable-pty.</span>
         </div>
       </section>
 
-      <section class="shell plain" aria-labelledby="search-title">
-        <div>
-          <p class="eyebrow">Searchable project facts</p>
-          <h2 id="search-title">GridBash is open source developer tooling by Jason Suhari.</h2>
-        </div>
-        <div>
-          <p>The canonical GitHub repository is `github.com/jasonsuhari/gridbash`. The package name is `gridbash` on npm. The project is MIT licensed and built in Rust with Ratatui, Crossterm, portable-pty, and Windows ConPTY.</p>
-          <ul class="list">
-            <li>Primary query: jasonsuhari gridbash.</li>
-            <li>Use case query: CLI agent terminal grid for Windows.</li>
-            <li>Category query: AI coding agent multiplexer.</li>
-            <li>Install query: npm install gridbash.</li>
-          </ul>
+      <section id="features" class="features">
+        <div class="page section">
+          <div class="features-head reveal">
+            <h2 class="section-title">Built for parallel work that actually ships.</h2>
+            <p class="section-lead">GridBash keeps every agent independent while giving you one fast place to direct the work.</p>
+          </div>
+
+          <div class="feature-grid">
+            <article class="feature reveal">
+              <p class="feature__tag">Targeted input</p>
+              <h3>Prompt exactly the panes you choose.</h3>
+              <p>Focus one agent, select a team, or broadcast to the grid without accidental cross-pane input.</p>
+              <div class="feature__graphic" aria-hidden="true">
+                <span></span><span></span><span></span><span></span><span></span><span></span>
+              </div>
+            </article>
+
+            <article class="feature reveal">
+              <p class="feature__tag">Real PTYs</p>
+              <h3>Your agents get actual terminals.</h3>
+              <p>Full interactive sessions through ConPTY on Windows and native PTYs on Linux and macOS.</p>
+            </article>
+
+            <article class="feature reveal">
+              <p class="feature__tag">Worktrees</p>
+              <h3>Parallel, not chaotic.</h3>
+              <p>Give each pane an isolated repo-local checkout with one flag.</p>
+            </article>
+
+            <article class="feature reveal">
+              <p class="feature__tag">Manager goals</p>
+              <h3>Let one agent coordinate the rest.</h3>
+              <p>Manager goals review live pane output and route focused follow-ups across your current grid.</p>
+            </article>
+          </div>
         </div>
       </section>
 
-      <section id="faq" class="shell" aria-labelledby="faq-title">
-        <div class="section-head">
-          <h2 id="faq-title">FAQ</h2>
-          <p>Short answers for search engines and developers evaluating GridBash.</p>
+      <section class="workflow">
+        <div class="page section workflow-layout">
+          <div class="workflow-intro reveal">
+            <p class="section-kicker">From zero to grid</p>
+            <h2 class="section-title">Choose a build. Then let it rip.</h2>
+            <p class="section-lead">No daemon, product account, or cloud workspace required.</p>
+          </div>
+
+          <div class="steps">
+            <article class="step reveal">
+              <span class="step__index">01</span>
+              <div>
+                <h3>Choose your channel</h3>
+                <p>Windows stable is on npm. The cross-platform preview is on <a href="https://github.com/jasonsuhari/gridbash/releases/tag/v0.2.0-macos.1">GitHub Releases</a>.</p>
+                <code>stable 0.1.6 | preview 0.2.0-macos.1</code>
+              </div>
+            </article>
+            <article class="step reveal">
+              <span class="step__index">02</span>
+              <div>
+                <h3>Pick your grid</h3>
+                <p>Use the animated setup screen or launch straight into a layout.</p>
+                <code>gridbash 2x3 --profile codex</code>
+              </div>
+            </article>
+            <article class="step reveal">
+              <span class="step__index">03</span>
+              <div>
+                <h3>Run in parallel</h3>
+                <p>Add isolated worktrees when every agent needs its own checkout.</p>
+                <code>gridbash 2x3 --profile codex --worktrees</code>
+              </div>
+            </article>
+          </div>
         </div>
-        <div class="faq">
-          <article class="tile">
-            <h3>What is GridBash by Jason Suhari?</h3>
-            <p>GridBash is a Windows-native terminal grid for running CLI coding agents and shells side by side.</p>
-          </article>
-          <article class="tile">
-            <h3>Is GridBash Windows-only?</h3>
-            <p>Yes. The current package targets Windows x64 and uses Windows ConPTY for terminal panes.</p>
-          </article>
-          <article class="tile">
-            <h3>How do I install GridBash?</h3>
-            <p>Run `npm install -g gridbash`, then start it with `gridbash` or launch a grid such as `gridbash 2x3 --profile codex`.</p>
-          </article>
+      </section>
+
+      <section class="page proof" aria-labelledby="proof-title">
+        <div class="proof-panel reveal">
+          <div>
+            <p class="section-kicker">Built in the open</p>
+            <h2 id="proof-title">Fast, local, and yours.</h2>
+            <p>GridBash is MIT licensed developer tooling. Your terminals stay on your machine and your workflow stays under your control.</p>
+          </div>
+          <div class="proof-list" aria-label="GridBash project facts">
+            <div class="proof-item"><strong>MIT</strong><span>Open source license</span></div>
+            <div class="proof-item"><strong>Rust</strong><span>Fast native TUI</span></div>
+            <div class="proof-item"><strong>100</strong><span>Maximum panes</span></div>
+            <div class="proof-item"><strong>3 OS</strong><span>Win, Linux, macOS</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="final-cta" aria-labelledby="final-title">
+        <div class="page final-cta__inner reveal">
+          <p class="section-kicker">Your agent command center</p>
+          <h2 id="final-title">Stop tab juggling.</h2>
+          <p>Install the Windows stable build, or grab the cross-platform preview from GitHub Releases.</p>
+          <div class="final-actions">
+            <button class="button button--primary install-copy" type="button" data-copy="npm install -g gridbash">Copy npm install (Windows)</button>
+            <a class="button" href="https://github.com/jasonsuhari/gridbash">Star on GitHub <span class="button__arrow" aria-hidden="true">→</span></a>
+          </div>
         </div>
       </section>
     </main>
 
-    <footer>
-      <div class="shell">
-        <span>GridBash by Jason Suhari</span>
-        <span><a href="https://github.com/jasonsuhari/gridbash">github.com/jasonsuhari/gridbash</a></span>
+    <footer class="footer">
+      <div class="page footer__inner">
+        <span>GridBash by Jason Suhari. MIT licensed.</span>
+        <a href="https://www.npmjs.com/package/gridbash">npm stable v0.1.6</a>
+        <a href="https://github.com/jasonsuhari/gridbash">GitHub</a>
       </div>
     </footer>
+
+    <script>
+      (() => {
+        const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+        const copyText = async (button) => {
+          const text = button.dataset.copy;
+          const status = button.querySelector(".install-command__status");
+          const original = status ? status.textContent : button.textContent;
+
+          try {
+            await navigator.clipboard.writeText(text);
+          } catch {
+            const area = document.createElement("textarea");
+            area.value = text;
+            area.setAttribute("readonly", "");
+            area.style.position = "fixed";
+            area.style.opacity = "0";
+            document.body.appendChild(area);
+            area.select();
+            document.execCommand("copy");
+            area.remove();
+          }
+
+          if (status) {
+            status.textContent = "Copied";
+          } else {
+            button.textContent = "Copied to clipboard";
+          }
+
+          window.setTimeout(() => {
+            if (status) {
+              status.textContent = original;
+            } else {
+              button.textContent = original;
+            }
+          }, 1800);
+        };
+
+        document.querySelectorAll("[data-copy]").forEach((button) => {
+          button.addEventListener("click", () => copyText(button));
+        });
+
+        const reveals = document.querySelectorAll(".reveal");
+        if (reduceMotion || !("IntersectionObserver" in window)) {
+          reveals.forEach((element) => element.classList.add("is-visible"));
+        } else {
+          const observer = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+              if (!entry.isIntersecting) return;
+              entry.target.classList.add("is-visible");
+              observer.unobserve(entry.target);
+            });
+          }, { rootMargin: "0px 0px -12%", threshold: 0.12 });
+
+          reveals.forEach((element) => observer.observe(element));
+        }
+
+        const tilt = document.querySelector("[data-tilt]");
+        if (tilt && !reduceMotion && window.matchMedia("(pointer: fine)").matches) {
+          const frame = tilt.querySelector(".terminal-frame");
+          tilt.addEventListener("pointermove", (event) => {
+            const bounds = tilt.getBoundingClientRect();
+            const x = (event.clientX - bounds.left) / bounds.width - 0.5;
+            const y = (event.clientY - bounds.top) / bounds.height - 0.5;
+            frame.style.setProperty("--tilt-x", `${x * 5}deg`);
+            frame.style.setProperty("--tilt-y", `${y * -5}deg`);
+          });
+          tilt.addEventListener("pointerleave", () => {
+            frame.style.removeProperty("--tilt-x");
+            frame.style.removeProperty("--tilt-y");
+          });
+        }
+      })();
+    </script>
   </body>
 </html>
