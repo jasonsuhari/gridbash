@@ -26,6 +26,16 @@ pub struct LaunchCommand {
     pub args: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileDiagnostic {
+    pub name: String,
+    pub title: String,
+    pub command: String,
+    pub executable: Option<PathBuf>,
+    pub selected: bool,
+    pub custom: bool,
+}
+
 #[cfg(windows)]
 const TERMINAL_PROFILE_NAMES: &[&str] = &["git-bash", "pwsh", "powershell", "cmd"];
 #[cfg(not(windows))]
@@ -147,12 +157,21 @@ pub fn find_profile(config: &Config, name: &str) -> Result<Profile> {
         .with_context(|| format!("unknown profile '{name}'"))
 }
 
-pub fn available_profiles(config: &Config) -> Vec<(String, bool)> {
+pub fn profile_diagnostics(config: &Config) -> Vec<ProfileDiagnostic> {
+    let selected = config
+        .defaults
+        .profile
+        .as_deref()
+        .unwrap_or(default_profile_name());
     all_profiles(config)
         .into_iter()
-        .map(|(name, profile)| {
-            let available = profile.resolved_executable().is_some();
-            (name, available)
+        .map(|(name, profile)| ProfileDiagnostic {
+            title: profile.display_name(&name),
+            command: profile.command.clone(),
+            executable: profile.resolved_executable(),
+            selected: name == selected,
+            custom: config.profiles.contains_key(&name),
+            name,
         })
         .collect()
 }
@@ -349,4 +368,52 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(not(unix))]
 fn is_executable_file(path: &Path) -> bool {
     path.is_file()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_diagnostics_explain_selected_available_and_missing_profiles() {
+        let executable = env::current_exe().expect("current test executable");
+        let missing = env::temp_dir().join("gridbash-profile-that-does-not-exist");
+        let mut config = Config::default();
+        config.defaults.profile = Some("working".into());
+        config.profiles.insert(
+            "working".into(),
+            Profile {
+                command: executable.display().to_string(),
+                args: Vec::new(),
+                title: Some("Working profile".into()),
+                agent_kind: None,
+            },
+        );
+        config.profiles.insert(
+            "missing".into(),
+            Profile {
+                command: missing.display().to_string(),
+                args: Vec::new(),
+                title: None,
+                agent_kind: None,
+            },
+        );
+
+        let diagnostics = profile_diagnostics(&config);
+        let working = diagnostics
+            .iter()
+            .find(|profile| profile.name == "working")
+            .expect("working profile");
+        assert!(working.selected);
+        assert!(working.custom);
+        assert_eq!(working.executable.as_deref(), Some(executable.as_path()));
+
+        let missing = diagnostics
+            .iter()
+            .find(|profile| profile.name == "missing")
+            .expect("missing profile");
+        assert!(!missing.selected);
+        assert!(missing.custom);
+        assert!(missing.executable.is_none());
+    }
 }

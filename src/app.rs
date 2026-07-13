@@ -33,7 +33,7 @@ use crate::{
     auth::{self, AgentKind, AuthProfile},
     cli::{Cli, GridMode},
     composer::{Composer, GridPicker, GridPickerAction},
-    config::{Config, PaneWorkloadPolicy},
+    config::{Config, PaletteColor, PaneWorkloadPolicy, UiConfig, UiPalette},
     control::{self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse},
     image_preview::{self, ImagePreview},
     layout::{GridLayout, GridSize, PaneId, pane_at},
@@ -107,6 +107,8 @@ pub struct App {
     control_rx: Option<std_mpsc::Receiver<ControlEnvelope>>,
     image_overlay: Option<ImagePreview>,
     grid_resizer: Option<GridPicker>,
+    help_open: bool,
+    quit_confirmation_pending: bool,
     settings: SettingsState,
     rename: RenamePaneState,
     tab_rename: RenameTabState,
@@ -385,23 +387,6 @@ impl PaletteRole {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PaletteColor {
-    Cyan,
-    Sky,
-    Blue,
-    Teal,
-    Green,
-    Yellow,
-    Amber,
-    Orange,
-    Red,
-    Magenta,
-    DarkGray,
-    Gray,
-    White,
-}
-
 impl PaletteColor {
     const ALL: [Self; 13] = [
         Self::Cyan,
@@ -476,12 +461,30 @@ pub struct GridPalette {
 
 impl Default for GridPalette {
     fn default() -> Self {
+        Self::from(UiPalette::default())
+    }
+}
+
+impl From<UiPalette> for GridPalette {
+    fn from(palette: UiPalette) -> Self {
         Self {
-            accent: PaletteColor::Cyan,
-            focus: PaletteColor::Yellow,
-            selected: PaletteColor::Cyan,
-            quiet: PaletteColor::DarkGray,
-            exited: PaletteColor::Red,
+            accent: palette.accent,
+            focus: palette.focus,
+            selected: palette.selected,
+            quiet: palette.quiet,
+            exited: palette.exited,
+        }
+    }
+}
+
+impl From<GridPalette> for UiPalette {
+    fn from(palette: GridPalette) -> Self {
+        Self {
+            accent: palette.accent,
+            focus: palette.focus,
+            selected: palette.selected,
+            quiet: palette.quiet,
+            exited: palette.exited,
         }
     }
 }
@@ -590,7 +593,6 @@ enum SettingsTarget {
     IdleSeconds,
     Todo(usize),
     AddTodo,
-    PaneDensity,
     Scrollback,
     RefreshMs,
     PaneWorkload,
@@ -614,6 +616,7 @@ enum SettingsChange {
     None,
     Render,
     SaveTodos,
+    SaveUi,
     SaveWorkload,
 }
 
@@ -945,7 +948,6 @@ struct SettingsState {
     idle_seconds: u64,
     todo_prompts: Vec<String>,
     todo_edit: Option<TodoEditState>,
-    pane_density: i32,
     scrollback: i32,
     refresh_ms: i32,
     pane_workload: PaneWorkloadPolicy,
@@ -1107,9 +1109,8 @@ impl Default for SettingsState {
             idle_seconds: crate::config::TodoSettings::default_idle_seconds(),
             todo_prompts: Vec::new(),
             todo_edit: None,
-            pane_density: 2,
-            scrollback: 10_000,
-            refresh_ms: 16,
+            scrollback: UiConfig::default_scrollback_rows() as i32,
+            refresh_ms: UiConfig::default_refresh_ms() as i32,
             pane_workload: PaneWorkloadPolicy::Adaptive,
             palette: GridPalette::default(),
             manager_cursor: 0,
@@ -1121,13 +1122,19 @@ impl Default for SettingsState {
 impl SettingsState {
     fn from_config(config: &Config) -> Self {
         Self {
+            compact_titles: config.ui.compact_titles,
+            activity_badges: config.ui.activity_badges,
+            confirm_quit: config.ui.confirm_quit,
             idle_followups: config.todos.enabled,
             idle_seconds: config
                 .todos
                 .idle_seconds
                 .clamp(MIN_TODO_IDLE_SECONDS, MAX_TODO_IDLE_SECONDS),
             todo_prompts: config.todos.normalized_prompts(),
+            scrollback: config.ui.scrollback_rows.clamp(1_000, 50_000) as i32,
+            refresh_ms: config.ui.refresh_ms.clamp(8, 100) as i32,
             pane_workload: config.defaults.pane_workload,
+            palette: GridPalette::from(config.ui.palette),
             ..Self::default()
         }
     }
@@ -1148,15 +1155,15 @@ impl SettingsState {
         match self.selected_target() {
             Some(SettingsTarget::CompactTitles) => {
                 self.compact_titles = !self.compact_titles;
-                SettingsChange::Render
+                SettingsChange::SaveUi
             }
             Some(SettingsTarget::ActivityBadges) => {
                 self.activity_badges = !self.activity_badges;
-                SettingsChange::Render
+                SettingsChange::SaveUi
             }
             Some(SettingsTarget::ConfirmQuit) => {
                 self.confirm_quit = !self.confirm_quit;
-                SettingsChange::Render
+                SettingsChange::SaveUi
             }
             Some(SettingsTarget::IdleFollowups) => {
                 self.idle_followups = !self.idle_followups;
@@ -1182,19 +1189,19 @@ impl SettingsState {
                 if delta != 0 {
                     self.compact_titles = !self.compact_titles;
                 }
-                SettingsChange::Render
+                SettingsChange::SaveUi
             }
             Some(SettingsTarget::ActivityBadges) => {
                 if delta != 0 {
                     self.activity_badges = !self.activity_badges;
                 }
-                SettingsChange::Render
+                SettingsChange::SaveUi
             }
             Some(SettingsTarget::ConfirmQuit) => {
                 if delta != 0 {
                     self.confirm_quit = !self.confirm_quit;
                 }
-                SettingsChange::Render
+                SettingsChange::SaveUi
             }
             Some(SettingsTarget::IdleFollowups) => {
                 if delta != 0 {
@@ -1210,17 +1217,13 @@ impl SettingsState {
                 self.idle_seconds = next;
                 SettingsChange::SaveTodos
             }
-            Some(SettingsTarget::PaneDensity) => {
-                self.pane_density = (self.pane_density + delta).clamp(1, 5);
-                SettingsChange::Render
-            }
             Some(SettingsTarget::Scrollback) => {
                 self.scrollback = (self.scrollback + delta * 1000).clamp(1_000, 50_000);
-                SettingsChange::Render
+                SettingsChange::SaveUi
             }
             Some(SettingsTarget::RefreshMs) => {
                 self.refresh_ms = (self.refresh_ms + delta * 4).clamp(8, 100);
-                SettingsChange::Render
+                SettingsChange::SaveUi
             }
             Some(SettingsTarget::PaneWorkload) => {
                 if delta != 0 {
@@ -1233,7 +1236,7 @@ impl SettingsState {
             }
             Some(SettingsTarget::Palette(role)) => {
                 self.palette.adjust(role, delta as isize);
-                SettingsChange::Render
+                SettingsChange::SaveUi
             }
             Some(SettingsTarget::Todo(index)) => {
                 self.start_todo_edit(TodoEditTarget::Existing(index));
@@ -1325,6 +1328,17 @@ impl SettingsState {
             enabled: self.idle_followups,
             idle_seconds: self.idle_seconds,
             prompts: self.todo_prompts.clone(),
+        }
+    }
+
+    fn ui_config(&self) -> UiConfig {
+        UiConfig {
+            compact_titles: self.compact_titles,
+            activity_badges: self.activity_badges,
+            confirm_quit: self.confirm_quit,
+            scrollback_rows: self.scrollback.clamp(1_000, 50_000) as usize,
+            refresh_ms: self.refresh_ms.clamp(8, 100) as u64,
+            palette: UiPalette::from(self.palette),
         }
     }
 
@@ -1468,7 +1482,6 @@ impl SettingsState {
         );
         targets.extend([
             SettingsTarget::AddTodo,
-            SettingsTarget::PaneDensity,
             SettingsTarget::Scrollback,
             SettingsTarget::RefreshMs,
             SettingsTarget::PaneWorkload,
@@ -1599,20 +1612,12 @@ impl SettingsState {
         ));
 
         rows.push(self.row(
-            SettingsTarget::PaneDensity,
-            SettingsGroup::Performance,
-            SettingsValueKind::Stepper,
-            "Pane density",
-            self.pane_density.to_string(),
-            "spacing scale from 1 to 5",
-        ));
-        rows.push(self.row(
             SettingsTarget::Scrollback,
             SettingsGroup::Performance,
             SettingsValueKind::Stepper,
             "Scrollback rows",
             self.scrollback.to_string(),
-            "history budget per pane",
+            "history budget for newly launched panes",
         ));
         rows.push(self.row(
             SettingsTarget::RefreshMs,
@@ -1691,6 +1696,10 @@ impl SettingsChange {
         matches!(self, Self::SaveTodos)
     }
 
+    fn save_ui(self) -> bool {
+        matches!(self, Self::SaveUi)
+    }
+
     fn save_workload(self) -> bool {
         matches!(self, Self::SaveWorkload)
     }
@@ -1711,10 +1720,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     } else {
-        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings"
+        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g pane goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     }
 }
@@ -1846,6 +1855,8 @@ impl App {
             control_rx: init.control_rx,
             image_overlay: None,
             grid_resizer: None,
+            help_open: false,
+            quit_confirmation_pending: false,
             settings: init.settings,
             rename: RenamePaneState::default(),
             tab_rename: RenameTabState::default(),
@@ -2092,6 +2103,7 @@ impl App {
             &spec.env,
             &spec.cwd,
             &extra_env,
+            self.config.ui.scrollback_rows,
             self.config.defaults.pane_priority,
             self.config.defaults.pane_workload,
             self.event_tx.clone(),
@@ -2817,6 +2829,24 @@ impl App {
     }
 
     fn handle_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<KeyOutcome> {
+        if is_quit_shortcut(&key) {
+            return Ok(self.request_quit());
+        }
+
+        if self.quit_confirmation_pending {
+            self.quit_confirmation_pending = false;
+            self.status = "quit canceled".into();
+        }
+
+        if self.help_open {
+            return Ok(self.handle_help_key(key));
+        }
+
+        if is_help_shortcut(&key) {
+            self.open_help();
+            return Ok(KeyOutcome::Render);
+        }
+
         if self.grid_resizer.is_some() {
             return self.handle_grid_resizer_key(key);
         }
@@ -2898,6 +2928,36 @@ impl App {
         } else {
             KeyOutcome::Continue
         })
+    }
+
+    fn request_quit(&mut self) -> KeyOutcome {
+        if !self.settings.confirm_quit || self.quit_confirmation_pending {
+            return KeyOutcome::Quit;
+        }
+
+        self.quit_confirmation_pending = true;
+        self.status = "press Alt+q again to quit; any other key cancels".into();
+        KeyOutcome::Render
+    }
+
+    fn open_help(&mut self) {
+        self.close_tab_modals();
+        self.settings.open = false;
+        self.image_overlay = None;
+        self.help_open = true;
+        self.status = "help open".into();
+    }
+
+    fn handle_help_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'))
+            || is_help_shortcut(&key)
+        {
+            self.help_open = false;
+            self.status = "help closed".into();
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        }
     }
 
     fn handle_image_overlay_key(&mut self, key: KeyEvent) -> KeyOutcome {
@@ -4715,6 +4775,9 @@ impl App {
         if change.save_todos() {
             self.save_todo_settings();
         }
+        if change.save_ui() {
+            self.save_ui_settings();
+        }
         if change.save_workload() {
             self.save_workload_setting();
         }
@@ -4726,6 +4789,25 @@ impl App {
             Ok(_) => true,
             Err(error) => {
                 self.status = format!("failed to save todos: {error:#}");
+                false
+            }
+        }
+    }
+
+    fn save_ui_settings(&mut self) -> bool {
+        let previous = self.config.ui.clone();
+        self.config.ui = self.settings.ui_config();
+        match self.config.save(self.config_path.as_deref()) {
+            Ok(_) => true,
+            Err(error) => {
+                self.config.ui = previous.clone();
+                self.settings.compact_titles = previous.compact_titles;
+                self.settings.activity_badges = previous.activity_badges;
+                self.settings.confirm_quit = previous.confirm_quit;
+                self.settings.scrollback = previous.scrollback_rows.clamp(1_000, 50_000) as i32;
+                self.settings.refresh_ms = previous.refresh_ms.clamp(8, 100) as i32;
+                self.settings.palette = GridPalette::from(previous.palette);
+                self.status = format!("failed to save UI settings: {error:#}");
                 false
             }
         }
@@ -5295,6 +5377,14 @@ impl App {
 
     pub fn activity_badges_enabled(&self) -> bool {
         self.settings.activity_badges
+    }
+
+    pub fn compact_titles_enabled(&self) -> bool {
+        self.settings.compact_titles
+    }
+
+    pub fn help_open(&self) -> bool {
+        self.help_open
     }
 
     pub fn palette(&self) -> &GridPalette {
@@ -6703,6 +6793,17 @@ fn is_voice_shortcut(ch: char, modifiers: KeyModifiers) -> bool {
         && !modifiers.contains(KeyModifiers::CONTROL)
 }
 
+fn is_quit_shortcut(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+}
+
+fn is_help_shortcut(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::F(1))
+        || (key.modifiers.contains(KeyModifiers::ALT)
+            && matches!(key.code, KeyCode::Char('h') | KeyCode::Char('H')))
+}
+
 fn control_byte(ch: char) -> Option<u8> {
     let lower = ch.to_ascii_lowercase();
     if lower.is_ascii_lowercase() {
@@ -7437,6 +7538,22 @@ mod tests {
 
         let voice_modifiers = KeyModifiers::ALT | KeyModifiers::SHIFT;
         assert!(is_voice_shortcut('V', voice_modifiers));
+    }
+
+    #[test]
+    fn help_shortcuts_are_modeless_and_plain_h_passes_through() {
+        assert!(is_help_shortcut(&KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::ALT,
+        )));
+        assert!(is_help_shortcut(&KeyEvent::new(
+            KeyCode::F(1),
+            KeyModifiers::NONE,
+        )));
+        assert!(!is_help_shortcut(&KeyEvent::new(
+            KeyCode::Char('h'),
+            KeyModifiers::NONE,
+        )));
     }
 
     #[test]

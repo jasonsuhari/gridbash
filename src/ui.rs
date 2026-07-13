@@ -88,7 +88,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let pane_settings_open = app.pane_settings_open();
     let grid_resizer = app.grid_resizer();
     let image_overlay = app.image_overlay_view();
-    let exited_recovery = if app.settings_open()
+    let help_open = app.help_open();
+    let exited_recovery = if help_open
+        || app.settings_open()
         || previous_panes_view.is_some()
         || pane_settings_open
         || rename_view.is_some()
@@ -102,7 +104,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     } else {
         app.exited_recovery_view()
     };
-    let modal_open = app.settings_open()
+    let modal_open = help_open
+        || app.settings_open()
         || previous_panes_view.is_some()
         || pane_settings_open
         || rename_view.is_some()
@@ -152,6 +155,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             app.pane_auth(index),
             usage.as_deref(),
             chrome.badge,
+            app.compact_titles_enabled(),
         );
 
         let mut block = Block::default()
@@ -239,7 +243,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(
-            " | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+e output | Alt+p panes | Alt+P pane | Alt+x swap | Alt+z sleep | Alt+q quit",
+            " | Alt+h help | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+e output | Alt+p panes | Alt+P pane | Alt+x swap | Alt+z sleep | Alt+q quit",
         ),
     ]);
     frame.render_widget(
@@ -275,6 +279,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     if let Some(picker) = grid_resizer {
         picker.draw(frame, GridPickerMode::Resize, None);
     }
+    if help_open {
+        render_help(frame, area, palette);
+    }
 
     DrawState {
         grid_area,
@@ -300,7 +307,12 @@ fn pane_title(
     auth: Option<&str>,
     usage: Option<&str>,
     badge: &str,
+    compact: bool,
 ) -> String {
+    if compact {
+        return format!(" {label}{quiet_marker}{badge} ");
+    }
+
     let mut parts = vec![format!("{label}{quiet_marker}"), folder.to_string()];
     if let Some(worktree) = worktree.filter(|value| !value.is_empty()) {
         parts.push(worktree.to_string());
@@ -2345,6 +2357,99 @@ fn settings_panel_style() -> Style {
     Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)
 }
 
+fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
+    const CONTROLS: &[(&str, &str)] = &[
+        ("Alt+arrows", "move pane focus"),
+        ("Alt+s", "toggle pane selection"),
+        ("Alt+a", "select or clear all panes"),
+        ("type/paste", "send to focused or selected panes"),
+        ("right-click", "toggle one selected pane"),
+        ("Alt+n", "open a new tab"),
+        ("Alt+t", "switch to next tab"),
+        ("Alt+Shift+r", "rename current tab"),
+        ("Alt+c", "focus the command bar"),
+        ("Alt+p", "open focused-pane settings"),
+        ("Alt+Shift+p", "show previous panes"),
+        ("Alt+l", "resize the grid"),
+        ("Alt+r", "rename focused pane"),
+        ("Alt+Shift+t", "restart exited panes"),
+        ("Alt+z", "sleep or wake panes"),
+        ("Alt+g / Alt+u", "start or stop pane goal"),
+        ("Alt+o", "open global settings/profiles"),
+        ("Alt+Shift+V", "dictate without submitting"),
+        ("Alt+q", "quit GridBash"),
+        ("Alt+h / F1", "close this help"),
+    ];
+
+    let modal = help_modal_rect(area);
+    frame.render_widget(Clear, modal);
+    let inner_width = modal.width.saturating_sub(4) as usize;
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "MODELLESS CONTROLS",
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from("Input stays in the terminal unless a GridBash shortcut is pressed."),
+        Line::from(""),
+    ];
+
+    if inner_width >= 62 {
+        let rows = CONTROLS.len().div_ceil(2);
+        let column_width = inner_width.saturating_sub(3) / 2;
+        for (row, control) in CONTROLS.iter().take(rows).enumerate() {
+            let left = help_control(*control, column_width);
+            let right = CONTROLS
+                .get(row + rows)
+                .map(|control| help_control(*control, column_width))
+                .unwrap_or_default();
+            lines.push(Line::from(format!("{left:<column_width$}   {right}")));
+        }
+    } else {
+        let available = modal.height.saturating_sub(7) as usize;
+        for control in CONTROLS.iter().take(available) {
+            lines.push(Line::from(help_control(*control, inner_width)));
+        }
+        if available < CONTROLS.len() {
+            lines.push(Line::from(
+                "More controls: enlarge the terminal or see README.md",
+            ));
+        }
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.accent()))
+        .title(" GridBash Help ")
+        .title_bottom(" Esc, Enter, q, Alt+h, or F1 closes ");
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .style(Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)),
+        modal,
+    );
+}
+
+fn help_control((key, action): (&str, &str), width: usize) -> String {
+    truncate_text(&format!("{key:<13} {action}"), width)
+}
+
+fn help_modal_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(2).min(92).max(area.width.min(1));
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(18)
+        .max(area.height.min(1));
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
 fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -2806,12 +2911,23 @@ mod tests {
                 None,
                 None,
                 None,
-                ""
+                "",
+                false,
             ),
             " api | gridbash/ | feat/rename-panes "
         );
         assert_eq!(
-            pane_title("1", "", "gridbash/", None, None, None, None, " selected"),
+            pane_title(
+                "1",
+                "",
+                "gridbash/",
+                None,
+                None,
+                None,
+                None,
+                " selected",
+                false,
+            ),
             " 1 | gridbash/ selected "
         );
         assert_eq!(
@@ -2823,7 +2939,8 @@ mod tests {
                 None,
                 None,
                 Some("5h 80% left"),
-                " selected"
+                " selected",
+                false,
             ),
             " 2 | gridbash/ | 5h 80% left selected "
         );
@@ -2836,7 +2953,8 @@ mod tests {
                 Some("codex"),
                 Some("codex-2"),
                 Some("5h 80% left"),
-                " selected"
+                " selected",
+                false,
             ),
             " api | gridbash/ | main | codex | codex-2 | 5h 80% left selected "
         );
@@ -2845,8 +2963,36 @@ mod tests {
     #[test]
     fn pane_title_keeps_quiet_marker_with_custom_label() {
         assert_eq!(
-            pane_title("api", QUIET_MARKER, "gridbash/", None, None, None, None, ""),
+            pane_title(
+                "api",
+                QUIET_MARKER,
+                "gridbash/",
+                None,
+                None,
+                None,
+                None,
+                "",
+                false,
+            ),
             " api * | gridbash/ "
+        );
+    }
+
+    #[test]
+    fn compact_pane_title_omits_folder_and_profile_details() {
+        assert_eq!(
+            pane_title(
+                "api",
+                QUIET_MARKER,
+                "gridbash/",
+                Some("main"),
+                Some("codex"),
+                Some("codex-2"),
+                Some("5h 80% left"),
+                " selected",
+                true,
+            ),
+            " api * selected "
         );
     }
 
