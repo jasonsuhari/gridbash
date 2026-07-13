@@ -2,12 +2,12 @@
 
 | Scene | Time | One job | Visual action | Proof / meaning | Beat + sound | Settled state |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1. Ten sessions | 0.00-6.32 | stop the scroll with Jason’s joke | Jason’s desk wakes as an operator station; `10 CLAUDE SESSIONS` stamps into the open zones | establishes agent-heavy audience immediately | 1.74 impact | Jason and hook remain readable together |
-| 2. Token-maxing problem | 6.32-13.75 | show why Jason built it | loose terminal plates multiply around the desk, then align toward a single grid | scattered context becomes a visual problem | routed ticks under each plate | one organized 2x3 silhouette waits behind Jason |
-| 3. GridBash reveal | 13.75-20.04 | name and define the product | `GRIDBASH` locks to the dispatch rail; the real product plate expands beside Jason | one terminal grid for CLI coding agents | hero impact at 13.75 | product and Jason share the frame without tiny UI |
-| 4. Route the prompt | 20.04-29.75 | prove terminal sessions and selected broadcast | product footage fills the frame; pane borders focus/select in sequence; broadcast bar lands | targeted input is visible, not asserted | focus/select clicks, no repeated generic whoosh | four selected panes and routed command visible |
-| 5. Worktree isolation | 29.75-37.18 | explain the parallel-safety advantage | product grid parts into branch lanes labeled with repo-local worktrees, then resolves back | each pane can use a separate Git checkout | branch whoosh at 29.75 | four distinct worktree labels connect to panes |
-| 6. Install the grid | 37.18-45.16 | make the action obvious | Jason returns as a narrow broadcast plate; install command expands; OS labels lock last | open source and easy to try | completion impact and final release | `npm install -g gridbash`, repo URL, Mac/Linux/Windows labels |
+| 1. Ten sessions | 0.00-6.32 | stop the scroll with Jason’s joke | paper fragments register into a monumental `10`, then reveal Jason for the punchline | establishes the agent-heavy audience immediately | 1.74 route impact; paper shutter at 5.37 | generated plate is exact enough to hand off to the real take |
+| 2. Token-maxing problem | 6.32-13.75 | show why Jason built it | real camera plate, six rigid pane cards, and one routed 2x3 register | scattered terminals become one organized visual problem | routed line after the sixth card settles | six cards sit completely still in one grid |
+| 3. GridBash reveal | 13.75-20.04 | name and define the product | tactile paper layers peel open, then exact product UI and HTML copy lock over the generated plate | one window for six real CLI-agent sessions | largest impact at 13.75 | exact product poster and `ONE WINDOW. SIX AGENTS.` hold |
+| 4. Route the prompt | 20.04-29.75 | prove terminal sessions and selected broadcast | real product footage fills the frame; edge tabs annotate focus, selection, and routing | targeted input is visible, not asserted | focus/select clicks and one route tick | panes 2, 3, 5, and 6 are marked while two stay idle |
+| 5. Worktree isolation | 29.75-37.18 | explain the parallel-safety advantage | Jason and the real grid share the paper table while six exact worktree lanes register below | each pane can use a separate Git checkout | branch whoosh at 29.75 | six `launch-main` / `launch/main-pane` labels settle |
+| 6. Receipt and install | 37.18-45.16 | prove open source, then make the action obvious | live GitHub capture lands as a printed receipt; at 40.16 a paper wipe reveals the install plate | public proof and a truthful Windows-native install path | repository click, CTA impact, final release | `npm install -g gridbash` and repo URL hold before the ink dip |
 
 ## Source edit order
 

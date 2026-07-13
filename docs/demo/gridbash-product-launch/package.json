@@ -6,11 +6,11 @@
     "build:talking-head": "python scripts/build_talking_head.py",
     "dev": "node node_modules/hyperframes/dist/cli.js preview",
     "lint": "node node_modules/hyperframes/dist/cli.js lint",
-    "validate": "node node_modules/hyperframes/dist/cli.js validate",
+    "validate": "node node_modules/hyperframes/dist/cli.js validate --timeout 30000",
     "inspect": "node node_modules/hyperframes/dist/cli.js inspect --samples 15",
     "check": "npm run lint && npm run validate && npm run inspect",
-    "render:draft": "node node_modules/hyperframes/dist/cli.js render --quality draft --workers 1 --video-frame-format png --no-browser-gpu --output gridbash-product-launch-draft.mp4",
-    "render": "node node_modules/hyperframes/dist/cli.js render --quality standard --workers 1 --video-frame-format png --no-browser-gpu --output gridbash-product-launch.mp4"
+    "render:draft": "node node_modules/hyperframes/dist/cli.js render --quality draft --workers 4 --video-frame-format png --no-browser-gpu --output gridbash-product-launch-draft.mp4",
+    "render": "node node_modules/hyperframes/dist/cli.js render --quality standard --workers 4 --video-frame-format png --no-browser-gpu --output gridbash-product-launch.mp4"
   },
   "devDependencies": {
     "@hyperframes/producer": "^0.7.49",

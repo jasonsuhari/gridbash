@@ -1,13 +1,13 @@
 # GridBash Product Launch
 
 This HyperFrames composition builds the 1920x1080 talking-head launch film for
-GridBash. Jason's real camera footage remains intact while real product footage,
-captions, operational graphics, music, and semantic SFX build around it.
+GridBash. Jason's real camera footage remains intact while tactile paper motion,
+real product footage, captions, music, and semantic SFX build around it.
 
 ## Production files
 
 - `project-brief.md` records verified product claims and release gates.
-- `design.md` defines the palette, typography, and desk-as-operator-station world.
+- `design.md` defines the palette, typography, and tactile cut-paper world.
 - `.hyperframes/expanded-prompt.md` contains the scene-level production breakdown.
 - `scene-plan.md`, `music-map.md`, and `approval-log.md` record timing decisions.
 - `scripts/build_talking_head.py` extracts the approved takes, rebuilds clean voice
