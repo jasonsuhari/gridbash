@@ -8,6 +8,7 @@
 - Built-in CLI agent profiles.
 - Demo-ready dark theme.
 - Release as a single Windows x64 executable.
+- Stable-release gates are tracked in [`V1_ACCEPTANCE.md`](V1_ACCEPTANCE.md).
 
 ## V2
 
@@ -15,6 +16,8 @@
 - Multi-client attach.
 - Agent status classifiers.
 - Plugin API.
+- The proposed process, protocol, persistence, and migration boundaries are in
+  [`DAEMON_ARCHITECTURE.md`](DAEMON_ARCHITECTURE.md).
 
 ## V3
 

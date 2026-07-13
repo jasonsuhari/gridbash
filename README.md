@@ -65,6 +65,8 @@ agents are all part of the same development session.
 - Devlogs live in `docs/devlogs/`.
 - Versioned release notes live in `docs/releases/` and are used for GitHub release notes.
 - npm packages include `docs/devlogs/` and `docs/releases/` so published package contents carry the logs too.
+- The [v1.0 acceptance checklist](docs/V1_ACCEPTANCE.md) defines the stable-release gates.
+- The [daemon architecture proposal](docs/DAEMON_ARCHITECTURE.md) defines the detach/reattach direction beyond v1.
 
 ## Highlights
 
