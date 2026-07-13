@@ -559,12 +559,7 @@ fn parse_usage_response(value: &Value) -> Option<UsageInfo> {
 
 fn parse_usage_window(value: Option<&Value>) -> Option<UsageWindow> {
     let value = value?;
-    let utilization = value.get("utilization").and_then(Value::as_f64)?;
-    let used_percent = if utilization <= 1.0 {
-        utilization * 100.0
-    } else {
-        utilization
-    };
+    let used_percent = value.get("utilization").and_then(Value::as_f64)?;
     let available_percent = (100.0 - used_percent).round().clamp(0.0, 100.0) as u8;
     let resets_at = value
         .get("resets_at")
@@ -756,13 +751,21 @@ mod tests {
     #[test]
     fn formats_usage_response_as_available_percent() {
         let value = serde_json::json!({
-            "five_hour": {"utilization": 25.0, "resets_at": "2026-07-07T12:00:00Z"},
-            "seven_day": {"utilization": 0.5}
+            "five_hour": {"utilization": 73.0, "resets_at": "2026-07-07T12:00:00Z"}
         });
 
         let usage = parse_usage_response(&value).expect("usage");
 
-        assert_eq!(usage.five_hour.unwrap().available_percent, 75);
-        assert_eq!(usage.seven_day.unwrap().available_percent, 50);
+        assert_eq!(usage.five_hour.unwrap().available_percent, 27);
+    }
+
+    #[test]
+    fn treats_low_usage_utilization_as_a_percentage() {
+        for (utilization, available_percent) in [(0.5, 100), (1.0, 99)] {
+            let value = serde_json::json!({"utilization": utilization});
+            let usage = parse_usage_window(Some(&value)).expect("usage window");
+
+            assert_eq!(usage.available_percent, available_percent);
+        }
     }
 }
