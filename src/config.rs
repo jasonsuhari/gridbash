@@ -14,6 +14,8 @@ use crate::{auth::AuthConfig, profiles::Profile};
 pub struct Config {
     #[serde(default, skip_serializing_if = "Defaults::is_empty")]
     pub defaults: Defaults,
+    #[serde(default, skip_serializing_if = "UiConfig::is_empty")]
+    pub ui: UiConfig,
     #[serde(default, skip_serializing_if = "TodoSettings::is_empty")]
     pub todos: TodoSettings,
     #[serde(default, skip_serializing_if = "AuthConfig::is_empty")]
@@ -22,6 +24,149 @@ pub struct Config {
     pub manager: ManagerConfig,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, Profile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UiConfig {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compact_titles: bool,
+    #[serde(
+        default = "UiConfig::default_activity_badges",
+        skip_serializing_if = "UiConfig::activity_badges_enabled"
+    )]
+    pub activity_badges: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirm_quit: bool,
+    #[serde(
+        default = "UiConfig::default_scrollback_rows",
+        skip_serializing_if = "UiConfig::is_default_scrollback_rows"
+    )]
+    pub scrollback_rows: usize,
+    #[serde(
+        default = "UiConfig::default_refresh_ms",
+        skip_serializing_if = "UiConfig::is_default_refresh_ms"
+    )]
+    pub refresh_ms: u64,
+    #[serde(default, skip_serializing_if = "UiPalette::is_default")]
+    pub palette: UiPalette,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiPalette {
+    #[serde(default = "UiPalette::default_accent")]
+    pub accent: PaletteColor,
+    #[serde(default = "UiPalette::default_focus")]
+    pub focus: PaletteColor,
+    #[serde(default = "UiPalette::default_selected")]
+    pub selected: PaletteColor,
+    #[serde(default = "UiPalette::default_quiet")]
+    pub quiet: PaletteColor,
+    #[serde(default = "UiPalette::default_exited")]
+    pub exited: PaletteColor,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PaletteColor {
+    Cyan,
+    Sky,
+    Blue,
+    Teal,
+    Green,
+    Yellow,
+    Amber,
+    Orange,
+    Red,
+    Magenta,
+    DarkGray,
+    Gray,
+    White,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            compact_titles: false,
+            activity_badges: Self::default_activity_badges(),
+            confirm_quit: false,
+            scrollback_rows: Self::default_scrollback_rows(),
+            refresh_ms: Self::default_refresh_ms(),
+            palette: UiPalette::default(),
+        }
+    }
+}
+
+impl UiConfig {
+    pub fn default_activity_badges() -> bool {
+        true
+    }
+
+    pub fn default_scrollback_rows() -> usize {
+        10_000
+    }
+
+    pub fn default_refresh_ms() -> u64 {
+        16
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.compact_titles
+            && self.activity_badges == Self::default_activity_badges()
+            && !self.confirm_quit
+            && self.scrollback_rows == Self::default_scrollback_rows()
+            && self.refresh_ms == Self::default_refresh_ms()
+            && self.palette.is_default()
+    }
+
+    fn activity_badges_enabled(value: &bool) -> bool {
+        *value
+    }
+
+    fn is_default_scrollback_rows(value: &usize) -> bool {
+        *value == Self::default_scrollback_rows()
+    }
+
+    fn is_default_refresh_ms(value: &u64) -> bool {
+        *value == Self::default_refresh_ms()
+    }
+}
+
+impl Default for UiPalette {
+    fn default() -> Self {
+        Self {
+            accent: Self::default_accent(),
+            focus: Self::default_focus(),
+            selected: Self::default_selected(),
+            quiet: Self::default_quiet(),
+            exited: Self::default_exited(),
+        }
+    }
+}
+
+impl UiPalette {
+    fn default_accent() -> PaletteColor {
+        PaletteColor::Cyan
+    }
+
+    fn default_focus() -> PaletteColor {
+        PaletteColor::Yellow
+    }
+
+    fn default_selected() -> PaletteColor {
+        PaletteColor::Cyan
+    }
+
+    fn default_quiet() -> PaletteColor {
+        PaletteColor::DarkGray
+    }
+
+    fn default_exited() -> PaletteColor {
+        PaletteColor::Red
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -358,6 +503,40 @@ mod tests {
             config.todos.normalized_prompts(),
             vec!["Review the diff".to_string(), "Run tests".to_string()]
         );
+    }
+
+    #[test]
+    fn parses_and_round_trips_persisted_ui_settings() {
+        let config: Config = toml::from_str(
+            r#"
+            [ui]
+            compact_titles = true
+            activity_badges = false
+            confirm_quit = true
+            scrollback_rows = 24000
+            refresh_ms = 32
+
+            [ui.palette]
+            accent = "amber"
+            focus = "green"
+            selected = "sky"
+            quiet = "gray"
+            exited = "orange"
+            "#,
+        )
+        .expect("parse UI config");
+
+        assert!(config.ui.compact_titles);
+        assert!(!config.ui.activity_badges);
+        assert!(config.ui.confirm_quit);
+        assert_eq!(config.ui.scrollback_rows, 24_000);
+        assert_eq!(config.ui.refresh_ms, 32);
+        assert_eq!(config.ui.palette.accent, PaletteColor::Amber);
+
+        let serialized = toml::to_string(&config).expect("serialize UI config");
+        let round_trip: Config = toml::from_str(&serialized).expect("round trip UI config");
+        assert_eq!(round_trip.ui.palette, config.ui.palette);
+        assert_eq!(round_trip.ui.refresh_ms, 32);
     }
 
     #[test]

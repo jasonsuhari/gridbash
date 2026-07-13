@@ -296,6 +296,7 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+a | Select all panes, or clear selection when all panes are selected |
 | Alt+c | Focus or unfocus the command bar |
 | Alt+Shift+V | Listen for one dictated utterance; press again to cancel |
+| Alt+h or F1 | Open or close the in-app help and shortcut legend |
 | Alt+p | Open settings for the focused pane; use Reload past history to refresh its visible conversation snapshot |
 | Alt+Shift+p | Open the previous panes list |
 | Alt+r | Rename the focused pane |
@@ -366,7 +367,10 @@ Settings includes a General tab for local runtime display controls and an Auth t
 
 Pane titles add a small quiet-output marker after roughly three seconds without output. The marker means a pane produced output and then went idle; it does not mean the process exited or completed its task.
 
-The settings screen includes sample controls plus live color controls for the accent, focus, selected, quiet, and exited grid roles. Palette changes apply immediately for the current run.
+Settings persist compact titles, activity badges, quit confirmation, scrollback
+for newly launched panes, refresh delay, workload policy, todo prompts, and the
+accent/focus/selected/quiet/exited palette. Changes apply immediately when the
+runtime supports it and remain active after restart.
 
 ## Auth Profiles
 
@@ -408,6 +412,11 @@ Windows: git-bash pwsh powershell cmd
 macOS:  zsh bash fish sh pwsh
 Linux:  zsh bash fish sh pwsh
 ```
+
+Run `gridbash --list-profiles` for a diagnostic table showing the selected
+default, built-in versus custom source, availability, resolved executable, or an
+actionable missing-command reason. This command never prints profile environment
+values, auth tokens, or manager credentials.
 
 Agent profile keys remain available on every platform: `codex`, `claude`,
 `gemini`, `opencode`, `aider`, `amp`, `goose`, `copilot`, and `cursor`.

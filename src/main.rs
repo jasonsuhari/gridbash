@@ -28,7 +28,7 @@ use crate::{
     cli::{Cli, Command},
     config::Config,
     onboarding::OnboardingResult,
-    profiles::{available_profiles, find_profile},
+    profiles::{find_profile, profile_diagnostics},
     session::select_resume_session,
 };
 
@@ -51,9 +51,18 @@ fn main() -> Result<()> {
     }
 
     if cli.list_profiles {
-        for (name, available) in available_profiles(&config) {
-            let state = if available { "available" } else { "missing" };
-            println!("{name}\t{state}");
+        println!("DEFAULT\tPROFILE\tSTATUS\tSOURCE\tDETAIL");
+        for profile in profile_diagnostics(&config) {
+            let selected = if profile.selected { "*" } else { "" };
+            let source = if profile.custom { "custom" } else { "built-in" };
+            let (status, detail) = match profile.executable {
+                Some(path) => ("available", path.display().to_string()),
+                None => (
+                    "missing",
+                    format!("command '{}' was not found", profile.command),
+                ),
+            };
+            println!("{selected}\t{}\t{status}\t{source}\t{detail}", profile.name);
         }
         return Ok(());
     }

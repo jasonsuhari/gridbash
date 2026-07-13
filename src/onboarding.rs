@@ -73,9 +73,18 @@ pub fn run(config: &mut Config, config_path: Option<&Path>) -> Result<Onboarding
         return Ok(OnboardingResult::Quit);
     };
 
+    persist_default_profile(config, config_path, profile)?;
+    Ok(OnboardingResult::Continue)
+}
+
+fn persist_default_profile(
+    config: &mut Config,
+    config_path: Option<&Path>,
+    profile: String,
+) -> Result<()> {
     config.set_default_profile(profile);
     config.save(config_path)?;
-    Ok(OnboardingResult::Continue)
+    Ok(())
 }
 
 fn missing_terminal_message() -> &'static str {
@@ -457,4 +466,41 @@ fn centered_rect(area: Rect, width_percent: u16, height: u16) -> Rect {
             Constraint::Percentage((100 - width_percent) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env, fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn clean_config_persists_first_run_selection_for_next_launch() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let path = env::temp_dir().join(format!(
+            "gridbash-onboarding-{}-{unique}.toml",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&path);
+
+        let cli = Cli::parse_from(["gridbash"]);
+        let mut config = Config::load(Some(&path)).expect("load clean config");
+        assert!(should_run(&cli, &config));
+
+        persist_default_profile(&mut config, Some(&path), "powershell".into())
+            .expect("persist onboarding selection");
+        let loaded = Config::load(Some(&path)).expect("reload saved config");
+
+        assert_eq!(loaded.defaults.profile.as_deref(), Some("powershell"));
+        assert!(!should_run(&cli, &loaded));
+        fs::remove_file(path).expect("remove test config");
+    }
 }
