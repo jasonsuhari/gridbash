@@ -86,7 +86,7 @@ _Refreshed daily by the [Star History workflow](https://github.com/jasonsuhari/g
 - Modeless Alt shortcuts for pane focus, selection, rename, settings, grid manager goals, and quit.
 - Grid manager goals review live pane output and route targeted follow-ups across the current grid.
 - Compact dark theme with focus, selection, sleep, exit, usage, and quiet-output cues.
-- Claude, Codex, and other agent panes show a compact conversation summary in the footer line.
+- Pane headers show live terminal activity, with a configured manager goal taking priority.
 - Built-in launch profiles for common CLI coding agents.
 - Startup dimension picker with a live grid preview.
 - `gridbash resume` for reopening prior grids with per-pane command and output context.
@@ -302,10 +302,10 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+t | Switch to the next tab |
 | Alt+s | Toggle focused pane selection |
 | Alt+a | Select all panes, or clear selection when all panes are selected |
-| Alt+c | Focus or unfocus the command bar |
+| Alt+c | Expand and focus the command line, or close it when focused |
 | Alt+Shift+V | Listen for one dictated utterance; press again to cancel |
 | Alt+h or F1 | Open or close the in-app help and shortcut legend |
-| Alt+p | Open settings for the focused pane; use Reload past history to refresh its visible conversation snapshot |
+| Alt+p | Open a focused-pane activity summary with its latest meaningful terminal output |
 | Alt+Shift+p | Open the previous panes list |
 | Alt+r | Rename the focused pane |
 | Alt+Shift+r | Rename the current tab |
@@ -314,24 +314,28 @@ GridBash captures drag selection so selected text stays inside the pane where th
 | Alt+g | Create or edit the current grid's manager goal |
 | Alt+u | Stop the current grid's manager goal |
 | Hover sleeping pane | Wake the pane and make its terminal contents visible again |
-| Alt+e | Expand or hide command output |
 | Alt+o | Open settings |
 | Alt+q | Quit |
 
-Focused-pane settings include sleep/wake controls for that pane and manager-goal
-controls for the current grid. Press `z` to sleep or wake the pane, `g` to create
-or edit the grid goal, and `u` to stop it. The grid manager reviews relevant live
-panes and sends each follow-up only to its validated awake, running targets.
+The focused-pane activity summary also includes sleep/wake controls for that pane
+and manager-goal controls for the current grid. Press `z` to sleep or wake the
+pane, `g` to create or edit the grid goal, and `u` to stop it. The grid manager
+reviews relevant live panes and sends each follow-up only to its validated awake,
+running targets.
 
-In focused-pane settings, press `Enter`, `Space`, or `r` to reload the visible
-conversation history snapshot. Press `Esc`, `q`, or `Alt+p` to close it, or
+Each pane's top border shows its latest activity summary instead of repeating
+the folder, branch, and launch profile. When a grid manager goal is set, its
+objective takes that spot across the grid until the goal is removed.
+
+In the activity summary, press `Enter`, `Space`, or `r` to refresh the latest
+captured terminal result. Press `Esc`, `q`, or `Alt+p` to close it, or
 `Alt+o` to switch to overall settings.
 
 When the focused pane has exited, GridBash shows a recovery dialog. Press `Enter`,
 `r`, or `t` to restart it, or press `z` to put it to sleep. `Alt+Shift+t` restarts
 exited target panes directly.
 
-Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane. When the one-line command bar is focused, typing stays in that bar; Enter runs the command from the cwd shown in the prompt and keeps output hidden until expanded.
+Typing goes to selected panes whenever multiple panes are selected. With zero or one pane selected, input goes to the focused pane. Alt+C expands and focuses the command line with its captured output visible; typing stays in the command bar, and Enter runs the command from the cwd shown in the prompt. Press Alt+C again to close it and return input to the pane grid.
 
 The grid resizer uses the same row-and-column picker as startup, with active cells
 shown in blue. Shrinking removes live panes outside the retained upper-left
@@ -372,7 +376,7 @@ does not forward mouse reporting; keyboard navigation remains available.
 
 Renamed pane headers replace the numeric prefix for the current session. Saving a blank name restores the default number.
 
-Settings includes a General tab for local runtime display controls and an Auth tab for GridBash-wide Claude/Codex auth defaults and launch policy. Pane Settings lets each Claude or Codex pane select its own compatible auth account; applying a different account restarts only that pane.
+Settings includes a General tab for local runtime display controls and an Auth tab for GridBash-wide Claude/Codex auth defaults and launch policy. Pane Activity lets each Claude or Codex pane select its own compatible auth account; applying a different account restarts only that pane.
 
 Pane titles add a small quiet-output marker after roughly three seconds without output. The marker means a pane produced output and then went idle; it does not mean the process exited or completed its task.
 
@@ -408,7 +412,7 @@ Auth settings controls:
 | r | Refresh local account and usage status |
 | Esc / q | Close settings |
 
-For a Claude or Codex pane, open Pane Settings with `Alt+P`, use Left/Right to choose a compatible auth profile, and press Enter to apply it and restart that pane. Press `r` there to refresh the pane's history snapshot.
+For a Claude or Codex pane, open Pane Activity with `Alt+p`, use Left/Right to choose a compatible auth profile, and press Enter to apply it and restart that pane. Press `r` there to refresh the activity snapshot.
 
 Usage status is best-effort. GridBash reads local auth metadata, masks account emails, and uses short-timeout `curl.exe` (Windows) or `curl` (macOS) requests only while the Auth settings view is refreshed.
 
@@ -497,9 +501,9 @@ the Workload policy under Performance settings while GridBash is running.
 The grid manager uses the OpenAI-compatible chat-completions endpoint, model, and
 API key under `[manager]`. These values can also be edited from the Manager tab in
 GridBash settings; the key is masked in the UI and stored in the local GridBash
-config. Press `Alt+g` or use focused-pane settings to create a goal for the current
-grid. Reviews include pane-numbered output, and validated follow-ups remain bound
-to their intended PTYs when panes are reordered.
+config. Press `Alt+g` or use focused-pane activity controls to create a goal for
+the current grid. Reviews include pane-numbered output, and validated follow-ups
+remain bound to their intended PTYs when panes are reordered.
 
 Starting a grid goal sends pane role/folder metadata and bounded recent output
 from every awake pane in that grid to the configured manager API. Sleeping and

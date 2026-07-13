@@ -32,11 +32,13 @@ Release target: unreleased
 
 ## Validation
 
-- `cargo test --no-fail-fast` (138 passed, 1 ignored interactive ConPTY test)
+- `cargo test --no-fail-fast` (143 passed, 1 ignored interactive ConPTY test)
 - `cargo clippy --all-targets -- -D warnings`
-- `npm test` (138 passed, 1 ignored interactive ConPTY test)
+- `npm test` (143 passed, 1 ignored interactive ConPTY test)
 - `npm run test:launcher` (11 passed)
 - `npm run test:review-agent` (9 passed)
+- `npm run test:star-history` (5 passed)
+- `npm run test:version` (3 passed)
 - `cargo fmt --all -- --check`
 - `git diff --check`
 

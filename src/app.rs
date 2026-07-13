@@ -240,6 +240,12 @@ enum PaneRoute {
     Inactive { tab: usize, pane: usize },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneOverlayShortcut {
+    Summary,
+    Previous,
+}
+
 struct PtyDrainBudget {
     started: Instant,
     events: usize,
@@ -989,7 +995,6 @@ struct CommandLineState {
     input: String,
     cursor: usize,
     output_lines: Vec<String>,
-    output_expanded: bool,
     running: bool,
 }
 
@@ -1010,9 +1015,16 @@ impl CommandLineState {
             input: String::new(),
             cursor: 0,
             output_lines: Vec::new(),
-            output_expanded: false,
             running: false,
         }
+    }
+
+    fn toggle_focus(&mut self) {
+        self.focused = !self.focused;
+    }
+
+    fn output_expanded(&self) -> bool {
+        self.focused
     }
 
     fn insert_text(&mut self, text: &str) {
@@ -1746,10 +1758,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     } else {
-        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command | Alt+Shift+V voice | Alt+p pane settings | Alt+r rename | Alt+e output | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Alt+arrows move | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     }
 }
@@ -2340,6 +2352,12 @@ impl App {
         }
 
         self.applied_workloads.retain(|id, _| seen.contains(id));
+        self.pane_render_cache
+            .borrow_mut()
+            .retain(|id, _| seen.contains(id));
+        self.conversation_cache
+            .borrow_mut()
+            .retain(|id, _| seen.contains(id));
         if let Some(error) = failure
             && !self.workload_warning_shown
         {
@@ -3084,21 +3102,12 @@ impl App {
                 Ok(Some(false))
             }
             'c' => {
-                self.command_line.focused = !self.command_line.focused;
+                self.command_line.toggle_focus();
                 self.status = self.focus_status();
                 Ok(Some(false))
             }
             'v' if is_voice_shortcut(ch, modifiers) => {
                 self.toggle_voice_input();
-                Ok(Some(false))
-            }
-            'e' => {
-                self.command_line.output_expanded = !self.command_line.output_expanded;
-                self.status = if self.command_line.output_expanded {
-                    "command output expanded".into()
-                } else {
-                    "command output hidden".into()
-                };
                 Ok(Some(false))
             }
             'g' => {
@@ -3325,10 +3334,11 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
             return KeyOutcome::Quit;
         }
-        if key.modifiers.contains(KeyModifiers::ALT)
-            && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
-        {
-            self.close_previous_panes();
+        if let Some(shortcut) = pane_overlay_shortcut(&key) {
+            match shortcut {
+                PaneOverlayShortcut::Summary => self.open_pane_settings(),
+                PaneOverlayShortcut::Previous => self.close_previous_panes(),
+            }
             return KeyOutcome::Render;
         }
 
@@ -3446,23 +3456,24 @@ impl App {
             .unwrap_or(0);
         self.pane_settings
             .open(pane_index, history_summary, auth_cursor);
-        self.status = format!("pane {} settings open", pane_index + 1);
+        self.status = format!("pane {} activity summary open", pane_index + 1);
     }
 
     fn close_pane_settings(&mut self) {
         let pane_number = self.pane_settings.pane_index + 1;
         self.pane_settings.close();
-        self.status = format!("pane {pane_number} settings closed");
+        self.status = format!("pane {pane_number} activity summary closed");
     }
 
     fn handle_pane_settings_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
         if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
             return Ok(KeyOutcome::Quit);
         }
-        if key.modifiers.contains(KeyModifiers::ALT)
-            && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
-        {
-            self.close_pane_settings();
+        if let Some(shortcut) = pane_overlay_shortcut(&key) {
+            match shortcut {
+                PaneOverlayShortcut::Summary => self.close_pane_settings(),
+                PaneOverlayShortcut::Previous => self.open_previous_panes(),
+            }
             return Ok(KeyOutcome::Render);
         }
         if key.modifiers.contains(KeyModifiers::ALT)
@@ -3607,7 +3618,7 @@ impl App {
 
         let history_summary = self.pane_history_summary(index);
         self.pane_settings.refresh_history(history_summary);
-        self.status = format!("reloaded past history for pane {}", index + 1);
+        self.status = format!("refreshed activity for pane {}", index + 1);
     }
 
     fn handle_rename_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -5450,11 +5461,12 @@ impl App {
             .collect()
     }
 
-    pub fn pane_settings_view(&self, index: usize) -> Option<PaneSettingsView> {
-        if !self.pane_settings.open || self.pane_settings.pane_index != index {
+    pub fn pane_settings_view(&self) -> Option<PaneSettingsView> {
+        if !self.pane_settings.open {
             return None;
         }
 
+        let index = self.pane_settings.pane_index;
         let pane = self.panes.get(index)?;
         let spec = self
             .launch_plan
@@ -5515,8 +5527,8 @@ impl App {
                         .as_ref()
                         .and_then(|plan| plan.panes.get(index))
                         .and_then(|pane| pane.agent_label());
-                    let summary = conversation_summary(pane.screen())
-                        .unwrap_or_else(|| "waiting for output".into());
+                    let summary =
+                        pane_activity_summary(pane).unwrap_or_else(|| "waiting for output".into());
                     let summary = agent_label
                         .map(|label| format!("{label} | {summary}"))
                         .unwrap_or(summary);
@@ -5580,7 +5592,7 @@ impl App {
     }
 
     pub fn command_output_expanded(&self) -> bool {
-        self.command_line.output_expanded
+        self.command_line.output_expanded()
     }
 
     pub fn command_output_lines(&self) -> &[String] {
@@ -5612,13 +5624,6 @@ impl App {
             .map(|pane| pane.folder_name.as_str())
     }
 
-    pub fn pane_profile(&self, index: usize) -> Option<&str> {
-        self.launch_plan
-            .as_ref()
-            .and_then(|plan| plan.panes.get(index))
-            .map(|pane| pane.profile_name.as_str())
-    }
-
     pub fn pane_worktree(&self, index: usize) -> Option<&str> {
         self.launch_plan
             .as_ref()
@@ -5626,31 +5631,21 @@ impl App {
             .and_then(|pane| pane.worktree_name.as_deref())
     }
 
-    pub fn pane_auth(&self, index: usize) -> Option<&str> {
-        self.launch_plan
-            .as_ref()
-            .and_then(|plan| plan.panes.get(index))
-            .and_then(|pane| pane.auth_name.as_deref())
-    }
+    pub fn pane_header_summary(&self, index: usize, max_chars: usize) -> String {
+        if let Some(goal) = self.manager_goal.as_ref() {
+            return pane_header_text(Some(&goal.objective), None, max_chars);
+        }
 
-    pub fn pane_conversation_footer(&self, index: usize, max_chars: usize) -> Option<String> {
-        let label = self
-            .launch_plan
-            .as_ref()
-            .and_then(|plan| plan.panes.get(index))
-            .and_then(|pane| pane.agent_label())?;
-        let pane = self.panes.get(index)?;
+        let Some(pane) = self.panes.get(index) else {
+            return String::new();
+        };
         let mut caches = self.conversation_cache.borrow_mut();
         let cache = caches.entry(pane.id()).or_default();
         if cache.revision != pane.screen_revision() {
             cache.revision = pane.screen_revision();
-            cache.summary = conversation_summary(pane.screen());
+            cache.summary = pane_activity_summary(pane);
         }
-        let summary = cache
-            .summary
-            .clone()
-            .unwrap_or_else(|| "waiting for conversation".into());
-        Some(truncate_chars(&format!("{label} | {summary}"), max_chars))
+        pane_header_text(None, cache.summary.as_deref(), max_chars)
     }
 
     fn pane_history_summary(&self, index: usize) -> String {
@@ -5658,8 +5653,7 @@ impl App {
             return "pane is no longer available".into();
         };
 
-        let summary =
-            conversation_summary(pane.screen()).unwrap_or_else(|| "waiting for output".into());
+        let summary = pane_activity_summary(pane).unwrap_or_else(|| "waiting for output".into());
         self.launch_plan
             .as_ref()
             .and_then(|plan| plan.panes.get(index))
@@ -7813,6 +7807,21 @@ mod tests {
     }
 
     #[test]
+    fn command_line_focus_controls_output_visibility() {
+        let mut command = CommandLineState::new(PathBuf::from("C:\\repo"));
+        assert!(!command.focused);
+        assert!(!command.output_expanded());
+
+        command.toggle_focus();
+        assert!(command.focused);
+        assert!(command.output_expanded());
+
+        command.toggle_focus();
+        assert!(!command.focused);
+        assert!(!command.output_expanded());
+    }
+
+    #[test]
     fn voice_shortcut_preserves_plain_alt_v_for_agent_image_paste() {
         let image_paste = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
         assert!(!is_voice_shortcut('v', KeyModifiers::ALT));
@@ -7894,6 +7903,25 @@ mod tests {
         assert!(!settings.open);
         assert!(settings.history_summary.is_none());
     }
+
+    #[test]
+    fn pane_overlay_shortcuts_keep_summary_and_previous_panes_distinct() {
+        assert_eq!(
+            pane_overlay_shortcut(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT)),
+            Some(PaneOverlayShortcut::Summary)
+        );
+        assert_eq!(
+            pane_overlay_shortcut(&KeyEvent::new(
+                KeyCode::Char('P'),
+                KeyModifiers::ALT | KeyModifiers::SHIFT
+            )),
+            Some(PaneOverlayShortcut::Previous)
+        );
+        assert_eq!(
+            pane_overlay_shortcut(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
+            None
+        );
+    }
 }
 
 fn conversation_summary(screen: &Screen) -> Option<String> {
@@ -7905,6 +7933,40 @@ fn conversation_summary(screen: &Screen) -> Option<String> {
         .into_iter()
         .filter_map(|line| normalize_conversation_line(&line))
         .next()
+}
+
+fn pane_overlay_shortcut(key: &KeyEvent) -> Option<PaneOverlayShortcut> {
+    if !key.modifiers.contains(KeyModifiers::ALT)
+        || !matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
+    {
+        return None;
+    }
+
+    Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
+        PaneOverlayShortcut::Previous
+    } else {
+        PaneOverlayShortcut::Summary
+    })
+}
+
+fn pane_activity_summary(pane: &PtyPane) -> Option<String> {
+    output_tail_summary(pane.output_tail()).or_else(|| conversation_summary(pane.screen()))
+}
+
+fn output_tail_summary(output_tail: &str) -> Option<String> {
+    output_tail
+        .lines()
+        .rev()
+        .filter_map(normalize_conversation_line)
+        .next()
+}
+
+fn pane_header_text(goal: Option<&str>, activity: Option<&str>, max_chars: usize) -> String {
+    let text = goal
+        .filter(|goal| !goal.trim().is_empty())
+        .map(|goal| format!("goal: {}", goal.trim()))
+        .unwrap_or_else(|| activity.unwrap_or("waiting for output").to_string());
+    truncate_chars(&text, max_chars)
 }
 
 fn normalize_conversation_line(line: &str) -> Option<String> {
@@ -7924,6 +7986,9 @@ fn is_low_signal_terminal_line(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
     lower == "esc"
         || lower == "escape"
+        || lower == "last output"
+        || lower == "previous commands"
+        || lower.starts_with("gridbash resumed pane history")
         || lower.contains("alt+q quit")
         || lower.contains("ctrl+c")
         || lower.contains("press enter")
@@ -8096,6 +8161,31 @@ mod selection_tests {
             conversation_summary(parser.screen()).as_deref(),
             Some("Assistant: tests are passing")
         );
+    }
+
+    #[test]
+    fn summarizes_latest_meaningful_output_tail_line() {
+        assert_eq!(
+            output_tail_summary(
+                "older work\nGridBash resumed pane history. Commands were not replayed.\nlatest result\nAlt+q quit\n"
+            )
+            .as_deref(),
+            Some("latest result")
+        );
+        assert_eq!(output_tail_summary("\nAlt+q quit\n"), None);
+    }
+
+    #[test]
+    fn pane_header_prefers_a_goal_over_the_activity_summary() {
+        assert_eq!(
+            pane_header_text(Some("finish the API"), Some("tests are passing"), 80),
+            "goal: finish the API"
+        );
+        assert_eq!(
+            pane_header_text(None, Some("tests are passing"), 80),
+            "tests are passing"
+        );
+        assert_eq!(pane_header_text(None, None, 80), "waiting for output");
     }
 
     #[test]
