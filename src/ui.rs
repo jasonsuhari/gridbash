@@ -1,11 +1,10 @@
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
-use std::path::Path;
 use vt100::Cell;
 
 use crate::{
@@ -53,7 +52,7 @@ pub struct PaneRenderCache {
 const QUIET_MARKER: &str = " *";
 const STATUS_BRAND: &str = " GridBash ";
 const PREVIOUS_PANES_BUTTON: &str = " Panes ";
-const PANE_SETTINGS_BUTTON: &str = " Pane ";
+const PANE_SETTINGS_BUTTON: &str = " Summary ";
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
@@ -85,7 +84,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let previous_panes_view = app.previous_panes_view();
     let follow_up_dialog = app.follow_up_dialog();
     let goal_editor_view = app.goal_editor_view();
-    let pane_settings_open = app.pane_settings_open();
+    let pane_settings_view = app.pane_settings_view();
+    let pane_settings_open = pane_settings_view.is_some();
     let grid_resizer = app.grid_resizer();
     let image_overlay = app.image_overlay_view();
     let help_open = app.help_open();
@@ -141,43 +141,26 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             palette,
         );
 
-        let folder = app
-            .pane_folder(index)
-            .map(label_name)
-            .unwrap_or_else(|| folder_label(pane.cwd()));
+        let header_summary = app.pane_header_summary(index, rect.width as usize);
         let usage = app.pane_usage_label(index);
         let title = pane_title(
             &app.pane_label(index),
             chrome.quiet_marker,
-            &folder,
-            app.pane_worktree(index),
-            app.pane_profile(index),
-            app.pane_auth(index),
+            &header_summary,
             usage.as_deref(),
             chrome.badge,
             app.compact_titles_enabled(),
+            rect.width.saturating_sub(2),
         );
 
-        let mut block = Block::default()
+        let block = Block::default()
             .borders(Borders::ALL)
             .border_style(chrome.border_style)
             .title(title);
-        if let Some(footer) =
-            app.pane_conversation_footer(index, rect.width.saturating_sub(4) as usize)
-        {
-            block = block.title_bottom(conversation_footer(footer, focused || selected));
-        }
 
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
-        if let Some(view) = app.pane_settings_view(index) {
-            let buttons = render_pane_settings(frame, inner, &view, palette);
-            pane_settings_rename_button = buttons.rename;
-            pane_settings_reload_button = buttons.reload;
-            pane_settings_sleep_button = buttons.sleep;
-            pane_settings_goal_button = buttons.goal;
-            pane_settings_stop_goal_button = buttons.stop_goal;
-        } else if sleeping {
+        if sleeping {
             render_sleeping_screen(frame, inner);
         } else {
             let selection = app.selection_for_pane(index);
@@ -243,7 +226,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(
-            " | Alt+h help | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+e output | Alt+p panes | Alt+P pane | Alt+x swap | Alt+z sleep | Alt+q quit",
+            " | Alt+h help | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c command | Alt+Shift+V voice | Alt+e output | Alt+p summary | Alt+Shift+p panes | Alt+x swap | Alt+z sleep | Alt+q quit",
         ),
     ]);
     frame.render_widget(
@@ -253,6 +236,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
 
     if app.settings_open() {
         render_settings(frame, area, app, palette);
+    } else if let Some(view) = pane_settings_view.as_ref() {
+        let buttons = render_pane_settings(frame, area, view, palette);
+        pane_settings_rename_button = buttons.rename;
+        pane_settings_reload_button = buttons.reload;
+        pane_settings_sleep_button = buttons.sleep;
+        pane_settings_goal_button = buttons.goal;
+        pane_settings_stop_goal_button = buttons.stop_goal;
     } else if let Some(dialog) = follow_up_dialog.as_ref() {
         render_follow_up_dialog(frame, area, dialog);
     }
@@ -297,37 +287,47 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn pane_title(
     label: &str,
     quiet_marker: &str,
-    folder: &str,
-    worktree: Option<&str>,
-    profile: Option<&str>,
-    auth: Option<&str>,
+    summary: &str,
     usage: Option<&str>,
     badge: &str,
     compact: bool,
+    max_width: u16,
 ) -> String {
-    if compact {
-        return format!(" {label}{quiet_marker}{badge} ");
+    let max_width = max_width as usize;
+    if max_width == 0 {
+        return String::new();
     }
 
-    let mut parts = vec![format!("{label}{quiet_marker}"), folder.to_string()];
-    if let Some(worktree) = worktree.filter(|value| !value.is_empty()) {
-        parts.push(worktree.to_string());
-    }
-    if let Some(profile) = profile.filter(|value| !value.is_empty()) {
-        parts.push(profile.to_string());
-    }
-    if let Some(auth) = auth.filter(|value| !value.is_empty()) {
-        parts.push(auth.to_string());
-    }
-    if let Some(usage) = usage.filter(|value| !value.is_empty()) {
+    let usage = if !compact && max_width >= 48 {
+        usage.filter(|value| !value.is_empty())
+    } else {
+        None
+    };
+    let summary_reserve = if summary.is_empty() {
+        0
+    } else {
+        3 + summary.chars().count().min(8)
+    };
+    let reserved = 2
+        + quiet_marker.chars().count()
+        + badge.chars().count()
+        + usage
+            .map(|value| 3 + value.chars().count())
+            .unwrap_or_default()
+        + summary_reserve;
+    let label = truncate_text(label, max_width.saturating_sub(reserved).max(1));
+    let mut parts = vec![format!("{label}{quiet_marker}{badge}")];
+    if let Some(usage) = usage {
         parts.push(usage.to_string());
     }
+    if !summary.is_empty() {
+        parts.push(summary.to_string());
+    }
 
-    format!(" {}{} ", parts.join(" | "), badge)
+    truncate_text(&format!(" {} ", parts.join(" | ")), max_width)
 }
 
 fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel], palette: &GridPalette) {
@@ -661,17 +661,51 @@ fn render_pane_settings(
         return PaneSettingsButtons::default();
     }
 
-    frame.render_widget(Clear, area);
-    let lines = pane_settings_lines(view, area.width, palette);
-    frame.render_widget(Paragraph::new(lines).style(settings_panel_style()), area);
+    let width = area.width.saturating_sub(4).min(100).max(area.width.min(1));
+    let inner_width = width.saturating_sub(2);
+    let lines = pane_settings_lines(view, inner_width, palette);
+    let desired_height = (lines.len() as u16).saturating_add(2);
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(desired_height)
+        .max(area.height.min(1));
+    let modal = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    let shadow = settings_shadow_rect(area, modal);
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+
+    frame.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" Pane Activity ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    frame.render_widget(Paragraph::new(lines).style(settings_panel_style()), inner);
 
     PaneSettingsButtons {
-        rename: pane_settings_rename_rect(area, view.auth_kind.is_some()),
-        reload: pane_settings_reload_rect(area, view.auth_kind.is_some()),
-        sleep: pane_settings_sleep_rect(area, view.auth_kind.is_some(), view.goal.is_some()),
-        goal: pane_settings_goal_rect(area, view.auth_kind.is_some(), view.goal.is_some()),
+        rename: pane_settings_rename_rect(inner, view.auth_kind.is_some()),
+        reload: pane_settings_reload_rect(inner, view.auth_kind.is_some()),
+        sleep: pane_settings_sleep_rect(inner, view.auth_kind.is_some(), view.goal.is_some()),
+        goal: pane_settings_goal_rect(inner, view.auth_kind.is_some(), view.goal.is_some()),
         stop_goal: pane_settings_stop_goal_rect(
-            area,
+            inner,
             view.auth_kind.is_some(),
             view.goal.is_some(),
         ),
@@ -716,7 +750,10 @@ fn pane_settings_lines(
 
     if width < 36 {
         lines.push(Line::from(Span::styled(
-            fixed_width(" Pane Settings", width as usize),
+            fixed_width(
+                &format!(" Pane {} {}", view.index + 1, view.label),
+                width as usize,
+            ),
             Style::default()
                 .fg(palette.focus())
                 .bg(SETTINGS_BG)
@@ -736,6 +773,13 @@ fn pane_settings_lines(
                 Style::default().fg(SETTINGS_TEXT),
             )));
         }
+        lines.push(Line::from(Span::styled(
+            fixed_width(
+                &format!(" latest: {}", view.history_summary),
+                width as usize,
+            ),
+            Style::default().fg(SETTINGS_TEXT),
+        )));
         lines.push(pane_settings_rename_line(width, palette));
         lines.push(pane_settings_reload_line(width, palette));
         lines.push(pane_settings_sleep_line(width, view.sleeping, palette));
@@ -750,7 +794,7 @@ fn pane_settings_lines(
     lines.push(Line::from(vec![
         Span::raw("  "),
         Span::styled(
-            "Pane Settings",
+            "Pane Activity",
             Style::default()
                 .fg(palette.focus())
                 .add_modifier(Modifier::BOLD),
@@ -814,14 +858,15 @@ fn pane_settings_lines(
         lines.push(Line::from(""));
     }
     lines.push(settings_section(
-        "HISTORY",
-        "visible conversation snapshot",
+        "RECENT ACTIVITY",
+        "latest meaningful terminal output",
         width,
     ));
     lines.push(Line::from(vec![
         Span::raw("  "),
+        Span::styled("summary  ", Style::default().fg(SETTINGS_MUTED)),
         Span::styled(
-            truncate_text(&view.history_summary, width.saturating_sub(2) as usize),
+            truncate_text(&view.history_summary, width.saturating_sub(11) as usize),
             Style::default().fg(SETTINGS_TEXT),
         ),
     ]));
@@ -869,7 +914,7 @@ fn pane_settings_rename_line(width: u16, palette: &GridPalette) -> Line<'static>
 }
 
 fn pane_settings_reload_line(width: u16, palette: &GridPalette) -> Line<'static> {
-    pane_settings_action_line("[ Reload past history ]", width, palette.focus())
+    pane_settings_action_line("[ Refresh activity ]", width, palette.focus())
 }
 
 fn render_goal_editor(frame: &mut Frame<'_>, area: Rect, editor: &GoalEditorView) {
@@ -980,7 +1025,7 @@ fn pane_settings_command_bar(width: u16, has_auth: bool) -> Line<'static> {
         command_key("n"),
         Span::styled(" rename  ", Style::default().fg(Color::Gray)),
         command_key("r"),
-        Span::styled(" reload  ", Style::default().fg(Color::Gray)),
+        Span::styled(" refresh  ", Style::default().fg(Color::Gray)),
         command_key("z"),
         Span::styled(" sleep/wake  ", Style::default().fg(Color::Gray)),
         command_key("g"),
@@ -1001,9 +1046,9 @@ fn pane_settings_command_bar(width: u16, has_auth: bool) -> Line<'static> {
 
 fn pane_settings_rename_rect(area: Rect, has_auth: bool) -> Option<Rect> {
     let row = if area.width < 36 && has_auth {
-        2
+        3
     } else if area.width < 36 {
-        1
+        2
     } else {
         6
     };
@@ -1012,9 +1057,9 @@ fn pane_settings_rename_rect(area: Rect, has_auth: bool) -> Option<Rect> {
 
 fn pane_settings_reload_rect(area: Rect, has_auth: bool) -> Option<Rect> {
     let row = if area.width < 36 && has_auth {
-        3
+        4
     } else if area.width < 36 {
-        2
+        3
     } else {
         7
     };
@@ -1023,7 +1068,7 @@ fn pane_settings_reload_rect(area: Rect, has_auth: bool) -> Option<Rect> {
 
 fn pane_settings_sleep_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
     let row = if area.width < 36 {
-        if has_auth { 4 } else { 3 }
+        if has_auth { 5 } else { 4 }
     } else if has_goal {
         10
     } else {
@@ -1034,7 +1079,7 @@ fn pane_settings_sleep_rect(area: Rect, has_auth: bool, has_goal: bool) -> Optio
 
 fn pane_settings_goal_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
     let row = if area.width < 36 {
-        if has_auth { 5 } else { 4 }
+        if has_auth { 6 } else { 5 }
     } else if has_goal {
         11
     } else {
@@ -1048,7 +1093,7 @@ fn pane_settings_stop_goal_rect(area: Rect, has_auth: bool, has_goal: bool) -> O
         return None;
     }
     let row = if area.width < 36 {
-        if has_auth { 6 } else { 5 }
+        if has_auth { 7 } else { 6 }
     } else {
         12
     };
@@ -2064,24 +2109,6 @@ fn kind_color(kind: AgentKind) -> Color {
     }
 }
 
-fn conversation_footer(summary: String, emphasized: bool) -> Line<'static> {
-    let summary_style = if emphasized {
-        Style::default()
-            .fg(Color::LightCyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-
-    Line::from(vec![
-        Span::raw(" "),
-        Span::styled("conv ", Style::default().fg(Color::Cyan)),
-        Span::styled(summary, summary_style),
-        Span::raw(" "),
-    ])
-    .alignment(Alignment::Center)
-}
-
 fn settings_summary(width: u16) -> String {
     let text = if width < 70 {
         "Refine pane chrome, todo prompts, and highlight color."
@@ -2368,7 +2395,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
         ("Alt+t", "switch to next tab"),
         ("Alt+Shift+r", "rename current tab"),
         ("Alt+c", "focus the command bar"),
-        ("Alt+p", "open focused-pane settings"),
+        ("Alt+p", "show focused-pane activity summary"),
         ("Alt+Shift+p", "show previous panes"),
         ("Alt+l", "resize the grid"),
         ("Alt+r", "rename focused pane"),
@@ -2613,25 +2640,6 @@ fn wrap_dialog_text(text: &str, width: usize, max_lines: usize) -> Vec<String> {
     }
 
     lines
-}
-
-fn folder_label(cwd: &Path) -> String {
-    let label = cwd
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| cwd.display().to_string());
-
-    label_name(&label)
-}
-
-fn label_name(name: &str) -> String {
-    let mut label = name.to_string();
-    if !matches!(label.chars().last(), Some('/') | Some('\\')) {
-        label.push('/');
-    }
-
-    label
 }
 
 fn render_sleeping_screen(frame: &mut Frame<'_>, area: Rect) {
@@ -2901,62 +2909,34 @@ mod tests {
     }
 
     #[test]
-    fn pane_title_uses_custom_label_in_number_slot() {
+    fn pane_title_uses_activity_summary_instead_of_launch_metadata() {
         assert_eq!(
             pane_title(
                 "api",
                 "",
-                "gridbash/",
-                Some("feat/rename-panes"),
-                None,
-                None,
+                "reviewing the latest changes",
                 None,
                 "",
                 false,
+                120,
             ),
-            " api | gridbash/ | feat/rename-panes "
+            " api | reviewing the latest changes "
         );
         assert_eq!(
-            pane_title(
-                "1",
-                "",
-                "gridbash/",
-                None,
-                None,
-                None,
-                None,
-                " selected",
-                false,
-            ),
-            " 1 | gridbash/ selected "
+            pane_title("1", "", "tests passed", None, " selected", false, 120),
+            " 1 selected | tests passed "
         );
         assert_eq!(
             pane_title(
                 "2",
                 "",
-                "gridbash/",
-                None,
-                None,
-                None,
+                "goal: finish the API",
                 Some("5h 80% left"),
                 " selected",
                 false,
+                120,
             ),
-            " 2 | gridbash/ | 5h 80% left selected "
-        );
-        assert_eq!(
-            pane_title(
-                "api",
-                "",
-                "gridbash/",
-                Some("main"),
-                Some("codex"),
-                Some("codex-2"),
-                Some("5h 80% left"),
-                " selected",
-                false,
-            ),
-            " api | gridbash/ | main | codex | codex-2 | 5h 80% left selected "
+            " 2 selected | 5h 80% left | goal: finish the API "
         );
     }
 
@@ -2966,42 +2946,90 @@ mod tests {
             pane_title(
                 "api",
                 QUIET_MARKER,
-                "gridbash/",
-                None,
-                None,
-                None,
+                "waiting for output",
                 None,
                 "",
                 false,
+                120,
             ),
-            " api * | gridbash/ "
+            " api * | waiting for output "
         );
     }
 
     #[test]
-    fn compact_pane_title_omits_folder_and_profile_details() {
+    fn compact_pane_title_keeps_summary_but_omits_usage_details() {
         assert_eq!(
             pane_title(
                 "api",
                 QUIET_MARKER,
-                "gridbash/",
-                Some("main"),
-                Some("codex"),
-                Some("codex-2"),
+                "reviewing the latest changes",
                 Some("5h 80% left"),
                 " selected",
                 true,
+                120,
             ),
-            " api * selected "
+            " api * selected | reviewing the latest changes "
         );
     }
 
     #[test]
-    fn conversation_footer_is_centered() {
-        assert_eq!(
-            conversation_footer("reviewing changes".into(), false).alignment,
-            Some(Alignment::Center)
+    fn narrow_pane_title_keeps_state_before_truncated_activity() {
+        let title = pane_title(
+            "very-long-pane-name",
+            QUIET_MARKER,
+            "reviewing the latest changes",
+            Some("5h 80% left"),
+            " selected",
+            false,
+            30,
         );
+
+        assert!(title.chars().count() <= 30);
+        assert!(title.contains("selected"));
+        assert!(title.contains("review"));
+        assert!(!title.contains("5h 80% left"));
+    }
+
+    #[test]
+    fn pane_activity_lines_show_latest_output_at_wide_and_narrow_widths() {
+        let view = PaneSettingsView {
+            index: 1,
+            label: "api".into(),
+            folder: "gridbash".into(),
+            worktree: Some("feat/activity-summary".into()),
+            history_summary: "all focused tests passed".into(),
+            focused: true,
+            selected: false,
+            sleeping: false,
+            exited: false,
+            auth_kind: None,
+            auth_options: Vec::new(),
+            auth_cursor: 0,
+            goal: None,
+            manager_configured: false,
+        };
+        let line_text = |line: &Line<'_>| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+
+        let wide = pane_settings_lines(&view, 80, &GridPalette::default())
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(wide.contains("RECENT ACTIVITY"));
+        assert!(wide.contains("summary  all focused tests passed"));
+        assert!(!wide.contains("run the focused tests"));
+
+        let narrow = pane_settings_lines(&view, 30, &GridPalette::default())
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(narrow.contains("latest: all focused tests"));
     }
 
     #[test]
@@ -3016,11 +3044,11 @@ mod tests {
         );
         assert_eq!(
             pane_settings_rename_rect(Rect::new(5, 10, 20, 5), true),
-            Some(Rect::new(5, 12, 20, 1))
+            Some(Rect::new(5, 13, 20, 1))
         );
         assert_eq!(
             pane_settings_reload_rect(Rect::new(5, 10, 20, 5), true),
-            Some(Rect::new(5, 13, 20, 1))
+            Some(Rect::new(5, 14, 20, 1))
         );
         assert_eq!(
             pane_settings_rename_rect(Rect::new(5, 10, 40, 6), false),
