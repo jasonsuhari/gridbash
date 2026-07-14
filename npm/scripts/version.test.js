@@ -91,7 +91,7 @@ test("nightlyVersion reuses a prerelease core and advances a stable patch", () =
   );
 });
 
-test("release workflow keeps local tarballs and GitHub fallback available", () => {
+test("release workflow maps stable versions to both latest channels", () => {
   const workflow = fs.readFileSync(
     path.join(__dirname, "..", "..", ".github", "workflows", "release.yml"),
     "utf8",
@@ -102,6 +102,9 @@ test("release workflow keeps local tarballs and GitHub fallback available", () =
     /npm publish "\.\/\$tarball" --access public --provenance --tag "\$dist_tag"/,
   );
   assert.doesNotMatch(workflow, /npm publish "\$tarball"/);
+  assert.match(workflow, /dist_tag="latest"/);
+  assert.match(workflow, /else\r?\n\s+release_flags\+=\(--latest\)/);
+  assert.doesNotMatch(workflow, /Require a prerelease|Block unsigned stable macOS artifacts/);
   assert.match(
     workflow,
     /- name: Create or update GitHub release\r?\n\s+if: \$\{\{ !cancelled\(\) \}\}/,

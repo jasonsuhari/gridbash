@@ -51,9 +51,9 @@ After the change is merged to `main`:
 
 1. Open the `Release` workflow in GitHub Actions.
 2. Select `Run workflow` and leave `channel` set to `release`.
-3. Set `version` to an exact prerelease such as `0.2.0-macos.1` while macOS
-   signing is not configured. `patch`, `minor`, and `major` are available after
-   the stable macOS gate is opened.
+3. Set `version` to `patch`, `minor`, `major`, or an exact version. A plain
+   version such as `0.2.0` becomes GitHub's Latest release and npm's `latest`
+   dist-tag. A hyphenated prerelease uses npm's `next` dist-tag instead.
 4. Optionally set `notes` to a devlog path such as `docs/devlogs/YYYY-MM-DD-title.md`.
 5. Run the workflow.
 
@@ -63,10 +63,19 @@ same workflow run then builds Windows x64, Linux x64/arm64, and macOS arm64/x64
 native packages, publishes those packages before the platform-neutral npm
 launcher, and creates or updates one GitHub release.
 
-macOS releases are preview-only until real-hardware testing and Developer ID
-signing/notarization are complete. Dispatch an exact prerelease such as
-`0.2.0-macos.1`; prereleases publish under npm's `next` dist-tag. Stable release
-requests fail before creating a tag while this gate is active.
+Stable releases publish unsigned macOS artifacts until Developer ID signing and
+notarization are configured. macOS users may therefore see Gatekeeper warnings.
+This packaging limitation no longer prevents Windows and Linux users from
+receiving stable releases through the shared GitHub and npm release workflow.
+
+The channel mapping is automatic:
+
+- plain versions such as `0.2.0`: GitHub Latest and npm `latest`
+- prereleases such as `0.3.0-beta.1`: GitHub prerelease and npm `next`
+- scheduled nightlies: GitHub prerelease and npm `nightly`
+
+Promoting an existing GitHub prerelease manually does not change npm dist-tags.
+Run the workflow with a plain stable version to update both release channels.
 
 Before creating the release commit, the script fetches origin branch refs and
 fails if any unmerged task branches remain under `chore/`, `docs/`, `feat/`,
