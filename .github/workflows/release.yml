@@ -12,7 +12,7 @@ on:
           - nightly
         default: release
       version:
-        description: "For releases: patch, minor, major, or an exact version. macOS previews use x.y.z-macos.N."
+        description: "For releases: patch, minor, major, or an exact version. Plain versions update GitHub and npm latest."
         required: false
         default: "patch"
       notes:
@@ -59,14 +59,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-
-      - name: Require a prerelease until macOS signing is configured
-        shell: pwsh
-        run: |
-          $requested = "${{ inputs.version }}"
-          if ($requested -notmatch "^\d+\.\d+\.\d+-.+$") {
-            throw "macOS is preview-only. Use an exact prerelease such as 0.2.0-macos.1 until Developer ID signing and notarization are configured."
-          }
 
       - name: Create release commit and tag
         id: release
@@ -216,12 +208,6 @@ jobs:
       - name: Install Linux voice build dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev cmake clang
-
-      - name: Block unsigned stable macOS artifacts
-        if: startsWith(matrix.platform_key, 'darwin-') && !contains(env.RELEASE_TAG, '-')
-        run: |
-          echo "Stable macOS artifacts require Developer ID signing and notarization."
-          exit 1
 
       - run: cargo fmt --check
 
