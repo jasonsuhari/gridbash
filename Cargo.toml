@@ -1,6 +1,6 @@
 [package]
 name = "gridbash"
-version = "0.2.0-macos.1"
+version = "0.2.0"
 edition = "2024"
 description = "Cross-platform terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side."
 license = "MIT"

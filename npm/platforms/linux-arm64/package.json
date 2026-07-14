@@ -1,6 +1,6 @@
 {
   "name": "gridbash-linux-arm64",
-  "version": "0.2.0-macos.1",
+  "version": "0.2.0",
   "description": "GridBash native binary for Linux arm64.",
   "license": "MIT",
   "repository": {
