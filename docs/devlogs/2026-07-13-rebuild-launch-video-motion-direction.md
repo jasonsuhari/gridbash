@@ -19,8 +19,8 @@ Release target: unreleased
   composition, production brief, scene plan, script, and design specification.
 - Kept generated footage illustrative only. Product routing, worktrees, GitHub,
   the install command, and every factual claim use real captures or HTML.
-- Refreshed the GitHub receipt immediately before rendering and added the verified
-  `53 STARS` stamp.
+- Refreshed the GitHub receipt immediately before rendering. The current count remains
+  visible in that receipt; the supporting HTML stamp uses the evergreen `LIVE REPO` label.
 - Re-encoded the exact product capture with one-second keyframes so HyperFrames can
   seek it deterministically without freezing.
 - Cut the recorded “Mac, Linux, and Windows” clause from the public audio. The
@@ -45,6 +45,12 @@ Release target: unreleased
 - Standard render completed at 1920x1080, 30 fps, H.264/AAC, 45.184 seconds.
 - Final audio measured -22.1 dB mean and -2.1 dB max; the truth-safe edit contains
   a 224 ms natural pause between “open source” and “You can install it.”
+- Rendered hook, problem, product-reveal, receipt, and CTA filmstrips from the encoded
+  MP4. Corrected a delayed-tween initial-state leak and covered generated pseudo-UI
+  before it became legible.
+- HyperFrames parallel capture was unstable on Windows during the final text-only
+  revision. The reviewed master was patched at the receipt stamp with FFmpeg at CRF 18;
+  its validated AAC stream was copied unchanged.
 
 ## Release Notes
 

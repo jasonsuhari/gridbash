@@ -1,58 +1,32 @@
-# GridBash Launch Storyboard — GitHub Proof Revision
+# GridBash Launch Storyboard
 
-**Format:** 1920x1080, 30 fps
-**Audio:** Jason's source-derived voice + “Close Up” underscore + semantic SFX
-**VO direction:** founder-to-camera; direct, funny, technically credible
-**Style basis:** `design.md`
+**Format:** 1920x1080, 30 fps, 45.16 seconds
 
-The existing six-scene film remains authoritative in `scene-plan.md`. This
-revision replaces the opening half of Scene 6 with captured repository proof and
-reserves Scenes 3–5 for Jason's forthcoming real GridBash screen recording.
+**Audio:** truth-safe founder voice, “Close Up” underscore, semantic SFX
+**Visual system:** warm paper, black ink, mint routing, yellow proof tabs, tactile cut-paper/clay motion
 
-## Asset audit
+## 1. The ten-session hook — 0.00-6.32
 
-| Asset | Type | Beat | Role |
-| --- | --- | --- | --- |
-| `capture/github/screenshots/scroll-000.png` | repo screenshot | Scene 6A | real GitHub repository, star count, About/MIT/release proof |
-| `capture/github/assets/gridbash-launch-teaser-showing-six-cli-c.png` | README artwork | skip | duplicates the teaser the user asked to replace |
-| `capture/github/screenshots/scroll-023.png` | README/star-history screenshot | optional Scene 6A depth card | supporting community-growth proof if legible |
-| `capture/github/assets/jasonsuhari.jpg` | avatar | skip | already visible in the captured repo page |
+A clay `10` assembles on paper, terminal cards route across it, then the real founder shot lands with `MAKE IT.` The visual joke arrives before the explanation.
 
-## Scene 6A — Open-source proof (37.18–42.15)
+## 2. Controlled chaos — 6.32-13.75
 
-**VO:** “GridBash is completely open source on Mac, Linux, and Windows.”
+Jason’s desk becomes the operator station. Six terminal labels populate a measured register while `TOKEN MAXING` and `JUGGLING TERMINALS. FORGETTING CONTEXT.` state the problem.
 
-**Concept:** The film leaves the abstract dispatch board and lands on verifiable
-public proof. A real captured GitHub viewport fills most of the frame. The camera
-pushes gently toward the repo header and star button while a separate GridBash
-proof rail counts to 46 and locks the words `OPEN SOURCE · MIT` beneath it.
+## 3. Product reveal — 13.75-20.04
 
-**Visual layers:** dark GridBash canvas and scan grain; square-on browser viewport;
-slow crop toward `jasonsuhari/gridbash`; large 46-star counter; Open Source/MIT
-proof rail; Mac/Linux/Windows chips synced to their spoken words; persistent
-word-timed caption lane in front.
+Layered paper cards fold open. Before the generated plate can expose pseudo-UI, the exact GridBash capture and HTML title lock into `ONE WINDOW. SIX AGENTS.`
 
-**Motion:** screenshot wrapper enters with a 32px rise and opacity settle; screenshot
-child scales 1→1.025 over the beat; counter animates 0→46; proof rail draws left to
-right; OS chips stamp in at 40.30, 40.82, and 41.58. All motion is seekable on the
-main GSAP timeline.
+## 4. Routing proof — 20.04-29.75
 
-**Transition:** at 42.15, push the repo viewport up 120px with blur/opacity release
-while the install command expands from the same center axis.
+The real six-pane product capture fills the frame. One pane focuses, four panes select, and one prompt routes to those four while the other two remain idle.
 
-**SFX:** restrained GitHub proof click at 39.30; three quiet route ticks for OS
-chips; existing CTA impact remains reserved for the install command.
+## 5. Worktree isolation — 29.75-37.18
 
-## Scene 6B — Install (42.15–45.16)
+The real worktree capture sits beside Jason. Six branch labels settle into separate lanes to prove each pane can operate without file fights.
 
-**VO:** “You can install it with npm install grid bash.”
+## 6. Public receipt and install — 37.18-45.16
 
-Keep the existing `RUN THE GRID` and `$ npm install -g gridbash` composition. Hold
-the command square-on and readable; repo URL remains supporting copy, not a second
-headline. End with a hard visual settle by 44.86.
+A freshly captured GitHub repository page provides the public receipt, supported by `LIVE REPO` and `OPEN SOURCE · MIT`. At 40.16, a full-frame paper transition reveals the truth-safe Windows-native install card: `$ npm install -g gridbash`.
 
-## Approved screen recording
-
-`assets/product-demo.mp4` is the approved real capture. It shows six genuine
-Codex sessions in isolated worktrees, a four-pane selection, and routed replies;
-`assets/product-demo-poster.png` holds the settled proof for Scene 5.
+The cut ends on a hard visual settle and ink dip. No cross-platform claim is included until matching public artifacts exist.

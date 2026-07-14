@@ -21,7 +21,8 @@
 | 20.04 | strong onset | terminal-session proof | real product takes frame | focus click |
 | 22.31 | accent onset | selection begins | selected panes illuminate | selection click family |
 | 29.75 | strong onset | worktree mode | grid branches into isolated lanes | branch whoosh |
-| 37.18 | strong onset | open-source CTA | Jason/product resolves into install plate | completion impact |
+| 37.18 | strong onset | open-source receipt | captured GitHub repository lands square-on | completion impact |
+| 40.16 | release | truth-safe install CTA | install plate replaces the receipt | restrained command impact |
 | 45.16 | strong onset | CTA complete | green completion rule locks | clean release |
 
 ## Choreography checks
@@ -29,5 +30,5 @@
 - Hook reads before 2.0 seconds.
 - Product name lands at 13.75 seconds.
 - Strongest impact is the product reveal, not the opening joke.
-- CTA begins at 37.18 seconds and holds through 45.16 seconds.
+- Receipt begins at 37.18 seconds; install CTA begins at 40.16 seconds and holds through 45.16 seconds.
 - Track approval is required before composition construction.

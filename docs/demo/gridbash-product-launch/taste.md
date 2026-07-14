@@ -14,6 +14,9 @@
 10. Keep captions readable on mute without covering Jason’s face or the product proof.
 11. Preserve product footage legibility; no perspective tilt, fake device frame, or decorative blur over important UI.
 12. Use green for selection/routing, blue for focus, and amber for completion only.
+13. Initialize every delayed entrance at timeline time zero; `immediateRender: false` alone does not hide future elements.
+14. Generated motion plates may establish texture and transformation, but exact HTML or real UI must cover them before pseudo-text becomes readable.
+15. Do not stamp volatile public metrics into evergreen launch footage; keep them inside a freshly captured receipt or use non-volatile labels.
 
 ## Learned corrections
 
@@ -25,6 +28,9 @@
 | Product language can drift into generic orchestration claims | GridBash routes independent CLI sessions; it is not an agent framework | show routing and worktree proof instead of claiming agents coordinate themselves | compare copy with README and source behavior |
 | Active caption words read as fused phrases | 1.07 scale consumed the narrow inter-word margin | keep a minimum 0.22em word margin and cap active-word scale at 1.04 | inspect captions at hook, reveal, and worktree timecodes |
 | Punchline stamps can compete with dialogue captions | both elements occupied the bottom 180px safe area | keep narrative stamps above the persistent caption lane | inspect the worktree scene at 32.5s |
+| Future scene copy appeared during the hook | delayed `fromTo` values were not applied at timeline time zero | set deterministic hidden states at `t=0` before scheduling entrances | inspect the 0-6.32s hook filmstrip |
+| Generated reveal exposed pseudo-UI | the real product overlay arrived after the plate became readable | cover generated interface-like content with exact product proof before legibility | inspect 15.5-20.5s at 2 fps |
+| Star badge would become stale | a changing repository count was baked into HTML | use `LIVE REPO`; let the fresh GitHub capture carry the current count | inspect 37.6-40.4s at 5 fps |
 
 ## Explicit preferences
 
