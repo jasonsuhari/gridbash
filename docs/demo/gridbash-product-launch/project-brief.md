@@ -14,7 +14,7 @@
 - Hook: “If you have less than ten Claude sessions open at a time, you’re not going to make it.”
 - Strongest proof: Jason's forthcoming real GridBash screen recording showing a six-pane grid, selection, broadcast, and worktree isolation.
 - Main tension: parallel agent work turns into scattered terminals and confused context.
-- Exact claims: real terminal sessions; focus one pane, select panes, or broadcast; optional Git worktree per pane; open source; Mac, Linux, and Windows once release artifacts exist.
+- Exact claims: real terminal sessions; focus one pane, select panes, or broadcast; optional Git worktree per pane; open source; Windows-native in the public launch cut.
 - CTA: install globally with `npm install -g gridbash` and visit `github.com/jasonsuhari/gridbash`.
 
 ## Brand and product truth
@@ -22,10 +22,12 @@
 - Use the recorded six-pane GridBash session for the product scenes: six real
   Codex sessions in six disposable git worktrees, with panes 2, 3, 5, and 6
   selected and receiving the same bounded proof prompt while panes 1 and 4 stay idle.
-- Use the live captured GitHub repository page for public open-source proof; the 2026-07-13 capture shows 46 stars.
-- Use the established GridBash palette and dispatch-board visual language.
+- Use the live captured GitHub repository page for public open-source proof. The final
+  `53 STARS` HTML stamp mirrors the count verified immediately before rendering and
+  must be refreshed with the screenshot on future renders.
+- Use the approved tactile cut-paper system with exact product footage as its only dense surface.
 - Do not claim hidden agent-to-agent coordination or a shared agent protocol.
-- Do not publish the cross-platform cut until distributable Windows, Linux, and macOS packages are verified.
+- Use `assets/voice-truth-safe.wav` for the public cut. Do not restore the recorded cross-platform clause until distributable Windows, Linux, and macOS packages are verified.
 - The latest public v0.1.6 package was Windows x64 when production began; current source contains newer cross-platform packaging work.
 
 ## Production
