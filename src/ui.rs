@@ -235,7 +235,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(
-            " | Alt+h help | Alt+f zoom | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c CLI | Alt+Shift+V voice | Alt+p summary | Alt+Shift+p panes | Alt+x swap | Alt+z sleep | Alt+q quit",
+            " | Alt+h help | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c CLI | Alt+Shift+V voice | Alt+p summary | Alt+Shift+p panes | Alt+x swap | Alt+z sleep | Alt+q quit",
         ),
     ]);
     frame.render_widget(
@@ -1420,6 +1420,11 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &GridP
 
     frame.render_widget(Clear, modal);
 
+    let title = if app.settings_tab() == SettingsTab::Auth {
+        " Auth Profiles | Alt+Shift+A "
+    } else {
+        " GridBash Settings "
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(
@@ -1428,7 +1433,7 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &GridP
                 .add_modifier(Modifier::BOLD),
         )
         .style(settings_panel_style())
-        .title(" GridBash Settings ");
+        .title(title);
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
     frame.render_widget(
@@ -1987,46 +1992,26 @@ fn auth_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let mut lines = vec![
         settings_tabs(SettingsTab::Auth),
         Line::from(""),
-        settings_section("LAUNCH POLICY", "applies to new compatible panes", width),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Auth assignment", Style::default().fg(SETTINGS_TEXT)),
-            Span::raw("  "),
-            Span::styled(
-                if app.auth_auto_cycle() {
-                    "[ auto-cycle ]"
-                } else {
-                    "[ manual ]"
-                },
-                if app.auth_auto_cycle() {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(SETTINGS_BORDER)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                        .fg(Color::LightCyan)
-                        .bg(SETTINGS_SURFACE)
-                        .add_modifier(Modifier::BOLD)
-                },
-            ),
-            Span::raw("  "),
-            Span::styled(
-                if app.auth_auto_cycle() {
-                    "round-robin across ready accounts"
-                } else {
-                    "pane choices stay explicit"
-                },
-                Style::default().fg(SETTINGS_MUTED),
-            ),
-        ]),
+        settings_section(
+            "FOCUSED PANE",
+            "Enter applies the highlighted compatible profile and restarts this pane",
+            width,
+        ),
+        auth_focused_pane_line(app, width),
+        Line::from(""),
+        settings_section(
+            "NEW PANE POLICY",
+            "only affects panes when they start; running panes keep their current profile",
+            width,
+        ),
+        auth_new_pane_policy_line(app, width),
         Line::from(""),
         settings_section(
             "AUTH PROFILES",
             if app.auth_refreshing() {
                 "refreshing local account and usage status"
             } else {
-                "Claude and Codex defaults"
+                "isolated Claude/Codex homes; each keeps its own login and usage"
             },
             width,
         ),
@@ -2079,8 +2064,105 @@ fn auth_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.push(auth_command_bar(width));
+    lines.extend(auth_command_bar(width));
     lines
+}
+
+fn auth_focused_pane_line(app: &App, width: u16) -> Line<'static> {
+    let Some(pane) = app.auth_pane_view() else {
+        return Line::from(vec![
+            Span::raw("  "),
+            Span::styled("No focused pane.", Style::default().fg(SETTINGS_MUTED)),
+        ]);
+    };
+    let Some(kind) = pane.kind else {
+        return Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                truncate_text(
+                    &format!(
+                        "pane {} ({}) | managed auth only applies to Claude and Codex panes",
+                        pane.index + 1,
+                        pane.label
+                    ),
+                    width.saturating_sub(2) as usize,
+                ),
+                Style::default().fg(SETTINGS_MUTED),
+            ),
+        ]);
+    };
+
+    let current = pane.current_profile.as_deref().unwrap_or("normal login");
+    let action = app
+        .auth_profiles()
+        .get(app.auth_cursor())
+        .map(|profile| {
+            if profile.kind != kind {
+                format!("select a {} profile", kind.display_name())
+            } else if pane.current_profile.as_deref() == Some(profile.name.as_str()) {
+                "highlighted profile is current".into()
+            } else {
+                format!("Enter uses {} + restarts", profile.name)
+            }
+        })
+        .unwrap_or_else(|| "create or select a profile below".into());
+    let summary = format!(
+        "pane {} ({}) | {} | current: {} | {}",
+        pane.index + 1,
+        pane.label,
+        kind.display_name(),
+        current,
+        action
+    );
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            truncate_text(&summary, width.saturating_sub(2) as usize),
+            Style::default()
+                .fg(kind_color(kind))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn auth_new_pane_policy_line(app: &App, width: u16) -> Line<'static> {
+    let (mode, detail) = if app.auth_auto_cycle() {
+        (
+            "[ round-robin ]",
+            "rotate through every ready profile of the matching agent kind".to_string(),
+        )
+    } else {
+        let claude = app
+            .auth_default(AgentKind::Claude)
+            .unwrap_or("normal login");
+        let codex = app.auth_default(AgentKind::Codex).unwrap_or("normal login");
+        (
+            "[ per-agent defaults ]",
+            format!("Claude: {claude} | Codex: {codex}"),
+        )
+    };
+    let summary = truncate_text(
+        &format!("{mode}  {detail}"),
+        width.saturating_sub(2) as usize,
+    );
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            summary,
+            Style::default()
+                .fg(if app.auth_auto_cycle() {
+                    Color::Black
+                } else {
+                    Color::LightCyan
+                })
+                .bg(if app.auth_auto_cycle() {
+                    SETTINGS_BORDER
+                } else {
+                    SETTINGS_SURFACE
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
 }
 
 fn manager_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
@@ -2155,38 +2237,61 @@ fn auth_profile_row(
     ])
 }
 
-fn auth_command_bar(width: u16) -> Line<'static> {
+fn auth_command_bar(width: u16) -> Vec<Line<'static>> {
     if width < 58 {
-        return Line::from(vec![
+        return vec![
+            Line::from(vec![
+                Span::raw("  "),
+                command_key("Up/Down"),
+                Span::styled(" move  ", Style::default().fg(Color::Gray)),
+                command_key("Enter"),
+                Span::styled(" assign", Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                command_key("d"),
+                Span::styled(" default  ", Style::default().fg(Color::Gray)),
+                command_key("c"),
+                Span::styled(" policy  ", Style::default().fg(Color::Gray)),
+                command_key("Esc"),
+                Span::styled(" close", Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                command_key("n"),
+                Span::styled(" new  ", Style::default().fg(Color::Gray)),
+                command_key("l"),
+                Span::styled(" login  ", Style::default().fg(Color::Gray)),
+                command_key("r"),
+                Span::styled(" refresh", Style::default().fg(Color::Gray)),
+            ]),
+        ];
+    }
+
+    vec![
+        Line::from(vec![
             Span::raw("  "),
             command_key("Up/Down"),
             Span::styled(" move  ", Style::default().fg(Color::Gray)),
+            command_key("Enter"),
+            Span::styled(" assign  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" close", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
             command_key("d"),
             Span::styled(" default  ", Style::default().fg(Color::Gray)),
             command_key("c"),
-            Span::styled(" cycle  ", Style::default().fg(Color::Gray)),
-            command_key("Esc"),
-            Span::styled(" close", Style::default().fg(Color::Gray)),
-        ]);
-    }
-
-    Line::from(vec![
-        Span::raw("  "),
-        command_key("Up/Down"),
-        Span::styled(" move  ", Style::default().fg(Color::Gray)),
-        command_key("d"),
-        Span::styled(" default  ", Style::default().fg(Color::Gray)),
-        command_key("c"),
-        Span::styled(" cycle  ", Style::default().fg(Color::Gray)),
-        command_key("n"),
-        Span::styled(" new  ", Style::default().fg(Color::Gray)),
-        command_key("l"),
-        Span::styled(" login  ", Style::default().fg(Color::Gray)),
-        command_key("r"),
-        Span::styled(" refresh  ", Style::default().fg(Color::Gray)),
-        command_key("Esc"),
-        Span::styled(" close", Style::default().fg(Color::Gray)),
-    ])
+            Span::styled(" policy  ", Style::default().fg(Color::Gray)),
+            command_key("n"),
+            Span::styled(" new  ", Style::default().fg(Color::Gray)),
+            command_key("l"),
+            Span::styled(" login  ", Style::default().fg(Color::Gray)),
+            command_key("r"),
+            Span::styled(" refresh", Style::default().fg(Color::Gray)),
+        ]),
+    ]
 }
 
 fn auth_create_command_bar() -> Line<'static> {
@@ -2498,11 +2603,12 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
         ("Alt+Shift+p", "show previous panes"),
         ("Alt+f", "zoom or restore focused pane"),
         ("Alt+l", "resize the grid"),
+        ("Alt+Shift+A", "manage and assign auth profiles"),
         ("Alt+r", "rename focused pane"),
         ("Alt+Shift+t", "restart exited panes"),
         ("Alt+z", "sleep or wake panes"),
         ("Alt+g / Alt+u", "start or stop grid goal"),
-        ("Alt+o", "open global settings/profiles"),
+        ("Alt+o", "open global settings"),
         ("Alt+Shift+V", "dictate without submitting"),
         ("Alt+q", "quit GridBash"),
         ("Alt+h / F1", "close this help"),
@@ -3218,6 +3324,20 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert!(!no_auth.contains("Left/Right"));
+    }
+
+    #[test]
+    fn auth_command_bar_distinguishes_pane_assignment_and_new_pane_policy() {
+        let text = auth_command_bar(100)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("Enter"));
+        assert!(text.contains("assign"));
+        assert!(text.contains("default"));
+        assert!(text.contains("policy"));
     }
 
     #[test]

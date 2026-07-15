@@ -887,6 +887,14 @@ pub struct AuthCreateState {
     pub name: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct AuthPaneView {
+    pub index: usize,
+    pub label: String,
+    pub kind: Option<AgentKind>,
+    pub current_profile: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct RenamePaneState {
     open: bool,
@@ -1836,10 +1844,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     } else {
-        "Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     }
 }
@@ -3235,6 +3243,10 @@ impl App {
                 }
                 Ok(Some(false))
             }
+            'a' if modifiers.contains(KeyModifiers::SHIFT) => {
+                self.open_auth_profiles();
+                Ok(Some(false))
+            }
             'a' => {
                 if self.selected.len() == self.panes.len() {
                     self.selected.clear();
@@ -3337,6 +3349,21 @@ impl App {
         self.grid_resizer =
             Some(GridPicker::new(self.layout.size()).with_pane_summaries(pane_summaries));
         self.status = "grid resizer open".into();
+    }
+
+    fn open_auth_profiles(&mut self) {
+        self.close_tab_modals();
+        self.settings.todo_edit = None;
+        self.settings.manager_edit = None;
+        self.settings.open = true;
+        self.settings.tab = SettingsTab::Auth;
+        if self.auth_profiles.is_empty()
+            && let Ok(profiles) = auth::discover_profiles(&self.config.auth)
+        {
+            self.auth_profiles = profiles;
+        }
+        self.align_auth_cursor_to_focused_pane();
+        self.start_auth_refresh();
     }
 
     fn toggle_zoom(&mut self) {
@@ -3665,6 +3692,10 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
             return Ok(KeyOutcome::Quit);
         }
+        if is_auth_profiles_shortcut(&key) {
+            self.open_auth_profiles();
+            return Ok(KeyOutcome::Render);
+        }
         if let Some(shortcut) = pane_overlay_shortcut(&key) {
             match shortcut {
                 PaneOverlayShortcut::Summary => self.close_pane_settings(),
@@ -3837,6 +3868,53 @@ impl App {
             self.status = "no compatible auth profile selected".into();
             return Ok(());
         };
+        self.apply_auth_profile_to_pane(pane_index, profile)
+    }
+
+    fn apply_selected_auth_to_focused_pane(&mut self) -> Result<()> {
+        let Some(profile) = self.selected_auth_profile().cloned() else {
+            self.status = "no auth profile selected".into();
+            return Ok(());
+        };
+        let pane_index = self.focus;
+        let Some(spec) = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(pane_index))
+        else {
+            self.status = "focused pane has no launch settings".into();
+            return Ok(());
+        };
+        let Some(kind) = spec.command.agent_kind else {
+            self.status = format!(
+                "pane {} is not a Claude or Codex pane; managed auth was not changed",
+                pane_index + 1
+            );
+            return Ok(());
+        };
+        if kind != profile.kind {
+            self.status = format!(
+                "pane {} needs a {} profile; {} is {}",
+                pane_index + 1,
+                kind.display_name(),
+                profile.name,
+                profile.kind.display_name()
+            );
+            return Ok(());
+        }
+        if spec.auth_name.as_deref() == Some(profile.name.as_str()) {
+            self.status = format!("pane {} already uses auth {}", pane_index + 1, profile.name);
+            return Ok(());
+        }
+
+        self.apply_auth_profile_to_pane(pane_index, profile)
+    }
+
+    fn apply_auth_profile_to_pane(
+        &mut self,
+        pane_index: usize,
+        profile: AuthProfile,
+    ) -> Result<()> {
         let auth_env = auth::env_for_profile(&self.config.auth, profile.kind, &profile.name)?;
         let mut spec = self
             .launch_plan
@@ -3855,8 +3933,10 @@ impl App {
             *idle = PaneIdleState::new(Instant::now());
         }
         self.sleeping.remove(&pane_index);
-        self.pane_settings
-            .refresh_history("waiting for output".into());
+        if self.pane_settings.open && self.pane_settings.pane_index == pane_index {
+            self.pane_settings
+                .refresh_history("waiting for output".into());
+        }
         self.start_usage_for_active_tab();
         self.save_session_snapshot()?;
         self.status = format!(
@@ -4014,6 +4094,10 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
             return Ok(KeyOutcome::Quit);
         }
+        if is_auth_profiles_shortcut(&key) {
+            self.open_auth_profiles();
+            return Ok(KeyOutcome::Render);
+        }
 
         if self.settings.editing_todo() {
             return self.handle_todo_edit_key(key);
@@ -4093,6 +4177,10 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.move_auth_cursor(1);
+                true
+            }
+            KeyCode::Enter => {
+                self.apply_selected_auth_to_focused_pane()?;
                 true
             }
             KeyCode::Char('r') | KeyCode::Char('R') => {
@@ -5650,6 +5738,20 @@ impl App {
         self.settings.create_auth.as_ref()
     }
 
+    pub fn auth_pane_view(&self) -> Option<AuthPaneView> {
+        self.panes.get(self.focus)?;
+        let spec = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(self.focus));
+        Some(AuthPaneView {
+            index: self.focus,
+            label: self.pane_label(self.focus),
+            kind: spec.and_then(|spec| spec.command.agent_kind),
+            current_profile: spec.and_then(|spec| spec.auth_name.clone()),
+        })
+    }
+
     pub fn auth_default(&self, kind: AgentKind) -> Option<&str> {
         self.config.auth.defaults.get(kind)
     }
@@ -6100,6 +6202,34 @@ impl App {
         self.auth_profiles.get(self.settings.auth_cursor)
     }
 
+    fn align_auth_cursor_to_focused_pane(&mut self) {
+        let Some(spec) = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(self.focus))
+        else {
+            return;
+        };
+        let Some(kind) = spec.command.agent_kind else {
+            return;
+        };
+        let current = spec.auth_name.as_deref();
+        if let Some(index) = current
+            .and_then(|name| {
+                self.auth_profiles
+                    .iter()
+                    .position(|profile| profile.kind == kind && profile.name.as_str() == name)
+            })
+            .or_else(|| {
+                self.auth_profiles
+                    .iter()
+                    .position(|profile| profile.kind == kind)
+            })
+        {
+            self.settings.auth_cursor = index;
+        }
+    }
+
     fn set_selected_auth_default(&mut self) -> Result<()> {
         let Some(profile) = self.selected_auth_profile().cloned() else {
             self.status = "no auth profile selected".into();
@@ -6111,8 +6241,13 @@ impl App {
             .defaults
             .set(profile.kind, profile.name.clone());
         let path = self.config.save(self.config_path.as_deref())?;
+        let cycle_note = if self.config.auth.auto_cycle {
+            "; round-robin is currently on"
+        } else {
+            ""
+        };
         self.status = format!(
-            "{} default auth: {} ({})",
+            "{} new-pane default: {}{cycle_note} ({})",
             profile.kind.display_name(),
             profile.name,
             path.display()
@@ -6124,11 +6259,11 @@ impl App {
         self.config.auth.auto_cycle = !self.config.auth.auto_cycle;
         let path = self.config.save(self.config_path.as_deref())?;
         let mode = if self.config.auth.auto_cycle {
-            "auto-cycle ready profiles"
+            "round-robin ready profiles for new panes"
         } else {
-            "manual profile selection"
+            "use per-agent defaults for new panes"
         };
-        self.status = format!("auth launch mode: {mode} ({})", path.display());
+        self.status = format!("auth new-pane policy: {mode} ({})", path.display());
         Ok(())
     }
 
@@ -8591,6 +8726,12 @@ fn pane_overlay_shortcut(key: &KeyEvent) -> Option<PaneOverlayShortcut> {
     })
 }
 
+fn is_auth_profiles_shortcut(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::ALT)
+        && key.modifiers.contains(KeyModifiers::SHIFT)
+        && matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
+}
+
 fn pane_activity_summary(pane: &PtyPane) -> Option<String> {
     output_tail_summary(pane.output_tail()).or_else(|| conversation_summary(pane.screen()))
 }
@@ -9272,6 +9413,26 @@ mod selection_tests {
             &targets,
             &after_forwarded_mouse_input
         ));
+    }
+
+    #[test]
+    fn auth_profiles_shortcut_keeps_plain_alt_a_available() {
+        assert!(is_auth_profiles_shortcut(&KeyEvent::new(
+            KeyCode::Char('A'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        )));
+        assert!(is_auth_profiles_shortcut(&KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        )));
+        assert!(!is_auth_profiles_shortcut(&KeyEvent::new(
+            KeyCode::Char('a'),
+            KeyModifiers::ALT,
+        )));
+        assert!(!is_auth_profiles_shortcut(&KeyEvent::new(
+            KeyCode::Char('A'),
+            KeyModifiers::SHIFT,
+        )));
     }
 
     #[test]
