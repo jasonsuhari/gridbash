@@ -45,7 +45,7 @@ The npm package installs only the native binary for your current platform.
 - **Agent-first profiles.** Launch Codex, Claude, Gemini, Aider, OpenCode, Goose,
   Amp, Cursor, Copilot, shells, or custom commands.
 - **Built-in workflow tools.** Resize grids, restore sessions, dictate prompts,
-  inspect pane activity, and let a manager route targeted follow-ups.
+  inspect pane activity, and ask BashBot to brief or coordinate the workspace.
 
 ## Common commands
 
@@ -76,6 +76,7 @@ agents and shells.
 | `Alt` + arrow keys | Move focus between panes |
 | `Alt+s` / `Alt+a` | Toggle the focused pane / select or clear all panes |
 | `Alt+c` | Open or close the command line |
+| `Alt+d` | Chat with BashBot across all open grids and panes |
 | `Alt+n` / `Alt+t` | Open a new tab / switch tabs |
 | `Alt+p` | Open focused-pane activity |
 | `Alt+g` / `Alt+u` | Start or stop the grid manager goal |
