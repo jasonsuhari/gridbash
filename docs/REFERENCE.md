@@ -144,6 +144,7 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+s | Toggle selection of the focused pane. |
 | Alt+a | Select all panes, or clear the set when all are selected. |
 | Alt+c | Open or close the expanded command line. |
+| Alt+d | Open or close the BashBot workspace assistant. |
 | Alt+Shift+V | Dictate one utterance, or cancel active listening. |
 | Alt+h / F1 | Open or close help. |
 | Alt+p | Open the focused-pane activity summary. |
@@ -161,6 +162,8 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 Drag selection is contained to its source pane and copies through the standard OSC 52 clipboard sequence. Use `--no-mouse` if the host terminal, serial link, or multiplexer cannot forward mouse reporting.
 
 When multiple panes are selected, typing is broadcast to them. With zero or one selected pane, input goes only to the focused pane. The Alt+c command line captures its output and runs Enter-submitted commands in the cwd shown in its prompt.
+
+Alt+D opens BashBot in a compact dock at the bottom-right. BashBot uses bounded, labeled recent output from every pane in every open grid to provide workspace briefs and prompt coaching. Ask it explicitly to send, tell, delegate, or prompt when you want it to submit a targeted follow-up; ordinary briefing and prompt-writing requests never dispatch input. Responses remain bound to stable pane identities, and a target is skipped if it sleeps, exits, disappears, or changes while the request is being reviewed. Enter sends a chat message, Ctrl+U clears the input, and Esc or Alt+D closes the dock.
 
 Pane Activity provides auth, rename, refresh, sleep/wake, and manager-goal controls. Navigate with Up/Down and activate with Enter or Space. Direct keys inside the view are `n` to rename, `r` to refresh, `z` to sleep or wake, `g` to edit the grid goal, and `u` to stop it. Close it with Esc, `q`, or Alt+p; Alt+o switches to overall settings.
 
@@ -293,7 +296,7 @@ Settings persist compact titles, activity badges, quit confirmation, new-pane sc
 
 ### Grid manager
 
-The manager uses the OpenAI-compatible chat-completions endpoint, model, and API key under `[manager]`. These values can also be edited in Settings > Manager. The UI masks the API key, but the key is stored in the local TOML file.
+The grid manager and BashBot use the OpenAI-compatible chat-completions endpoint, model, and API key under `[manager]`. These values can also be edited in Settings > Manager. The UI masks the API key, but the key is stored in the local TOML file.
 
 Alt+G creates a goal for the current grid. Each review sends pane role and folder metadata plus bounded recent output from every awake pane to the configured API. Sleeping and exited panes are omitted from reviews and are never command targets. Reviews label output by pane, and validated follow-ups remain bound to their intended PTYs if panes are reordered.
 
