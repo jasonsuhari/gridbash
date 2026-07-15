@@ -13,7 +13,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::worktrees::ManagedWorktreeOptions;
@@ -67,6 +67,7 @@ pub struct GridPicker {
     rows: usize,
     columns: usize,
     active_field: DimensionField,
+    pane_summaries: Vec<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -160,7 +161,13 @@ impl GridPicker {
             rows: grid.rows,
             columns: grid.columns,
             active_field: DimensionField::Rows,
+            pane_summaries: Vec::new(),
         }
+    }
+
+    pub fn with_pane_summaries(mut self, pane_summaries: Vec<Option<String>>) -> Self {
+        self.pane_summaries = pane_summaries;
+        self
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> GridPickerAction {
@@ -322,7 +329,34 @@ impl GridPicker {
             let inner = block.inner(rect);
             frame.render_widget(block, rect);
             frame.render_widget(dithered_fill(index, inner, palette), inner);
+            if mode == GridPickerMode::Resize
+                && let Some(summary) = self.preview_summary(index)
+            {
+                frame.render_widget(
+                    Paragraph::new(summary)
+                        .alignment(Alignment::Center)
+                        .wrap(Wrap { trim: true })
+                        .style(
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    inner,
+                );
+            }
         }
+    }
+
+    fn preview_summary(&self, index: usize) -> Option<&str> {
+        let row = index / self.columns;
+        let column = index % self.columns;
+        let old_index = (row < self.initial.rows && column < self.initial.columns)
+            .then_some(row * self.initial.columns + column)?;
+
+        self.pane_summaries
+            .get(old_index)
+            .and_then(Option::as_deref)
+            .filter(|summary| !summary.trim().is_empty())
     }
 
     fn draw_controls(&self, frame: &mut Frame<'_>, area: Rect, mode: GridPickerMode) {
@@ -567,5 +601,78 @@ mod tests {
                 .iter()
                 .any(|cell| cell.bg == STARTUP_PREVIEW.light)
         );
+    }
+
+    #[test]
+    fn resize_picker_renders_available_activity_summaries() {
+        let picker = GridPicker::new(GridSize {
+            rows: 1,
+            columns: 2,
+        })
+        .with_pane_summaries(vec![Some("reviewing code".into()), None]);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| picker.draw(frame, GridPickerMode::Resize, None))
+            .expect("draw picker");
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("reviewing code"));
+        assert!(!rendered.contains("waiting for output"));
+    }
+
+    #[test]
+    fn resize_picker_keeps_summaries_at_retained_coordinates() {
+        let mut picker = GridPicker::new(GridSize {
+            rows: 2,
+            columns: 3,
+        })
+        .with_pane_summaries(vec![
+            Some("zero".into()),
+            Some("one".into()),
+            Some("removed two".into()),
+            Some("three".into()),
+            Some("four".into()),
+            Some("removed five".into()),
+        ]);
+
+        picker.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        picker.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        assert_eq!(picker.preview_summary(0), Some("zero"));
+        assert_eq!(picker.preview_summary(1), Some("one"));
+        assert_eq!(picker.preview_summary(2), Some("three"));
+        assert_eq!(picker.preview_summary(3), Some("four"));
+    }
+
+    #[test]
+    fn startup_picker_does_not_render_activity_summaries() {
+        let picker = GridPicker::new(GridSize {
+            rows: 1,
+            columns: 1,
+        })
+        .with_pane_summaries(vec![Some("resize only".into())]);
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| picker.draw(frame, GridPickerMode::Startup, None))
+            .expect("draw picker");
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!rendered.contains("resize only"));
     }
 }
