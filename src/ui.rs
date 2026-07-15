@@ -1,9 +1,10 @@
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 use vt100::Cell;
 
@@ -46,7 +47,7 @@ pub struct PaneRenderCache {
     width: u16,
     height: u16,
     selection: Option<PaneSelection>,
-    lines: Vec<Line<'static>>,
+    buffer: Buffer,
 }
 
 const QUIET_MARKER: &str = " *";
@@ -167,8 +168,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             render_sleeping_screen(frame, inner);
         } else {
             let selection = app.selection_for_pane(index);
-            let lines = app.pane_screen_lines(index, inner.width, inner.height, selection);
-            render_screen_lines(frame, inner, lines);
+            app.render_pane_screen(frame, index, inner, selection);
         }
 
         if focused && !sleeping && !modal_open && pane.screen().scrollback() == 0 {
@@ -2854,53 +2854,77 @@ fn render_sleeping_screen(frame: &mut Frame<'_>, area: Rect) {
     }
 
     let style = Style::default().fg(Color::Black).bg(Color::Black);
-    let blank = " ".repeat(area.width as usize);
-    let lines = (0..area.height)
-        .map(|_| Line::from(Span::styled(blank.clone(), style)))
-        .collect::<Vec<_>>();
-
-    frame.render_widget(Paragraph::new(lines).style(style), area);
+    let buffer = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buffer[(x, y)];
+            cell.reset();
+            cell.set_style(style);
+        }
+    }
 }
 
-fn render_screen_lines(frame: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {
+pub fn render_cached_screen(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    cache: &mut PaneRenderCache,
+    revision: u64,
+    screen: &vt100::Screen,
+    selection: Option<PaneSelection>,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
-        area,
-    );
+    refresh_screen_cache(cache, revision, screen, area.width, area.height, selection);
+    blit_buffer(&cache.buffer, frame.buffer_mut(), area);
 }
 
-pub fn cached_screen_lines(
+fn refresh_screen_cache(
     cache: &mut PaneRenderCache,
     revision: u64,
     screen: &vt100::Screen,
     width: u16,
     height: u16,
     selection: Option<PaneSelection>,
-) -> Vec<Line<'static>> {
-    if width == 0 || height == 0 {
-        return Vec::new();
-    }
+) {
     if cache.revision == revision
         && cache.width == width
         && cache.height == height
         && cache.selection == selection
     {
-        return cache.lines.clone();
+        return;
     }
 
     let lines = (0..height)
         .map(|row| render_screen_row(screen, row, width, selection))
         .collect::<Vec<_>>();
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    Widget::render(
+        Paragraph::new(lines).style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
+        area,
+        &mut buffer,
+    );
     cache.revision = revision;
     cache.width = width;
     cache.height = height;
     cache.selection = selection;
-    cache.lines.clone_from(&lines);
-    lines
+    cache.buffer = buffer;
+}
+
+fn blit_buffer(source: &Buffer, target: &mut Buffer, area: Rect) {
+    debug_assert_eq!(source.area.width, area.width);
+    debug_assert_eq!(source.area.height, area.height);
+    debug_assert_eq!(area.intersection(target.area), area);
+
+    let width = area.width as usize;
+    for row in 0..area.height {
+        let source_start = row as usize * width;
+        let target_start = target.index_of(area.x, area.y + row);
+        target.content[target_start..target_start + width]
+            .clone_from_slice(&source.content[source_start..source_start + width]);
+    }
 }
 
 fn render_screen_row<'a>(
@@ -3080,6 +3104,48 @@ fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "manual performance benchmark"]
+    fn benchmark_cached_screen_render() {
+        use std::{hint::black_box, time::Instant};
+
+        use ratatui::buffer::Buffer;
+
+        const ITERATIONS: usize = 5_000;
+        let mut parser = vt100::Parser::new(40, 120, 10_000);
+        let output = (0..40)
+            .map(|row| {
+                format!(
+                    "\x1b[38;5;{}mrow {row:02}: GridBash performance benchmark output with styled terminal cells\x1b[0m\r\n",
+                    32 + row
+                )
+            })
+            .collect::<String>();
+        parser.process(output.as_bytes());
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buffer = Buffer::empty(area);
+        let mut cache = PaneRenderCache::default();
+        let start = Instant::now();
+        for _ in 0..ITERATIONS {
+            refresh_screen_cache(
+                &mut cache,
+                1,
+                parser.screen(),
+                area.width,
+                area.height,
+                None,
+            );
+            blit_buffer(black_box(&cache.buffer), &mut buffer, area);
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "cached screen render: {ITERATIONS} iterations in {elapsed:?} ({:?}/iteration)",
+            elapsed / ITERATIONS as u32
+        );
+        black_box(buffer);
+    }
 
     #[test]
     fn idle_pane_has_no_state_badges() {
@@ -3423,13 +3489,14 @@ mod tests {
         parser.process(b"hello");
         let mut cache = PaneRenderCache::default();
 
-        let first = cached_screen_lines(&mut cache, 1, parser.screen(), 10, 2, None);
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 10, 2, None);
+        let first = cache.buffer.clone();
         parser.process(b" world");
-        let cached = cached_screen_lines(&mut cache, 1, parser.screen(), 10, 2, None);
-        assert_eq!(cached, first);
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 10, 2, None);
+        assert_eq!(cache.buffer, first);
 
-        let refreshed = cached_screen_lines(&mut cache, 2, parser.screen(), 10, 2, None);
-        assert_ne!(refreshed, first);
+        refresh_screen_cache(&mut cache, 2, parser.screen(), 10, 2, None);
+        assert_ne!(cache.buffer, first);
     }
 
     #[test]
@@ -3437,18 +3504,35 @@ mod tests {
         let mut parser = vt100::Parser::new(2, 10, 100);
         parser.process(b"hello");
         let mut cache = PaneRenderCache::default();
-        let plain = cached_screen_lines(&mut cache, 1, parser.screen(), 10, 2, None);
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 10, 2, None);
+        let plain = cache.buffer.clone();
         let selection = Some(PaneSelection {
             start_row: 0,
             start_column: 0,
             end_row: 0,
             end_column: 4,
         });
-        let selected = cached_screen_lines(&mut cache, 1, parser.screen(), 10, 2, selection);
-        assert_ne!(selected, plain);
-        assert_eq!(
-            cached_screen_lines(&mut cache, 1, parser.screen(), 5, 2, selection).len(),
-            2
-        );
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 10, 2, selection);
+        assert_ne!(cache.buffer, plain);
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 5, 2, selection);
+        assert_eq!(cache.buffer.area, Rect::new(0, 0, 5, 2));
+    }
+
+    #[test]
+    fn cached_screen_buffer_blits_at_the_pane_offset() {
+        let mut source = Buffer::empty(Rect::new(0, 0, 2, 2));
+        source[(0, 0)].set_symbol("A");
+        source[(1, 0)].set_symbol("B");
+        source[(0, 1)].set_symbol("C");
+        source[(1, 1)].set_symbol("D");
+        let mut target = Buffer::empty(Rect::new(0, 0, 6, 4));
+
+        blit_buffer(&source, &mut target, Rect::new(3, 1, 2, 2));
+
+        assert_eq!(target[(3, 1)].symbol(), "A");
+        assert_eq!(target[(4, 1)].symbol(), "B");
+        assert_eq!(target[(3, 2)].symbol(), "C");
+        assert_eq!(target[(4, 2)].symbol(), "D");
+        assert_eq!(target[(2, 1)].symbol(), " ");
     }
 }
