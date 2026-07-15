@@ -5,6 +5,7 @@ mod codex_sqlite;
 mod composer;
 mod config;
 mod control;
+mod copy_mode;
 mod image_preview;
 mod layout;
 mod manager;

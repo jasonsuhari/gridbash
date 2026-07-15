@@ -373,6 +373,10 @@ impl PtyPane {
         self.screen_revision
     }
 
+    pub fn history_lines(&mut self) -> Vec<String> {
+        screen_history_lines(self.parser.screen_mut())
+    }
+
     pub fn scroll_view(&mut self, rows: isize) -> bool {
         let changed = scroll_screen(self.parser.screen_mut(), rows);
         if changed {
@@ -642,6 +646,34 @@ fn scroll_screen(screen: &mut Screen, rows: isize) -> bool {
     };
     screen.set_scrollback(next);
     screen.scrollback() != before
+}
+
+fn screen_history_lines(screen: &mut Screen) -> Vec<String> {
+    let original_scrollback = screen.scrollback();
+    let (rows, columns) = screen.size();
+    let page_rows = usize::from(rows).max(1);
+    let mut lines = Vec::new();
+
+    screen.set_scrollback(usize::MAX);
+    let history_rows = screen.scrollback();
+    let mut history_start = 0;
+    while history_start < history_rows {
+        screen.set_scrollback(history_rows - history_start);
+        let rows_to_take = (history_rows - history_start).min(page_rows);
+        lines.extend(screen.rows(0, columns).take(rows_to_take));
+        history_start += rows_to_take;
+    }
+
+    screen.set_scrollback(0);
+    lines.extend(screen.rows(0, columns));
+    screen.set_scrollback(original_scrollback);
+
+    let first_content = lines.iter().position(|line| !line.is_empty());
+    let last_content = lines.iter().rposition(|line| !line.is_empty());
+    match (first_content, last_content) {
+        (Some(first), Some(last)) => lines[first..=last].to_vec(),
+        _ => vec![String::new()],
+    }
 }
 
 impl Drop for PtyPane {
@@ -1611,6 +1643,26 @@ mod tests {
         assert!(scroll_screen(parser.screen_mut(), -3));
         assert_eq!(parser.screen().scrollback(), 0);
         assert!(parser.screen().contents().contains("five"));
+    }
+
+    #[test]
+    fn history_snapshot_includes_bounded_scrollback_and_restores_the_view() {
+        let mut parser = Parser::new(3, 20, 4);
+        parser.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+        parser.screen_mut().set_scrollback(2);
+
+        let lines = screen_history_lines(parser.screen_mut());
+
+        assert_eq!(lines, ["one", "two", "three", "four", "five", "six"]);
+        assert_eq!(parser.screen().scrollback(), 2);
+    }
+
+    #[test]
+    fn empty_history_snapshot_keeps_one_renderable_line() {
+        let mut parser = Parser::new(2, 10, 10);
+
+        assert_eq!(screen_history_lines(parser.screen_mut()), [""]);
+        assert_eq!(parser.screen().scrollback(), 0);
     }
 
     #[test]

@@ -15,6 +15,7 @@ use crate::{
     },
     auth::{AgentKind, AuthProfile},
     composer::GridPickerMode,
+    copy_mode::{CopyCellKind, CopyModeView, TextPoint},
     image_preview::ImagePreview,
 };
 
@@ -89,7 +90,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let grid_resizer = app.grid_resizer();
     let image_overlay = app.image_overlay_view();
     let help_open = app.help_open();
+    let copy_mode_open = app.copy_mode_open();
     let exited_recovery = if help_open
+        || copy_mode_open
         || app.settings_open()
         || previous_panes_view.is_some()
         || pane_settings_open
@@ -105,6 +108,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         app.exited_recovery_view()
     };
     let modal_open = help_open
+        || copy_mode_open
         || app.settings_open()
         || previous_panes_view.is_some()
         || pane_settings_open
@@ -163,7 +167,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
 
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
-        if sleeping {
+        if let Some(copy_mode) = app.copy_mode_view(index, inner.width, inner.height) {
+            render_copy_mode(frame, inner, &copy_mode, palette);
+        } else if sleeping {
             render_sleeping_screen(frame, inner);
         } else {
             let selection = app.selection_for_pane(index);
@@ -2497,6 +2503,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
         ("Alt+p", "show focused-pane activity summary"),
         ("Alt+Shift+p", "show previous panes"),
         ("Alt+f", "zoom or restore focused pane"),
+        ("Alt+b", "search and copy pane scrollback"),
         ("Alt+l", "resize the grid"),
         ("Alt+r", "rename focused pane"),
         ("Alt+Shift+t", "restart exited panes"),
@@ -2767,6 +2774,108 @@ fn render_screen_lines(frame: &mut Frame<'_>, area: Rect, lines: Vec<Line<'stati
     );
 }
 
+fn render_copy_mode(frame: &mut Frame<'_>, area: Rect, view: &CopyModeView, palette: &GridPalette) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let footer_height = u16::from(area.height > 1);
+    let body = Rect {
+        height: area.height.saturating_sub(footer_height),
+        ..area
+    };
+    let footer = Rect {
+        y: area.y + body.height,
+        height: footer_height,
+        ..area
+    };
+    let lines = view
+        .rows
+        .iter()
+        .map(|row| {
+            let spans = row
+                .text
+                .chars()
+                .enumerate()
+                .map(|(offset, ch)| {
+                    let point = TextPoint {
+                        line: row.line,
+                        column: view.left_column + offset,
+                    };
+                    let style = match view.cell_kind(point) {
+                        CopyCellKind::Normal => {
+                            Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)
+                        }
+                        CopyCellKind::Match => Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                        CopyCellKind::ActiveMatch => Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                        CopyCellKind::Selection => Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::LightCyan)
+                            .add_modifier(Modifier::BOLD),
+                        CopyCellKind::Cursor => Style::default()
+                            .fg(Color::Black)
+                            .bg(palette.focus())
+                            .add_modifier(Modifier::BOLD),
+                    };
+                    Span::styled(ch.to_string(), style)
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(Color::White).bg(APP_BG)),
+        body,
+    );
+
+    if footer.height > 0 {
+        let search = if view.searching {
+            format!(
+                " /{}▌ {}/{}",
+                view.query,
+                view.active_match.map_or(0, |i| i + 1),
+                view.match_count
+            )
+        } else if view.query.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " /{} {}/{}",
+                view.query,
+                view.active_match.map_or(0, |i| i + 1),
+                view.match_count
+            )
+        };
+        let selection = view
+            .selection_label
+            .map(|kind| format!(" {kind}"))
+            .unwrap_or_default();
+        let label = format!(
+            " COPY {}:{}/{}{}{} | / search n/N next Space/V select y copy Esc close ",
+            view.pane + 1,
+            view.cursor.line + 1,
+            view.total_lines,
+            search,
+            selection
+        );
+        frame.render_widget(
+            Paragraph::new(truncate_text(&label, footer.width as usize)).style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(palette.focus())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            footer,
+        );
+    }
+}
+
 pub fn cached_screen_lines(
     cache: &mut PaneRenderCache,
     revision: u64,
@@ -2974,6 +3083,20 @@ fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_mode_renders_at_one_cell_without_overflow() {
+        let backend = ratatui::backend::TestBackend::new(1, 1);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let mode = crate::copy_mode::CopyMode::new(0, vec!["\u{6771}".into()], 1, 1);
+        let view = mode.view(1, 1);
+
+        terminal
+            .draw(|frame| {
+                render_copy_mode(frame, Rect::new(0, 0, 1, 1), &view, &GridPalette::default());
+            })
+            .expect("render copy mode");
+    }
 
     #[test]
     fn idle_pane_has_no_state_badges() {
