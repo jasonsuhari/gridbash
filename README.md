@@ -79,6 +79,7 @@ agents and shells.
 | `Alt+n` / `Alt+t` | Open a new tab / switch tabs |
 | `Alt+p` | Open focused-pane activity |
 | `Alt+f` | Zoom or restore the focused pane |
+| `Alt+b` / `Alt+Shift+b` | Background selected panes / open background agents |
 | `Alt+g` / `Alt+u` | Start or stop the grid manager goal |
 | `Alt+Shift+V` | Dictate one prompt without submitting it |
 | `Alt+o` | Open settings |

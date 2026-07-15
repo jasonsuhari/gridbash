@@ -149,6 +149,8 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+h / F1 | Open or close help. |
 | Alt+p | Open the focused-pane activity summary. |
 | Alt+Shift+P | Open the previous-panes list. |
+| Alt+b | Move selected panes, or the focused pane, into the background and launch fresh replacements. |
+| Alt+Shift+B | Open the session-wide background-agents list. |
 | Alt+r | Rename the focused pane. |
 | Alt+Shift+R | Rename the current tab. |
 | Alt+Shift+T | Restart the exited focused pane, or all exited selected panes. |
@@ -164,6 +166,10 @@ Drag selection is contained to its source pane and copies through the standard O
 When multiple panes are selected, typing is broadcast to them. With zero or one selected pane, input goes only to the focused pane. The Alt+c command line captures its output and runs Enter-submitted commands in the cwd shown in its prompt.
 
 Pane Activity provides auth, rename, refresh, sleep/wake, and manager-goal controls. Navigate with Up/Down and activate with Enter or Space. Direct keys inside the view are `n` to rename, `r` to refresh, `z` to sleep or wake, `g` to edit the grid goal, and `u` to stop it. Close it with Esc, `q`, or Alt+p; Alt+o switches to overall settings.
+
+Alt+B backgrounds every explicitly selected pane, or the focused pane when the selected set is empty. GridBash first launches fresh panes with the same profile, command, auth, folder, and worktree; only after all replacements succeed are the original PTYs moved into the session-wide pool. Custom pane names follow the original jobs, while fresh replacements return to numbered labels.
+
+Alt+Shift+B opens Background Agents. Rows show whether each job is working, quiet, exited, or offline, together with its agent, source tab, folder/worktree, and latest activity. Use Up/Down to choose a row and Enter or Space to swap it into the focused cell; the displaced visible pane goes into the pool instead of being terminated. `R` explicitly restarts an exited or offline row. Delete removes exited/offline rows immediately and requires a second press before stopping a live process.
 
 If the focused pane exits, Enter, `r`, or `t` restarts it, while `z` sleeps it. Alt+Shift+T performs the same restart directly for exited target panes.
 

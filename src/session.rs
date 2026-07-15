@@ -37,6 +37,8 @@ pub struct SavedSession {
     pub grid: SavedGrid,
     #[serde(default)]
     pub panes: Vec<SavedPane>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_panes: Vec<SavedBackgroundPane>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -60,6 +62,15 @@ pub struct SavedPane {
     pub auth_kind: Option<AgentKind>,
     #[serde(default)]
     pub history: SavedPaneHistory,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedBackgroundPane {
+    pub id: u64,
+    pub source_tab: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub pane: SavedPane,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -95,17 +106,7 @@ impl SavedSession {
         let panes = self
             .panes
             .iter()
-            .map(|pane| PaneLaunchSpec {
-                profile_name: pane.profile_name.clone(),
-                command: pane.command.clone(),
-                env: BTreeMap::new(),
-                cwd: pane.cwd.clone(),
-                folder_name: pane.folder_name.clone(),
-                worktree_name: pane.worktree_name.clone(),
-                auth_name: pane.auth_name.clone(),
-                auth_kind: pane.auth_kind,
-                auth_dir: None,
-            })
+            .map(SavedPane::launch_spec)
             .collect::<Vec<_>>();
 
         if panes.is_empty() {
@@ -133,10 +134,16 @@ impl SavedSession {
                 .enumerate()
                 .map(|(index, spec)| SavedPane::from_spec(index, spec, SavedPaneHistory::default()))
                 .collect(),
+            background_panes: Vec::new(),
         }
     }
 
-    fn update_from_live(&mut self, plan: &LaunchPlan, panes: &[PtyPane]) {
+    fn update_from_live(
+        &mut self,
+        plan: &LaunchPlan,
+        panes: &[PtyPane],
+        background_panes: Vec<SavedBackgroundPane>,
+    ) {
         self.version = SESSION_VERSION;
         self.updated_at = now_seconds();
         self.grid = plan.grid.into();
@@ -152,6 +159,7 @@ impl SavedSession {
                 SavedPane::from_spec(index, spec, history)
             })
             .collect();
+        self.background_panes = background_panes;
     }
 
     fn summary(&self) -> String {
@@ -168,20 +176,45 @@ impl SavedSession {
                 .filter(|name| !name.is_empty()),
         );
 
+        let background = if self.background_panes.is_empty() {
+            String::new()
+        } else {
+            format!(" | {} background", self.background_panes.len())
+        };
+
         format!(
-            "{} | {}x{} | {} pane{} | {} | {}",
+            "{} | {}x{} | {} pane{} | {} | {}{}",
             age_label(self.updated_at),
             self.grid.rows,
             self.grid.columns,
             self.panes.len(),
             if self.panes.len() == 1 { "" } else { "s" },
             folders.unwrap_or_else(|| "unknown folders".into()),
-            profiles.unwrap_or_else(|| "unknown profiles".into())
+            profiles.unwrap_or_else(|| "unknown profiles".into()),
+            background,
         )
     }
 }
 
 impl SavedPane {
+    pub fn launch_spec(&self) -> PaneLaunchSpec {
+        PaneLaunchSpec {
+            profile_name: self.profile_name.clone(),
+            command: self.command.clone(),
+            env: BTreeMap::new(),
+            cwd: self.cwd.clone(),
+            folder_name: self.folder_name.clone(),
+            worktree_name: self.worktree_name.clone(),
+            auth_name: self.auth_name.clone(),
+            auth_kind: self.auth_kind,
+            auth_dir: None,
+        }
+    }
+
+    pub fn from_background(spec: &PaneLaunchSpec, history: SavedPaneHistory) -> Self {
+        Self::from_spec(0, spec, history)
+    }
+
     fn from_spec(index: usize, spec: &PaneLaunchSpec, history: SavedPaneHistory) -> Self {
         Self {
             index,
@@ -198,7 +231,7 @@ impl SavedPane {
 }
 
 impl SavedPaneHistory {
-    fn from_pane(pane: &PtyPane) -> Self {
+    pub fn from_pane(pane: &PtyPane) -> Self {
         Self {
             input_history: pane.input_history().to_vec(),
             output_tail: pane.output_tail().to_string(),
@@ -235,8 +268,13 @@ impl SessionRecorder {
         }
     }
 
-    pub fn update(&mut self, plan: &LaunchPlan, panes: &[PtyPane]) {
-        self.session.update_from_live(plan, panes);
+    pub fn update(
+        &mut self,
+        plan: &LaunchPlan,
+        panes: &[PtyPane],
+        background_panes: Vec<SavedBackgroundPane>,
+    ) {
+        self.session.update_from_live(plan, panes, background_panes);
     }
 
     pub fn save(&self) -> Result<()> {
@@ -501,6 +539,7 @@ mod tests {
                 pane("two", "codex"),
                 pane("one", "claude"),
             ],
+            background_panes: Vec::new(),
         };
 
         let summary = session.summary();
@@ -509,6 +548,46 @@ mod tests {
         assert!(summary.contains("3 panes"));
         assert!(summary.contains("one, two"));
         assert!(summary.contains("claude, codex"));
+    }
+
+    #[test]
+    fn background_panes_round_trip_and_default_for_older_sessions() {
+        let mut session = SavedSession {
+            version: SESSION_VERSION,
+            id: "background-test".into(),
+            started_at: now_seconds(),
+            updated_at: now_seconds(),
+            grid: SavedGrid {
+                rows: 1,
+                columns: 1,
+            },
+            panes: vec![pane("visible", "cmd")],
+            background_panes: vec![SavedBackgroundPane {
+                id: 9,
+                source_tab: "Grid 2".into(),
+                name: Some("auth fix".into()),
+                pane: pane("hidden", "codex"),
+            }],
+        };
+        session.background_panes[0].pane.history.output_tail = "tests passing".into();
+
+        let raw = toml::to_string(&session).expect("serialize session");
+        let restored: SavedSession = toml::from_str(&raw).expect("restore session");
+        assert_eq!(restored.background_panes.len(), 1);
+        assert_eq!(restored.background_panes[0].id, 9);
+        assert_eq!(restored.background_panes[0].source_tab, "Grid 2");
+        assert_eq!(
+            restored.background_panes[0].pane.history.output_tail,
+            "tests passing"
+        );
+
+        let without_background = raw
+            .split("[[background_panes]]")
+            .next()
+            .expect("visible session prefix");
+        let restored: SavedSession =
+            toml::from_str(without_background).expect("restore old session");
+        assert!(restored.background_panes.is_empty());
     }
 
     fn pane(folder_name: &str, profile_name: &str) -> SavedPane {
