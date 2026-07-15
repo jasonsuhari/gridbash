@@ -52,6 +52,20 @@ impl GridSize {
     pub fn count(self) -> usize {
         self.rows * self.columns
     }
+
+    pub fn compact_for_count(self, count: usize) -> Self {
+        let count = count.clamp(1, self.count());
+        let mut compact = self;
+
+        while compact.columns > 1 && compact.rows * (compact.columns - 1) >= count {
+            compact.columns -= 1;
+        }
+        while compact.rows > 1 && (compact.rows - 1) * compact.columns >= count {
+            compact.rows -= 1;
+        }
+
+        compact
+    }
 }
 
 impl GridLayout {
@@ -263,6 +277,61 @@ mod tests {
     fn auto_grid_caps_at_hundred() {
         let grid = GridSize::from_count(100);
         assert_eq!(grid.count(), 100);
+    }
+
+    #[test]
+    fn compacting_grid_removes_columns_before_rows() {
+        let grid = GridSize {
+            rows: 3,
+            columns: 3,
+        };
+
+        assert_eq!(
+            grid.compact_for_count(6),
+            GridSize {
+                rows: 3,
+                columns: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn compacting_two_by_three_for_four_panes_makes_two_by_two() {
+        let grid = GridSize {
+            rows: 2,
+            columns: 3,
+        };
+
+        assert_eq!(
+            grid.compact_for_count(4),
+            GridSize {
+                rows: 2,
+                columns: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn compacting_grid_keeps_enough_cells_for_every_pane() {
+        let grid = GridSize {
+            rows: 2,
+            columns: 3,
+        };
+
+        assert_eq!(
+            grid.compact_for_count(3),
+            GridSize {
+                rows: 2,
+                columns: 2,
+            }
+        );
+        assert_eq!(
+            grid.compact_for_count(1),
+            GridSize {
+                rows: 1,
+                columns: 1,
+            }
+        );
     }
 
     #[test]

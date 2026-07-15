@@ -132,6 +132,7 @@ pub struct App {
     pane_settings_rename_button: Option<Rect>,
     pane_settings_reload_button: Option<Rect>,
     pane_settings_sleep_button: Option<Rect>,
+    pane_settings_deactivate_button: Option<Rect>,
     pane_settings_goal_button: Option<Rect>,
     pane_settings_stop_goal_button: Option<Rect>,
     event_tx: mpsc::Sender<PtyEvent>,
@@ -775,17 +776,24 @@ pub enum PaneSettingsTarget {
     #[default]
     Reload,
     Sleep,
+    Deactivate,
     Goal,
     StopGoal,
 }
 
 impl PaneSettingsTarget {
     fn available(has_auth: bool, has_goal: bool) -> Vec<Self> {
-        let mut targets = Vec::with_capacity(6);
+        let mut targets = Vec::with_capacity(7);
         if has_auth {
             targets.push(Self::Auth);
         }
-        targets.extend([Self::Rename, Self::Reload, Self::Sleep, Self::Goal]);
+        targets.extend([
+            Self::Rename,
+            Self::Reload,
+            Self::Sleep,
+            Self::Deactivate,
+            Self::Goal,
+        ]);
         if has_goal {
             targets.push(Self::StopGoal);
         }
@@ -1994,6 +2002,7 @@ impl App {
             pane_settings_rename_button: None,
             pane_settings_reload_button: None,
             pane_settings_sleep_button: None,
+            pane_settings_deactivate_button: None,
             pane_settings_goal_button: None,
             pane_settings_stop_goal_button: None,
             event_tx,
@@ -2313,6 +2322,8 @@ impl App {
                     self.pane_settings_rename_button = draw_state.pane_settings_rename_button;
                     self.pane_settings_reload_button = draw_state.pane_settings_reload_button;
                     self.pane_settings_sleep_button = draw_state.pane_settings_sleep_button;
+                    self.pane_settings_deactivate_button =
+                        draw_state.pane_settings_deactivate_button;
                     self.pane_settings_goal_button = draw_state.pane_settings_goal_button;
                     self.pane_settings_stop_goal_button = draw_state.pane_settings_stop_goal_button;
                 })?;
@@ -3691,6 +3702,12 @@ impl App {
             self.toggle_sleep_for_panes(&[pane_index]);
             return Ok(KeyOutcome::Render);
         }
+        if matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D')) {
+            self.pane_settings.selected_target = PaneSettingsTarget::Deactivate;
+            let pane_index = self.pane_settings.pane_index;
+            self.deactivate_pane(pane_index);
+            return Ok(KeyOutcome::Render);
+        }
         if matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G')) {
             self.pane_settings.selected_target = PaneSettingsTarget::Goal;
             let pane_index = self.pane_settings.pane_index;
@@ -3788,6 +3805,7 @@ impl App {
             PaneSettingsTarget::Rename => self.begin_rename_for(pane_index),
             PaneSettingsTarget::Reload => self.reload_pane_history(),
             PaneSettingsTarget::Sleep => self.toggle_sleep_for_panes(&[pane_index]),
+            PaneSettingsTarget::Deactivate => self.deactivate_pane(pane_index),
             PaneSettingsTarget::Goal => {
                 self.pane_settings.close();
                 self.open_goal_editor_for(pane_index);
@@ -4533,6 +4551,12 @@ impl App {
             self.toggle_sleep_for_panes(&[pane_index]);
             return true;
         }
+        if self.pane_settings_deactivate_button_at(mouse.column, mouse.row) {
+            self.pane_settings.selected_target = PaneSettingsTarget::Deactivate;
+            let pane_index = self.pane_settings.pane_index;
+            self.deactivate_pane(pane_index);
+            return true;
+        }
         if self.pane_settings_goal_button_at(mouse.column, mouse.row) {
             self.pane_settings.selected_target = PaneSettingsTarget::Goal;
             let pane_index = self.pane_settings.pane_index;
@@ -4583,6 +4607,11 @@ impl App {
 
     fn pane_settings_sleep_button_at(&self, x: u16, y: u16) -> bool {
         self.pane_settings_sleep_button
+            .is_some_and(|rect| rect_contains(rect, x, y))
+    }
+
+    fn pane_settings_deactivate_button_at(&self, x: u16, y: u16) -> bool {
+        self.pane_settings_deactivate_button
             .is_some_and(|rect| rect_contains(rect, x, y))
     }
 
@@ -4864,6 +4893,90 @@ impl App {
         };
 
         Ok(())
+    }
+
+    fn deactivate_pane(&mut self, pane_index: usize) {
+        let before = self.panes.len();
+        if before <= 1 {
+            self.status = "the only pane cannot be deactivated".into();
+            return;
+        }
+        if pane_index >= before {
+            self.pane_settings.close();
+            self.status = format!("pane {} is no longer available", pane_index + 1);
+            return;
+        }
+
+        let current = self.layout.size();
+        let remaining = before - 1;
+        let next = current.compact_for_count(remaining);
+        let old_to_new = pane_index_map_after_removal(before, pane_index);
+        let removed_pane = self.panes.remove(pane_index);
+        let removed_id = removed_pane.id();
+
+        if pane_index < self.pane_idle.len() {
+            self.pane_idle.remove(pane_index);
+        }
+        if pane_index < self.pane_names.len() {
+            self.pane_names.remove(pane_index);
+        }
+        self.focus = focused_index_after_removal(self.focus, pane_index, remaining);
+        self.selected = remap_index_set(&self.selected, &old_to_new);
+        self.sleeping = remap_index_set(&self.sleeping, &old_to_new);
+        self.text_selection = self.text_selection.and_then(|selection| {
+            old_to_new
+                .get(&selection.pane)
+                .copied()
+                .map(|pane| MouseSelection { pane, ..selection })
+        });
+        self.follow_up = self.follow_up.and_then(|prompt| {
+            old_to_new
+                .get(&prompt.pane_index)
+                .copied()
+                .map(|pane_index| FollowUpPromptState {
+                    pane_index,
+                    ..prompt
+                })
+        });
+        self.previous_panes.cursor = old_to_new
+            .get(&self.previous_panes.cursor)
+            .copied()
+            .unwrap_or_else(|| pane_index.min(remaining - 1));
+        self.pane_settings.close();
+        self.rects.clear();
+        self.layout.set_size(next);
+
+        self.pane_render_cache.borrow_mut().remove(&removed_id);
+        self.conversation_cache.borrow_mut().remove(&removed_id);
+        self.applied_workloads.remove(&removed_id);
+
+        let next_plan = self.launch_plan.as_mut().map(|plan| {
+            if pane_index < plan.panes.len() {
+                plan.panes.remove(pane_index);
+            }
+            plan.grid = next;
+            plan.clone()
+        });
+        if let Some(plan) = next_plan.as_ref() {
+            self.start_usage_monitor(plan);
+        }
+
+        drop(removed_pane);
+        self.status = if next != current {
+            format!(
+                "deactivated pane {}; grid compacted to {}x{}",
+                pane_index + 1,
+                next.rows,
+                next.columns
+            )
+        } else {
+            format!(
+                "deactivated pane {}; {remaining} panes remain in {}x{}",
+                pane_index + 1,
+                next.rows,
+                next.columns
+            )
+        };
     }
 
     fn toggle_sleep_for_targets(&mut self) {
@@ -7488,6 +7601,24 @@ fn grid_resize_slots(current: GridSize, next: GridSize, pane_count: usize) -> Ve
     slots
 }
 
+fn pane_index_map_after_removal(pane_count: usize, removed: usize) -> BTreeMap<usize, usize> {
+    (0..pane_count)
+        .filter(|index| *index != removed)
+        .enumerate()
+        .map(|(new, old)| (old, new))
+        .collect()
+}
+
+fn focused_index_after_removal(focus: usize, removed: usize, remaining: usize) -> usize {
+    if focus < removed {
+        focus
+    } else if focus > removed {
+        focus - 1
+    } else {
+        removed.min(remaining.saturating_sub(1))
+    }
+}
+
 fn remap_index_set(
     indices: &BTreeSet<usize>,
     old_to_new: &BTreeMap<usize, usize>,
@@ -7909,6 +8040,22 @@ mod tests {
             .collect();
 
         assert_eq!(resized_focus_index(5, current, next, &old_to_new), 3);
+    }
+
+    #[test]
+    fn removing_a_pane_compacts_following_indices() {
+        assert_eq!(
+            pane_index_map_after_removal(6, 2),
+            BTreeMap::from([(0, 0), (1, 1), (3, 2), (4, 3), (5, 4)])
+        );
+    }
+
+    #[test]
+    fn removing_the_focused_pane_chooses_the_nearest_remaining_pane() {
+        assert_eq!(focused_index_after_removal(2, 2, 5), 2);
+        assert_eq!(focused_index_after_removal(5, 5, 5), 4);
+        assert_eq!(focused_index_after_removal(4, 2, 5), 3);
+        assert_eq!(focused_index_after_removal(1, 2, 5), 1);
     }
 
     #[test]
@@ -8494,6 +8641,7 @@ mod tests {
                 PaneSettingsTarget::Rename,
                 PaneSettingsTarget::Reload,
                 PaneSettingsTarget::Sleep,
+                PaneSettingsTarget::Deactivate,
                 PaneSettingsTarget::Goal,
             ]
         );
@@ -8504,6 +8652,7 @@ mod tests {
                 PaneSettingsTarget::Rename,
                 PaneSettingsTarget::Reload,
                 PaneSettingsTarget::Sleep,
+                PaneSettingsTarget::Deactivate,
                 PaneSettingsTarget::Goal,
             ]
         );
@@ -8513,6 +8662,7 @@ mod tests {
                 PaneSettingsTarget::Rename,
                 PaneSettingsTarget::Reload,
                 PaneSettingsTarget::Sleep,
+                PaneSettingsTarget::Deactivate,
                 PaneSettingsTarget::Goal,
                 PaneSettingsTarget::StopGoal,
             ]
@@ -8524,6 +8674,7 @@ mod tests {
                 PaneSettingsTarget::Rename,
                 PaneSettingsTarget::Reload,
                 PaneSettingsTarget::Sleep,
+                PaneSettingsTarget::Deactivate,
                 PaneSettingsTarget::Goal,
                 PaneSettingsTarget::StopGoal,
             ]
@@ -8543,7 +8694,7 @@ mod tests {
         assert_eq!(settings.selected_target, PaneSettingsTarget::Sleep);
         settings.selected_target = PaneSettingsTarget::StopGoal;
         settings.move_target(-1, false, false);
-        assert_eq!(settings.selected_target, PaneSettingsTarget::Sleep);
+        assert_eq!(settings.selected_target, PaneSettingsTarget::Deactivate);
     }
 
     #[test]

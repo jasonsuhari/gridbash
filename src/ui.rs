@@ -36,6 +36,7 @@ pub struct DrawState {
     pub pane_settings_rename_button: Option<Rect>,
     pub pane_settings_reload_button: Option<Rect>,
     pub pane_settings_sleep_button: Option<Rect>,
+    pub pane_settings_deactivate_button: Option<Rect>,
     pub pane_settings_goal_button: Option<Rect>,
     pub pane_settings_stop_goal_button: Option<Rect>,
 }
@@ -118,6 +119,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let mut pane_settings_rename_button = None;
     let mut pane_settings_reload_button = None;
     let mut pane_settings_sleep_button = None;
+    let mut pane_settings_deactivate_button = None;
     let mut pane_settings_goal_button = None;
     let mut pane_settings_stop_goal_button = None;
     render_tabs(frame, tab_area, &app.tab_labels(), palette);
@@ -250,6 +252,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         pane_settings_rename_button = buttons.rename;
         pane_settings_reload_button = buttons.reload;
         pane_settings_sleep_button = buttons.sleep;
+        pane_settings_deactivate_button = buttons.deactivate;
         pane_settings_goal_button = buttons.goal;
         pane_settings_stop_goal_button = buttons.stop_goal;
     } else if let Some(dialog) = follow_up_dialog.as_ref() {
@@ -291,6 +294,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         pane_settings_rename_button,
         pane_settings_reload_button,
         pane_settings_sleep_button,
+        pane_settings_deactivate_button,
         pane_settings_goal_button,
         pane_settings_stop_goal_button,
     }
@@ -712,6 +716,11 @@ fn render_pane_settings(
         rename: pane_settings_rename_rect(inner, view.auth_kind.is_some()),
         reload: pane_settings_reload_rect(inner, view.auth_kind.is_some()),
         sleep: pane_settings_sleep_rect(inner, view.auth_kind.is_some(), view.goal.is_some()),
+        deactivate: pane_settings_deactivate_rect(
+            inner,
+            view.auth_kind.is_some(),
+            view.goal.is_some(),
+        ),
         goal: pane_settings_goal_rect(inner, view.auth_kind.is_some(), view.goal.is_some()),
         stop_goal: pane_settings_stop_goal_rect(
             inner,
@@ -726,6 +735,7 @@ struct PaneSettingsButtons {
     rename: Option<Rect>,
     reload: Option<Rect>,
     sleep: Option<Rect>,
+    deactivate: Option<Rect>,
     goal: Option<Rect>,
     stop_goal: Option<Rect>,
 }
@@ -813,6 +823,11 @@ fn pane_settings_lines(
             view.sleeping,
             palette,
             view.selected_target == PaneSettingsTarget::Sleep,
+        ));
+        lines.push(pane_settings_deactivate_line(
+            width,
+            palette,
+            view.selected_target == PaneSettingsTarget::Deactivate,
         ));
         lines.push(pane_settings_goal_line(
             width,
@@ -958,6 +973,11 @@ fn pane_settings_lines(
         palette,
         view.selected_target == PaneSettingsTarget::Sleep,
     ));
+    lines.push(pane_settings_deactivate_line(
+        width,
+        palette,
+        view.selected_target == PaneSettingsTarget::Deactivate,
+    ));
     lines.push(pane_settings_goal_line(
         width,
         view.goal.is_some(),
@@ -1048,6 +1068,14 @@ fn pane_settings_sleep_line(
         palette.quiet(),
         selected,
     )
+}
+
+fn pane_settings_deactivate_line(
+    width: u16,
+    palette: &GridPalette,
+    selected: bool,
+) -> Line<'static> {
+    pane_settings_action_line("[ Deactivate pane ]", width, palette.exited(), selected)
 }
 
 fn pane_settings_goal_line(
@@ -1176,7 +1204,7 @@ fn pane_settings_sleep_rect(area: Rect, has_auth: bool, has_goal: bool) -> Optio
     pane_settings_action_rect(area, row)
 }
 
-fn pane_settings_goal_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
+fn pane_settings_deactivate_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
     let row = if area.width < 36 {
         if has_auth { 6 } else { 5 }
     } else if has_goal {
@@ -1187,14 +1215,25 @@ fn pane_settings_goal_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option
     pane_settings_action_rect(area, row)
 }
 
+fn pane_settings_goal_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
+    let row = if area.width < 36 {
+        if has_auth { 7 } else { 6 }
+    } else if has_goal {
+        12
+    } else {
+        11
+    };
+    pane_settings_action_rect(area, row)
+}
+
 fn pane_settings_stop_goal_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
     if !has_goal {
         return None;
     }
     let row = if area.width < 36 {
-        if has_auth { 7 } else { 6 }
+        if has_auth { 8 } else { 7 }
     } else {
-        12
+        13
     };
     pane_settings_action_rect(area, row)
 }
@@ -3123,6 +3162,7 @@ mod tests {
             .join("\n");
         assert!(wide.contains("RECENT ACTIVITY"));
         assert!(wide.contains("summary  all focused tests passed"));
+        assert!(wide.contains("Deactivate pane"));
         assert!(!wide.contains("run the focused tests"));
 
         let narrow = pane_settings_lines(&view, 30, &GridPalette::default())
@@ -3131,6 +3171,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(narrow.contains("latest: all focused tests"));
+        assert!(narrow.contains("Deactivate pane"));
     }
 
     #[test]
@@ -3164,12 +3205,16 @@ mod tests {
             Some(Rect::new(5, 19, 40, 1))
         );
         assert_eq!(
+            pane_settings_deactivate_rect(Rect::new(5, 10, 40, 14), false, false),
+            Some(Rect::new(5, 20, 40, 1))
+        );
+        assert_eq!(
             pane_settings_goal_rect(Rect::new(5, 10, 40, 14), false, true),
-            Some(Rect::new(5, 21, 40, 1))
+            Some(Rect::new(5, 22, 40, 1))
         );
         assert_eq!(
             pane_settings_stop_goal_rect(Rect::new(5, 10, 40, 14), false, true),
-            Some(Rect::new(5, 22, 40, 1))
+            Some(Rect::new(5, 23, 40, 1))
         );
         assert_eq!(
             pane_settings_stop_goal_rect(Rect::new(5, 10, 40, 14), false, false),
