@@ -907,7 +907,9 @@ fn pane_settings_lines(
     }
     lines.push(settings_section(
         "RECENT ACTIVITY",
-        "latest meaningful terminal output",
+        view.history_notice
+            .as_deref()
+            .unwrap_or("latest AI activity summary"),
         width,
     ));
     lines.push(Line::from(vec![
@@ -2090,13 +2092,13 @@ fn manager_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         Line::from(""),
         settings_section(
             "GRID MANAGER API",
-            "one goal manager orchestrates all awake panes in the current grid",
+            "powers grid goals and optional AI activity summaries",
             width,
         ),
         Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                "Uses an OpenAI-compatible chat-completions endpoint. The key is masked here and saved only in your local config.",
+                "AI summaries are opt-in. When enabled, bounded active-tab output is sent to this endpoint. The key stays in your local config.",
                 Style::default().fg(SETTINGS_MUTED),
             ),
         ]),
@@ -2111,7 +2113,7 @@ fn manager_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         command_key("Up/Down"),
         Span::styled(" move  ", Style::default().fg(Color::Gray)),
         command_key("Enter"),
-        Span::styled(" edit/save  ", Style::default().fg(Color::Gray)),
+        Span::styled(" toggle/edit/save  ", Style::default().fg(Color::Gray)),
         command_key("Esc"),
         Span::styled(" cancel/close", Style::default().fg(Color::Gray)),
     ]));
@@ -2242,7 +2244,7 @@ fn push_settings_group(
     }
 }
 
-fn settings_section(title: &'static str, helper: &'static str, width: u16) -> Line<'static> {
+fn settings_section(title: &str, helper: &str, width: u16) -> Line<'static> {
     let used = 2 + title.len() + 2;
     let helper = width
         .checked_sub(used as u16)
@@ -2251,7 +2253,7 @@ fn settings_section(title: &'static str, helper: &'static str, width: u16) -> Li
     let mut spans = vec![
         Span::raw("  "),
         Span::styled(
-            title,
+            title.to_string(),
             Style::default()
                 .fg(SETTINGS_BORDER)
                 .add_modifier(Modifier::BOLD),
@@ -3098,6 +3100,7 @@ mod tests {
             folder: "gridbash".into(),
             worktree: Some("feat/activity-summary".into()),
             history_summary: "all focused tests passed".into(),
+            history_notice: None,
             focused: true,
             selected: false,
             sleeping: false,
@@ -3228,6 +3231,7 @@ mod tests {
             folder: "gridbash".into(),
             worktree: None,
             history_summary: "Assistant: ready".into(),
+            history_notice: None,
             focused: true,
             selected: false,
             sleeping: false,

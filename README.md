@@ -45,7 +45,7 @@ The npm package installs only the native binary for your current platform.
 - **Agent-first profiles.** Launch Codex, Claude, Gemini, Aider, OpenCode, Goose,
   Amp, Cursor, Copilot, shells, or custom commands.
 - **Built-in workflow tools.** Resize grids, restore sessions, dictate prompts,
-  inspect pane activity, and let a manager route targeted follow-ups.
+  inspect stable pane activity, and optionally generate concise AI work summaries.
 
 ## Common commands
 

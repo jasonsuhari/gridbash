@@ -171,6 +171,8 @@ impl UiPalette {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagerConfig {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub activity_summaries: bool,
     #[serde(default = "ManagerConfig::default_endpoint")]
     pub endpoint: String,
     #[serde(default = "ManagerConfig::default_model")]
@@ -182,6 +184,7 @@ pub struct ManagerConfig {
 impl Default for ManagerConfig {
     fn default() -> Self {
         Self {
+            activity_summaries: false,
             endpoint: Self::default_endpoint(),
             model: Self::default_model(),
             api_key: String::new(),
@@ -218,7 +221,8 @@ impl ManagerConfig {
     }
 
     fn is_empty(&self) -> bool {
-        self.endpoint == Self::default_endpoint()
+        !self.activity_summaries
+            && self.endpoint == Self::default_endpoint()
             && self.model == Self::default_model()
             && self.api_key.is_empty()
     }
@@ -544,6 +548,7 @@ mod tests {
         let config: Config = toml::from_str(
             r#"
             [manager]
+            activity_summaries = true
             endpoint = "https://example.test/v1/chat/completions"
             model = "local-model"
             api_key = "secret"
@@ -552,9 +557,18 @@ mod tests {
         .expect("parse config");
 
         assert!(config.manager.is_configured());
+        assert!(config.manager.activity_summaries);
         assert_eq!(config.manager.model, "local-model");
         let serialized = toml::to_string(&config).expect("serialize config");
         assert!(serialized.contains("[manager]"));
         assert!(serialized.contains("api_key = \"secret\""));
+    }
+
+    #[test]
+    fn activity_summaries_require_explicit_opt_in() {
+        let config = Config::default();
+        assert!(!config.manager.activity_summaries);
+        let serialized = toml::to_string(&config).expect("serialize default config");
+        assert!(!serialized.contains("activity_summaries"));
     }
 }

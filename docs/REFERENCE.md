@@ -169,7 +169,7 @@ If the focused pane exits, Enter, `r`, or `t` restarts it, while `z` sleeps it. 
 
 The resize picker starts from the current dimensions and shows each existing pane's latest activity summary when one is available. Shrinking a grid deactivates live panes outside the retained upper-left rectangle; changing `3x3` to `3x2`, for example, removes the rightmost column.
 
-A pane's top border shows its latest activity summary. A configured manager goal replaces that summary across the grid until removed. A quiet marker appears after roughly three seconds without output; it indicates output followed by inactivity, not completion or process exit. Saving a blank pane name restores its default number.
+A pane's top border shows a stable activity state by default. Opt-in AI activity summaries replace that state with a concise work headline after output settles; GridBash never uses raw typing or terminal UI fragments as the displayed summary. A configured manager goal replaces pane summaries across the grid until removed. A quiet marker appears after roughly three seconds without output; it indicates output followed by inactivity, not completion or process exit. Saving a blank pane name restores its default number.
 
 ## Voice mode
 
@@ -269,6 +269,7 @@ scrollback_rows = 10000
 refresh_ms = 16
 
 [manager]
+activity_summaries = false # opt in before pane output is sent
 endpoint = "https://api.openai.com/v1/chat/completions"
 model = "gpt-4o-mini"
 api_key = "sk-..."
@@ -295,6 +296,8 @@ Settings persist compact titles, activity badges, quit confirmation, new-pane sc
 ### Grid manager
 
 The manager uses the OpenAI-compatible chat-completions endpoint, model, and API key under `[manager]`. These values can also be edited in Settings > Manager. The UI masks the API key, but the key is stored in the local TOML file.
+
+AI activity summaries are disabled by default. Enable them separately in Settings > Manager only when you want bounded recent output from eligible panes in the active tab sent to the configured endpoint. GridBash batches panes after roughly three seconds of quiet output, rate-limits automatic refreshes, pauses them while a manager goal is present, and preserves the last successful headline across temporary API failures. The Pane Activity refresh control requests an immediate update; pending input is never used as a displayed summary.
 
 Alt+G creates a goal for the current grid. Each review sends pane role and folder metadata plus bounded recent output from every awake pane to the configured API. Sleeping and exited panes are omitted from reviews and are never command targets. Reviews label output by pane, and validated follow-ups remain bound to their intended PTYs if panes are reordered.
 

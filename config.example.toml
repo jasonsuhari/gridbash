@@ -21,6 +21,7 @@ quiet = "dark-gray"
 exited = "red"
 
 [manager]
+activity_summaries = false # opt in: sends bounded active-tab output to this API
 endpoint = "https://api.openai.com/v1/chat/completions"
 model = "gpt-4o-mini"
 api_key = ""
