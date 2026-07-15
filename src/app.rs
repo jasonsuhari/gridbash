@@ -25,7 +25,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect, style::Color, text::Line};
+use ratatui::{Frame, Terminal, backend::CrosstermBackend, layout::Rect, style::Color};
 use tokio::sync::mpsc;
 use vt100::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 
@@ -2294,7 +2294,9 @@ impl App {
             immediate_render |= self.decay_activity();
             immediate_render |= self.update_follow_up_prompt();
             immediate_render |= self.schedule_goal_reviews();
-            immediate_render |= self.refresh_workload_classes();
+            if immediate_render {
+                immediate_render |= self.refresh_workload_classes();
+            }
 
             if immediate_render || (output_render && last_render.elapsed() >= frame_interval) {
                 terminal.draw(|frame| {
@@ -2350,7 +2352,10 @@ impl App {
                 self.terminal_focused = true;
                 *needs_render = true;
             }
-            Event::FocusLost => self.terminal_focused = false,
+            Event::FocusLost => {
+                self.terminal_focused = false;
+                *needs_render = true;
+            }
             Event::Paste(text) if self.tab_rename.open => {
                 self.tab_rename.insert_text(&text);
                 *needs_render = true;
@@ -2477,15 +2482,26 @@ impl App {
     }
 
     fn drain_pty_events(&mut self) -> bool {
+        let should_poll_exits = self.last_exit_poll.elapsed() >= EXIT_POLL_INTERVAL;
+        let Ok(first_event) = self.event_rx.try_recv() else {
+            return should_poll_exits && self.poll_exited_panes();
+        };
+
         let mut changed = false;
         let routes = self.pane_routes();
-        let mut pending_output = BTreeMap::<(PaneId, u64), Vec<u8>>::new();
+        let mut pending_output = HashMap::<(PaneId, u64), Vec<u8>>::new();
+        let mut pending_output_order = Vec::new();
         let mut exited = Vec::new();
         let mut budget = PtyDrainBudget::new();
+        let mut next_event = Some(first_event);
 
         while budget.allows_more() {
-            let Ok(event) = self.event_rx.try_recv() else {
-                break;
+            let event = match next_event.take() {
+                Some(event) => event,
+                None => match self.event_rx.try_recv() {
+                    Ok(event) => event,
+                    Err(_) => break,
+                },
             };
             match event {
                 PtyEvent::Output {
@@ -2494,10 +2510,16 @@ impl App {
                     bytes,
                 } => {
                     budget.record(bytes.len());
-                    pending_output
-                        .entry((pane, generation))
-                        .or_default()
-                        .extend(bytes);
+                    let key = (pane, generation);
+                    match pending_output.entry(key) {
+                        std::collections::hash_map::Entry::Occupied(mut output) => {
+                            output.get_mut().extend(bytes);
+                        }
+                        std::collections::hash_map::Entry::Vacant(output) => {
+                            pending_output_order.push(key);
+                            output.insert(bytes);
+                        }
+                    }
                 }
                 PtyEvent::Exited { pane, generation } => {
                     budget.record(0);
@@ -2533,7 +2555,10 @@ impl App {
             }
         }
 
-        for ((pane, generation), bytes) in pending_output {
+        for (pane, generation) in pending_output_order {
+            let bytes = pending_output
+                .remove(&(pane, generation))
+                .expect("pending output order and batches stay in sync");
             match routes.get(&(pane, generation)).copied() {
                 Some(PaneRoute::Visible(index)) => {
                     let target = &mut self.panes[index];
@@ -2585,26 +2610,32 @@ impl App {
             }
         }
 
-        if self.last_exit_poll.elapsed() >= EXIT_POLL_INTERVAL {
-            for (index, pane) in self.panes.iter_mut().enumerate() {
-                if pane.poll_exit() {
-                    if self
-                        .follow_up
-                        .is_some_and(|prompt| prompt.pane_index == index)
-                    {
-                        self.follow_up = None;
-                    }
-                    changed = true;
-                }
-            }
-            for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
-                for pane in &mut tab.panes {
-                    changed |= pane.poll_exit();
-                }
-            }
-            self.last_exit_poll = Instant::now();
+        if should_poll_exits {
+            changed |= self.poll_exited_panes();
         }
 
+        changed
+    }
+
+    fn poll_exited_panes(&mut self) -> bool {
+        let mut changed = false;
+        for (index, pane) in self.panes.iter_mut().enumerate() {
+            if pane.poll_exit() {
+                if self
+                    .follow_up
+                    .is_some_and(|prompt| prompt.pane_index == index)
+                {
+                    self.follow_up = None;
+                }
+                changed = true;
+            }
+        }
+        for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
+            for pane in &mut tab.panes {
+                changed |= pane.poll_exit();
+            }
+        }
+        self.last_exit_poll = Instant::now();
         changed
     }
 
@@ -5508,25 +5539,25 @@ impl App {
         }
     }
 
-    pub fn pane_screen_lines(
+    pub fn render_pane_screen(
         &self,
+        frame: &mut Frame<'_>,
         index: usize,
-        width: u16,
-        height: u16,
+        area: Rect,
         selection: Option<PaneSelection>,
-    ) -> Vec<Line<'static>> {
+    ) {
         let Some(pane) = self.panes.get(index) else {
-            return Vec::new();
+            return;
         };
         let mut caches = self.pane_render_cache.borrow_mut();
-        ui::cached_screen_lines(
+        ui::render_cached_screen(
+            frame,
+            area,
             caches.entry(pane.id()).or_default(),
             pane.screen_revision(),
             pane.screen(),
-            width,
-            height,
             selection,
-        )
+        );
     }
 
     pub fn focused_pane(&self) -> Option<usize> {
