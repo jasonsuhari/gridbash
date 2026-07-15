@@ -148,6 +148,7 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+h / F1 | Open or close help. |
 | Alt+p | Open the focused-pane activity summary. |
 | Alt+Shift+P | Open the previous-panes list. |
+| Alt+Shift+A | Open Auth Profiles to manage accounts or assign one to the focused pane. |
 | Alt+r | Rename the focused pane. |
 | Alt+Shift+R | Rename the current tab. |
 | Alt+Shift+T | Restart the exited focused pane, or all exited selected panes. |
@@ -162,7 +163,7 @@ Drag selection is contained to its source pane and copies through the standard O
 
 When multiple panes are selected, typing is broadcast to them. With zero or one selected pane, input goes only to the focused pane. The Alt+c command line captures its output and runs Enter-submitted commands in the cwd shown in its prompt.
 
-Pane Activity provides auth, rename, refresh, sleep/wake, and manager-goal controls. Navigate with Up/Down and activate with Enter or Space. Direct keys inside the view are `n` to rename, `r` to refresh, `z` to sleep or wake, `g` to edit the grid goal, and `u` to stop it. Close it with Esc, `q`, or Alt+p; Alt+o switches to overall settings.
+Pane Activity provides auth, rename, refresh, sleep/wake, and manager-goal controls. Navigate with Up/Down and activate with Enter or Space. Direct keys inside the view are `n` to rename, `r` to refresh, `z` to sleep or wake, `g` to edit the grid goal, and `u` to stop it. Close it with Esc, `q`, or Alt+p; Alt+Shift+A opens Auth Profiles and Alt+o switches to overall settings.
 
 If the focused pane exits, Enter, `r`, or `t` restarts it, while `z` sleeps it. Alt+Shift+T performs the same restart directly for exited target panes.
 
@@ -317,20 +318,26 @@ The old default was `~/.claude-profiles`; profiles are not moved automatically. 
 
 Assignment is manual by default: a new pane uses the configured default for its agent kind, while an explicit per-pane selection is retained. With `auto_cycle = true`, new compatible panes are assigned round-robin across ready profiles of the same kind. Changing the policy does not restart panes already running.
 
+Press Alt+Shift+A to open the dedicated Auth Profiles view. A managed profile is an isolated Claude or Codex home: it keeps that account's login, agent settings, sessions, and usage separate from the normal agent home and from other profiles. The view keeps two actions distinct:
+
+- **Focused pane:** highlighting a compatible profile and pressing Enter assigns it immediately, which restarts that pane.
+- **New pane policy:** per-agent defaults or round-robin assignment apply only when compatible panes start. They do not change panes already running.
+
 ### Auth settings controls
 
 | Input | Action |
 | --- | --- |
 | Tab | Switch Settings tabs. |
 | Up / Down | Move through profiles. |
+| Enter | Assign the selected compatible profile to the focused pane and restart that pane. |
 | `d` | Make the selected profile the GridBash-wide default for its kind. |
-| `c` | Toggle manual assignment and auto-cycle for new panes. |
+| `c` | Toggle per-agent defaults and round-robin assignment for new panes. |
 | `n` | Create a profile directory. |
 | `l` | Open the selected profile's login command. |
 | `r` | Refresh local account and usage status. |
 | Esc / `q` | Close settings. |
 
-For a Claude or Codex pane, open Pane Activity with Alt+p, select the auth control with Up/Down, choose a compatible profile with Left/Right, and press Enter. Applying a different account restarts only that pane. Press `r` in Pane Activity to refresh its snapshot.
+The focused pane can also be switched from Pane Activity: press Alt+p, select the auth control with Up/Down, choose a compatible profile with Left/Right, and press Enter. Applying a different account restarts only that pane. Press `r` in Pane Activity to refresh its snapshot.
 
 Usage reporting is best-effort. GridBash reads local auth metadata, masks account email addresses, and makes short-timeout requests with `curl.exe` on Windows or `curl` on macOS only when the Auth view is refreshed. Disable it with `usage_status = false`.
 

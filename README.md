@@ -78,6 +78,7 @@ agents and shells.
 | `Alt+c` | Open or close the command line |
 | `Alt+n` / `Alt+t` | Open a new tab / switch tabs |
 | `Alt+p` | Open focused-pane activity |
+| `Alt+Shift+A` | Manage auth profiles and assign one to the focused pane |
 | `Alt+g` / `Alt+u` | Start or stop the grid manager goal |
 | `Alt+Shift+V` | Dictate one prompt without submitting it |
 | `Alt+o` | Open settings |
