@@ -35,7 +35,7 @@ Release target: unreleased
 
 - `cargo fmt --all -- --check`
 - `cargo check --tests`
-- `cargo test --release` (171 passed, 3 intentionally ignored)
+- `cargo test --release` (174 passed, 3 intentionally ignored)
 - `cargo clippy --all-targets -- -D warnings`
 - `npm run test:launcher` (11 passed)
 - `cargo build --release`
