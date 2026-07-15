@@ -150,4 +150,6 @@ Release maintainers should follow [docs/RELEASING.md](docs/RELEASING.md).
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
+Created and maintained by [Jason Matthew Suhari](https://www.jasonsuhari.com).
+
 GridBash is available under the [MIT License](LICENSE).
