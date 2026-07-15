@@ -3323,7 +3323,9 @@ impl App {
 
     fn open_grid_resizer(&mut self) {
         self.close_tab_modals();
-        self.grid_resizer = Some(GridPicker::new(self.layout.size()));
+        let pane_summaries = self.panes.iter().map(pane_activity_summary).collect();
+        self.grid_resizer =
+            Some(GridPicker::new(self.layout.size()).with_pane_summaries(pane_summaries));
         self.status = "grid resizer open".into();
     }
 
