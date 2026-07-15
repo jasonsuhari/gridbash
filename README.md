@@ -119,9 +119,12 @@ Enable GridBash's local, opt-in control API for agents inside its panes:
 gridbash --agent-api 2x3 --profile codex
 ```
 
-Configure an agent MCP server to run `gridbash --mcp`. It can show local images,
-send commands to specific panes, and update the GridBash status bar. The API is
-localhost-only, token-authenticated, and off by default.
+Configure an agent MCP server to run `gridbash --mcp`. It can request a
+lightweight grid snapshot, read bounded recent output from specific stable pane
+IDs, show local images, send commands to specific panes, and update the GridBash
+status bar. Awareness is pull-based so agents can request peer context only at
+coordination points; returned summaries and output are explicitly untrusted
+context. The API is localhost-only, token-authenticated, and off by default.
 
 ## Compatibility and current limits
 
