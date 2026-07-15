@@ -10,6 +10,7 @@ pub enum Action {
     TogglePaneSelection,
     ToggleSelectAll,
     ToggleSleep,
+    ToggleZoom,
     RestartExited,
     NewTab,
     NextTab,
@@ -29,7 +30,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const PALETTE: [Self; 23] = [
+    pub const PALETTE: [Self; 24] = [
         Self::FocusLeft,
         Self::FocusRight,
         Self::FocusUp,
@@ -37,6 +38,7 @@ impl Action {
         Self::TogglePaneSelection,
         Self::ToggleSelectAll,
         Self::ToggleSleep,
+        Self::ToggleZoom,
         Self::RestartExited,
         Self::NewTab,
         Self::NextTab,
@@ -65,6 +67,7 @@ impl Action {
             Self::TogglePaneSelection => "toggle-pane-selection",
             Self::ToggleSelectAll => "toggle-select-all",
             Self::ToggleSleep => "toggle-sleep",
+            Self::ToggleZoom => "toggle-zoom",
             Self::RestartExited => "restart-exited",
             Self::NewTab => "new-tab",
             Self::NextTab => "next-tab",
@@ -94,6 +97,7 @@ impl Action {
             Self::TogglePaneSelection => "Pane: Toggle selection",
             Self::ToggleSelectAll => "Pane: Select or clear all",
             Self::ToggleSleep => "Pane: Sleep or wake",
+            Self::ToggleZoom => "Pane: Toggle focused zoom",
             Self::RestartExited => "Pane: Restart exited targets",
             Self::NewTab => "Tab: New tab",
             Self::NextTab => "Tab: Switch to next tab",
@@ -123,6 +127,7 @@ impl Action {
             Self::TogglePaneSelection => "pane toggle select selection target",
             Self::ToggleSelectAll => "pane select clear all selection targets",
             Self::ToggleSleep => "pane sleep wake pause resume targets",
+            Self::ToggleZoom => "pane zoom maximize fullscreen focus restore layout",
             Self::RestartExited => "pane restart exited dead targets",
             Self::NewTab => "tab new open grid",
             Self::NextTab => "tab switch next cycle grid",
@@ -152,6 +157,7 @@ impl Action {
             Self::TogglePaneSelection => "Alt+s",
             Self::ToggleSelectAll => "Alt+a",
             Self::ToggleSleep => "Alt+z",
+            Self::ToggleZoom => "Alt+f",
             Self::RestartExited => "Alt+Shift+t",
             Self::NewTab => "Alt+n",
             Self::NextTab => "Alt+t",
@@ -193,6 +199,7 @@ impl Action {
                     ('s', false) => Some(Self::TogglePaneSelection),
                     ('a', false) => Some(Self::ToggleSelectAll),
                     ('z', false) => Some(Self::ToggleSleep),
+                    ('f', false) => Some(Self::ToggleZoom),
                     ('t', true) => Some(Self::RestartExited),
                     ('t', false) => Some(Self::NextTab),
                     ('n', false) => Some(Self::NewTab),
