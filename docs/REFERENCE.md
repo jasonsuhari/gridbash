@@ -144,6 +144,7 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+s | Toggle selection of the focused pane. |
 | Alt+a | Select all panes, or clear the set when all are selected. |
 | Alt+c | Open or close the expanded command line. |
+| Alt+f | Zoom the focused pane to the full grid area, or restore the grid. |
 | Alt+Shift+V | Dictate one utterance, or cancel active listening. |
 | Alt+h / F1 | Open or close help. |
 | Alt+p | Open the focused-pane activity summary. |

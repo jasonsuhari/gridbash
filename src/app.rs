@@ -85,6 +85,7 @@ pub struct App {
     tab_title: String,
     launch_plan: Option<LaunchPlan>,
     layout: GridLayout,
+    zoomed: bool,
     grid_area: Rect,
     panes: Vec<PtyPane>,
     codex_sqlite: CodexSqlitePool,
@@ -168,6 +169,7 @@ struct GridTabSnapshot {
     title: String,
     launch_plan: Option<LaunchPlan>,
     layout: GridLayout,
+    zoomed: bool,
     panes: Vec<PtyPane>,
     pane_idle: Vec<PaneIdleState>,
     focus: usize,
@@ -1842,10 +1844,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     } else {
-        "Alt+arrows move | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     }
 }
@@ -1953,6 +1955,7 @@ impl App {
             tab_title: "Grid 1".into(),
             launch_plan: init.launch_plan,
             layout: GridLayout::new(init.grid),
+            zoomed: false,
             grid_area: Rect::default(),
             panes: Vec::new(),
             codex_sqlite: CodexSqlitePool::new()?,
@@ -2099,6 +2102,7 @@ impl App {
             title: mem::take(&mut self.tab_title),
             launch_plan: self.launch_plan.take(),
             layout: mem::replace(&mut self.layout, placeholder_layout),
+            zoomed: self.zoomed,
             panes: mem::take(&mut self.panes),
             pane_idle: mem::take(&mut self.pane_idle),
             focus: self.focus,
@@ -2115,6 +2119,7 @@ impl App {
         self.tab_title = tab.title;
         self.launch_plan = tab.launch_plan;
         self.layout = tab.layout;
+        self.zoomed = tab.zoomed;
         self.panes = tab.panes;
         self.pane_idle = tab.pane_idle;
         self.focus = tab.focus.min(self.panes.len().saturating_sub(1));
@@ -2151,6 +2156,7 @@ impl App {
         self.tab_title = title.clone();
         self.launch_plan = Some(plan.clone());
         self.layout = GridLayout::new(plan.grid);
+        self.zoomed = false;
         self.panes.clear();
         self.pane_idle.clear();
         self.focus = 0;
@@ -3274,6 +3280,10 @@ impl App {
                 self.swap_selected_tiles();
                 Ok(Some(false))
             }
+            'f' => {
+                self.toggle_zoom();
+                Ok(Some(false))
+            }
             'c' => {
                 self.command_line.toggle_focus();
                 self.status = self.focus_status();
@@ -3352,6 +3362,24 @@ impl App {
         }
         self.align_auth_cursor_to_focused_pane();
         self.start_auth_refresh();
+    }
+
+    fn toggle_zoom(&mut self) {
+        if self.panes.is_empty() {
+            self.status = "no pane to zoom".into();
+            return;
+        }
+
+        self.zoomed = !self.zoomed;
+        self.clear_text_selection();
+        self.status = if self.zoomed {
+            format!(
+                "zoomed pane {}; move focus to inspect another pane",
+                self.focus + 1
+            )
+        } else {
+            "restored grid layout".into()
+        };
     }
 
     fn handle_grid_resizer_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -5572,7 +5600,15 @@ impl App {
     }
 
     pub fn pane_rects(&self, area: Rect) -> Vec<Rect> {
-        self.layout.rects(area, self.panes.len())
+        if self.zoomed {
+            zoomed_pane_rects(area, self.panes.len(), self.focus)
+        } else {
+            self.layout.rects(area, self.panes.len())
+        }
+    }
+
+    pub fn zoomed(&self) -> bool {
+        self.zoomed
     }
 
     pub fn panes(&self) -> &[PtyPane] {
@@ -6034,6 +6070,9 @@ impl App {
 
     pub fn sync_pane_sizes(&mut self) {
         for (index, rect) in self.rects.iter().enumerate() {
+            if rect.width == 0 || rect.height == 0 {
+                continue;
+            }
             let Some(pane) = self.panes.get_mut(index) else {
                 continue;
             };
@@ -7334,6 +7373,14 @@ fn input_targets_for(focus: usize, selected: &BTreeSet<usize>, pane_count: usize
     }
 }
 
+fn zoomed_pane_rects(area: Rect, pane_count: usize, focus: usize) -> Vec<Rect> {
+    let mut rects = vec![Rect::default(); pane_count];
+    if let Some(rect) = rects.get_mut(focus.min(pane_count.saturating_sub(1))) {
+        *rect = area;
+    }
+    rects
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct RestartTargets {
     indices: Vec<usize>,
@@ -8176,6 +8223,24 @@ mod tests {
     fn input_targets_clamps_focus_to_available_panes() {
         assert_eq!(input_targets_for(8, &selected(&[]), 4), vec![3]);
         assert!(input_targets_for(0, &selected(&[]), 0).is_empty());
+    }
+
+    #[test]
+    fn zoomed_geometry_only_exposes_the_focused_pane() {
+        let area = Rect::new(2, 3, 120, 40);
+        let rects = zoomed_pane_rects(area, 4, 2);
+
+        assert_eq!(
+            rects,
+            vec![Rect::default(), Rect::default(), area, Rect::default()]
+        );
+    }
+
+    #[test]
+    fn zoomed_geometry_clamps_a_stale_focus() {
+        let area = Rect::new(0, 0, 80, 24);
+        assert_eq!(zoomed_pane_rects(area, 2, 9), vec![Rect::default(), area]);
+        assert!(zoomed_pane_rects(area, 0, 0).is_empty());
     }
 
     #[test]

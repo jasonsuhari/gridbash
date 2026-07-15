@@ -25,9 +25,9 @@ Issue: [#232](https://github.com/jasonsuhari/gridbash/issues/232)
 ## Validation
 
 - `cargo test auth -- --test-threads=1` (15 passed)
-- `cargo test` with `GRIDBASH_INVOKING_PROFILE` removed from the child test environment (169 passed, 1 ignored)
+- `cargo test` with `GRIDBASH_INVOKING_PROFILE` removed from the child test environment (171 passed, 1 ignored after merging current `main`)
 - `cargo clippy --all-targets -- -D warnings`
-- `npm test` with `GRIDBASH_INVOKING_PROFILE` removed from the child test environment (169 passed, 1 ignored)
+- `npm test` with `GRIDBASH_INVOKING_PROFILE` removed from the child test environment (171 passed, 1 ignored after merging current `main`)
 
 ## Release Notes
 
