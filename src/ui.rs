@@ -1,9 +1,10 @@
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Widget},
 };
 use vt100::Cell;
 
@@ -47,7 +48,7 @@ pub struct PaneRenderCache {
     width: u16,
     height: u16,
     selection: Option<PaneSelection>,
-    lines: Vec<Line<'static>>,
+    buffer: Buffer,
 }
 
 const QUIET_MARKER: &str = " *";
@@ -169,8 +170,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             render_sleeping_screen(frame, inner);
         } else {
             let selection = app.selection_for_pane(index);
-            let lines = app.pane_screen_lines(index, inner.width, inner.height, selection);
-            render_screen_lines(frame, inner, lines);
+            app.render_pane_screen(frame, index, inner, selection);
         }
 
         if focused && !sleeping && !modal_open && pane.screen().scrollback() == 0 {
@@ -237,7 +237,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(
-            " | Alt+h help | Alt+f zoom | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c CLI | Alt+Shift+V voice | Alt+p summary | Alt+Shift+p panes | Alt+x swap | Alt+z sleep | Alt+q quit",
+            " | Alt+h help | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c CLI | Alt+Shift+V voice | Alt+p summary | Alt+Shift+p panes | Alt+x swap | Alt+z sleep | Alt+q quit",
         ),
     ]);
     frame.render_widget(
@@ -1459,6 +1459,11 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &GridP
 
     frame.render_widget(Clear, modal);
 
+    let title = if app.settings_tab() == SettingsTab::Auth {
+        " Auth Profiles | Alt+Shift+A "
+    } else {
+        " GridBash Settings "
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(
@@ -1467,7 +1472,7 @@ fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &GridP
                 .add_modifier(Modifier::BOLD),
         )
         .style(settings_panel_style())
-        .title(" GridBash Settings ");
+        .title(title);
     let inner = block.inner(modal);
     frame.render_widget(block, modal);
     frame.render_widget(
@@ -2026,46 +2031,26 @@ fn auth_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let mut lines = vec![
         settings_tabs(SettingsTab::Auth),
         Line::from(""),
-        settings_section("LAUNCH POLICY", "applies to new compatible panes", width),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("Auth assignment", Style::default().fg(SETTINGS_TEXT)),
-            Span::raw("  "),
-            Span::styled(
-                if app.auth_auto_cycle() {
-                    "[ auto-cycle ]"
-                } else {
-                    "[ manual ]"
-                },
-                if app.auth_auto_cycle() {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(SETTINGS_BORDER)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                        .fg(Color::LightCyan)
-                        .bg(SETTINGS_SURFACE)
-                        .add_modifier(Modifier::BOLD)
-                },
-            ),
-            Span::raw("  "),
-            Span::styled(
-                if app.auth_auto_cycle() {
-                    "round-robin across ready accounts"
-                } else {
-                    "pane choices stay explicit"
-                },
-                Style::default().fg(SETTINGS_MUTED),
-            ),
-        ]),
+        settings_section(
+            "FOCUSED PANE",
+            "Enter applies the highlighted compatible profile and restarts this pane",
+            width,
+        ),
+        auth_focused_pane_line(app, width),
+        Line::from(""),
+        settings_section(
+            "NEW PANE POLICY",
+            "only affects panes when they start; running panes keep their current profile",
+            width,
+        ),
+        auth_new_pane_policy_line(app, width),
         Line::from(""),
         settings_section(
             "AUTH PROFILES",
             if app.auth_refreshing() {
                 "refreshing local account and usage status"
             } else {
-                "Claude and Codex defaults"
+                "isolated Claude/Codex homes; each keeps its own login and usage"
             },
             width,
         ),
@@ -2118,8 +2103,105 @@ fn auth_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
     }
 
     lines.push(Line::from(""));
-    lines.push(auth_command_bar(width));
+    lines.extend(auth_command_bar(width));
     lines
+}
+
+fn auth_focused_pane_line(app: &App, width: u16) -> Line<'static> {
+    let Some(pane) = app.auth_pane_view() else {
+        return Line::from(vec![
+            Span::raw("  "),
+            Span::styled("No focused pane.", Style::default().fg(SETTINGS_MUTED)),
+        ]);
+    };
+    let Some(kind) = pane.kind else {
+        return Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                truncate_text(
+                    &format!(
+                        "pane {} ({}) | managed auth only applies to Claude and Codex panes",
+                        pane.index + 1,
+                        pane.label
+                    ),
+                    width.saturating_sub(2) as usize,
+                ),
+                Style::default().fg(SETTINGS_MUTED),
+            ),
+        ]);
+    };
+
+    let current = pane.current_profile.as_deref().unwrap_or("normal login");
+    let action = app
+        .auth_profiles()
+        .get(app.auth_cursor())
+        .map(|profile| {
+            if profile.kind != kind {
+                format!("select a {} profile", kind.display_name())
+            } else if pane.current_profile.as_deref() == Some(profile.name.as_str()) {
+                "highlighted profile is current".into()
+            } else {
+                format!("Enter uses {} + restarts", profile.name)
+            }
+        })
+        .unwrap_or_else(|| "create or select a profile below".into());
+    let summary = format!(
+        "pane {} ({}) | {} | current: {} | {}",
+        pane.index + 1,
+        pane.label,
+        kind.display_name(),
+        current,
+        action
+    );
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            truncate_text(&summary, width.saturating_sub(2) as usize),
+            Style::default()
+                .fg(kind_color(kind))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn auth_new_pane_policy_line(app: &App, width: u16) -> Line<'static> {
+    let (mode, detail) = if app.auth_auto_cycle() {
+        (
+            "[ round-robin ]",
+            "rotate through every ready profile of the matching agent kind".to_string(),
+        )
+    } else {
+        let claude = app
+            .auth_default(AgentKind::Claude)
+            .unwrap_or("normal login");
+        let codex = app.auth_default(AgentKind::Codex).unwrap_or("normal login");
+        (
+            "[ per-agent defaults ]",
+            format!("Claude: {claude} | Codex: {codex}"),
+        )
+    };
+    let summary = truncate_text(
+        &format!("{mode}  {detail}"),
+        width.saturating_sub(2) as usize,
+    );
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            summary,
+            Style::default()
+                .fg(if app.auth_auto_cycle() {
+                    Color::Black
+                } else {
+                    Color::LightCyan
+                })
+                .bg(if app.auth_auto_cycle() {
+                    SETTINGS_BORDER
+                } else {
+                    SETTINGS_SURFACE
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
 }
 
 fn manager_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
@@ -2194,38 +2276,61 @@ fn auth_profile_row(
     ])
 }
 
-fn auth_command_bar(width: u16) -> Line<'static> {
+fn auth_command_bar(width: u16) -> Vec<Line<'static>> {
     if width < 58 {
-        return Line::from(vec![
+        return vec![
+            Line::from(vec![
+                Span::raw("  "),
+                command_key("Up/Down"),
+                Span::styled(" move  ", Style::default().fg(Color::Gray)),
+                command_key("Enter"),
+                Span::styled(" assign", Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                command_key("d"),
+                Span::styled(" default  ", Style::default().fg(Color::Gray)),
+                command_key("c"),
+                Span::styled(" policy  ", Style::default().fg(Color::Gray)),
+                command_key("Esc"),
+                Span::styled(" close", Style::default().fg(Color::Gray)),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                command_key("n"),
+                Span::styled(" new  ", Style::default().fg(Color::Gray)),
+                command_key("l"),
+                Span::styled(" login  ", Style::default().fg(Color::Gray)),
+                command_key("r"),
+                Span::styled(" refresh", Style::default().fg(Color::Gray)),
+            ]),
+        ];
+    }
+
+    vec![
+        Line::from(vec![
             Span::raw("  "),
             command_key("Up/Down"),
             Span::styled(" move  ", Style::default().fg(Color::Gray)),
+            command_key("Enter"),
+            Span::styled(" assign  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" close", Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::raw("  "),
             command_key("d"),
             Span::styled(" default  ", Style::default().fg(Color::Gray)),
             command_key("c"),
-            Span::styled(" cycle  ", Style::default().fg(Color::Gray)),
-            command_key("Esc"),
-            Span::styled(" close", Style::default().fg(Color::Gray)),
-        ]);
-    }
-
-    Line::from(vec![
-        Span::raw("  "),
-        command_key("Up/Down"),
-        Span::styled(" move  ", Style::default().fg(Color::Gray)),
-        command_key("d"),
-        Span::styled(" default  ", Style::default().fg(Color::Gray)),
-        command_key("c"),
-        Span::styled(" cycle  ", Style::default().fg(Color::Gray)),
-        command_key("n"),
-        Span::styled(" new  ", Style::default().fg(Color::Gray)),
-        command_key("l"),
-        Span::styled(" login  ", Style::default().fg(Color::Gray)),
-        command_key("r"),
-        Span::styled(" refresh  ", Style::default().fg(Color::Gray)),
-        command_key("Esc"),
-        Span::styled(" close", Style::default().fg(Color::Gray)),
-    ])
+            Span::styled(" policy  ", Style::default().fg(Color::Gray)),
+            command_key("n"),
+            Span::styled(" new  ", Style::default().fg(Color::Gray)),
+            command_key("l"),
+            Span::styled(" login  ", Style::default().fg(Color::Gray)),
+            command_key("r"),
+            Span::styled(" refresh", Style::default().fg(Color::Gray)),
+        ]),
+    ]
 }
 
 fn auth_create_command_bar() -> Line<'static> {
@@ -2537,11 +2642,12 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
         ("Alt+Shift+p", "show previous panes"),
         ("Alt+f", "zoom or restore focused pane"),
         ("Alt+l", "resize the grid"),
+        ("Alt+Shift+A", "manage and assign auth profiles"),
         ("Alt+r", "rename focused pane"),
         ("Alt+Shift+t", "restart exited panes"),
         ("Alt+z", "sleep or wake panes"),
         ("Alt+g / Alt+u", "start or stop grid goal"),
-        ("Alt+o", "open global settings/profiles"),
+        ("Alt+o", "open global settings"),
         ("Alt+Shift+V", "dictate without submitting"),
         ("Alt+q", "quit GridBash"),
         ("Alt+h / F1", "close this help"),
@@ -2787,53 +2893,77 @@ fn render_sleeping_screen(frame: &mut Frame<'_>, area: Rect) {
     }
 
     let style = Style::default().fg(Color::Black).bg(Color::Black);
-    let blank = " ".repeat(area.width as usize);
-    let lines = (0..area.height)
-        .map(|_| Line::from(Span::styled(blank.clone(), style)))
-        .collect::<Vec<_>>();
-
-    frame.render_widget(Paragraph::new(lines).style(style), area);
+    let buffer = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buffer[(x, y)];
+            cell.reset();
+            cell.set_style(style);
+        }
+    }
 }
 
-fn render_screen_lines(frame: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {
+pub fn render_cached_screen(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    cache: &mut PaneRenderCache,
+    revision: u64,
+    screen: &vt100::Screen,
+    selection: Option<PaneSelection>,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
-        area,
-    );
+    refresh_screen_cache(cache, revision, screen, area.width, area.height, selection);
+    blit_buffer(&cache.buffer, frame.buffer_mut(), area);
 }
 
-pub fn cached_screen_lines(
+fn refresh_screen_cache(
     cache: &mut PaneRenderCache,
     revision: u64,
     screen: &vt100::Screen,
     width: u16,
     height: u16,
     selection: Option<PaneSelection>,
-) -> Vec<Line<'static>> {
-    if width == 0 || height == 0 {
-        return Vec::new();
-    }
+) {
     if cache.revision == revision
         && cache.width == width
         && cache.height == height
         && cache.selection == selection
     {
-        return cache.lines.clone();
+        return;
     }
 
     let lines = (0..height)
         .map(|row| render_screen_row(screen, row, width, selection))
         .collect::<Vec<_>>();
+    let area = Rect::new(0, 0, width, height);
+    let mut buffer = Buffer::empty(area);
+    Widget::render(
+        Paragraph::new(lines).style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
+        area,
+        &mut buffer,
+    );
     cache.revision = revision;
     cache.width = width;
     cache.height = height;
     cache.selection = selection;
-    cache.lines.clone_from(&lines);
-    lines
+    cache.buffer = buffer;
+}
+
+fn blit_buffer(source: &Buffer, target: &mut Buffer, area: Rect) {
+    debug_assert_eq!(source.area.width, area.width);
+    debug_assert_eq!(source.area.height, area.height);
+    debug_assert_eq!(area.intersection(target.area), area);
+
+    let width = area.width as usize;
+    for row in 0..area.height {
+        let source_start = row as usize * width;
+        let target_start = target.index_of(area.x, area.y + row);
+        target.content[target_start..target_start + width]
+            .clone_from_slice(&source.content[source_start..source_start + width]);
+    }
 }
 
 fn render_screen_row<'a>(
@@ -3013,6 +3143,48 @@ fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "manual performance benchmark"]
+    fn benchmark_cached_screen_render() {
+        use std::{hint::black_box, time::Instant};
+
+        use ratatui::buffer::Buffer;
+
+        const ITERATIONS: usize = 5_000;
+        let mut parser = vt100::Parser::new(40, 120, 10_000);
+        let output = (0..40)
+            .map(|row| {
+                format!(
+                    "\x1b[38;5;{}mrow {row:02}: GridBash performance benchmark output with styled terminal cells\x1b[0m\r\n",
+                    32 + row
+                )
+            })
+            .collect::<String>();
+        parser.process(output.as_bytes());
+
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buffer = Buffer::empty(area);
+        let mut cache = PaneRenderCache::default();
+        let start = Instant::now();
+        for _ in 0..ITERATIONS {
+            refresh_screen_cache(
+                &mut cache,
+                1,
+                parser.screen(),
+                area.width,
+                area.height,
+                None,
+            );
+            blit_buffer(black_box(&cache.buffer), &mut buffer, area);
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "cached screen render: {ITERATIONS} iterations in {elapsed:?} ({:?}/iteration)",
+            elapsed / ITERATIONS as u32
+        );
+        black_box(buffer);
+    }
 
     #[test]
     fn idle_pane_has_no_state_badges() {
@@ -3266,6 +3438,20 @@ mod tests {
     }
 
     #[test]
+    fn auth_command_bar_distinguishes_pane_assignment_and_new_pane_policy() {
+        let text = auth_command_bar(100)
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("Enter"));
+        assert!(text.contains("assign"));
+        assert!(text.contains("default"));
+        assert!(text.contains("policy"));
+    }
+
+    #[test]
     fn pane_settings_render_one_selected_row_at_compact_and_wide_widths() {
         let view = PaneSettingsView {
             index: 0,
@@ -3348,13 +3534,14 @@ mod tests {
         parser.process(b"hello");
         let mut cache = PaneRenderCache::default();
 
-        let first = cached_screen_lines(&mut cache, 1, parser.screen(), 10, 2, None);
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 10, 2, None);
+        let first = cache.buffer.clone();
         parser.process(b" world");
-        let cached = cached_screen_lines(&mut cache, 1, parser.screen(), 10, 2, None);
-        assert_eq!(cached, first);
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 10, 2, None);
+        assert_eq!(cache.buffer, first);
 
-        let refreshed = cached_screen_lines(&mut cache, 2, parser.screen(), 10, 2, None);
-        assert_ne!(refreshed, first);
+        refresh_screen_cache(&mut cache, 2, parser.screen(), 10, 2, None);
+        assert_ne!(cache.buffer, first);
     }
 
     #[test]
@@ -3362,18 +3549,35 @@ mod tests {
         let mut parser = vt100::Parser::new(2, 10, 100);
         parser.process(b"hello");
         let mut cache = PaneRenderCache::default();
-        let plain = cached_screen_lines(&mut cache, 1, parser.screen(), 10, 2, None);
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 10, 2, None);
+        let plain = cache.buffer.clone();
         let selection = Some(PaneSelection {
             start_row: 0,
             start_column: 0,
             end_row: 0,
             end_column: 4,
         });
-        let selected = cached_screen_lines(&mut cache, 1, parser.screen(), 10, 2, selection);
-        assert_ne!(selected, plain);
-        assert_eq!(
-            cached_screen_lines(&mut cache, 1, parser.screen(), 5, 2, selection).len(),
-            2
-        );
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 10, 2, selection);
+        assert_ne!(cache.buffer, plain);
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 5, 2, selection);
+        assert_eq!(cache.buffer.area, Rect::new(0, 0, 5, 2));
+    }
+
+    #[test]
+    fn cached_screen_buffer_blits_at_the_pane_offset() {
+        let mut source = Buffer::empty(Rect::new(0, 0, 2, 2));
+        source[(0, 0)].set_symbol("A");
+        source[(1, 0)].set_symbol("B");
+        source[(0, 1)].set_symbol("C");
+        source[(1, 1)].set_symbol("D");
+        let mut target = Buffer::empty(Rect::new(0, 0, 6, 4));
+
+        blit_buffer(&source, &mut target, Rect::new(3, 1, 2, 2));
+
+        assert_eq!(target[(3, 1)].symbol(), "A");
+        assert_eq!(target[(4, 1)].symbol(), "B");
+        assert_eq!(target[(3, 2)].symbol(), "C");
+        assert_eq!(target[(4, 2)].symbol(), "D");
+        assert_eq!(target[(2, 1)].symbol(), " ");
     }
 }
