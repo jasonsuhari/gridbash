@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     env,
     ffi::OsString,
@@ -394,8 +395,8 @@ impl PtyPane {
     pub fn process_output(&mut self, bytes: &[u8]) -> String {
         self.update_cwd_from_osc7(bytes);
         self.parser.process(bytes);
-        let plain = plain_terminal_text(bytes);
-        self.append_plain_output(&plain);
+        let (plain, plain_chars) = plain_terminal_text_with_char_count(bytes);
+        self.append_plain_output(&plain, plain_chars);
         self.active = true;
         self.screen_revision = self.screen_revision.wrapping_add(1);
         self.output_activity.record_output(Instant::now());
@@ -521,15 +522,20 @@ impl PtyPane {
         if self.response_scan_tail.is_empty() && !bytes.contains(&0x1b) {
             return;
         }
-        let mut scan = Vec::with_capacity(self.response_scan_tail.len() + bytes.len());
-        scan.extend_from_slice(&self.response_scan_tail);
-        scan.extend_from_slice(bytes);
+        let scan = if self.response_scan_tail.is_empty() {
+            Cow::Borrowed(bytes)
+        } else {
+            let mut scan = Vec::with_capacity(self.response_scan_tail.len() + bytes.len());
+            scan.extend_from_slice(&self.response_scan_tail);
+            scan.extend_from_slice(bytes);
+            Cow::Owned(scan)
+        };
 
-        if contains_sequence(&scan, DEVICE_STATUS_QUERY) {
+        if contains_sequence(scan.as_ref(), DEVICE_STATUS_QUERY) {
             let _ = self.write(b"\x1b[0n");
         }
 
-        let cursor_position_requests = count_sequence(&scan, CURSOR_POSITION_QUERY);
+        let cursor_position_requests = count_sequence(scan.as_ref(), CURSOR_POSITION_QUERY);
         if cursor_position_requests > 0 {
             let (row, column) = self.parser.screen().cursor_position();
             let response = format!(
@@ -542,30 +548,37 @@ impl PtyPane {
             }
         }
 
-        if contains_sequence(&scan, PRIMARY_DEVICE_ATTRIBUTES_QUERY)
-            || contains_sequence(&scan, PRIMARY_DEVICE_ATTRIBUTES_ZERO_QUERY)
+        if contains_sequence(scan.as_ref(), PRIMARY_DEVICE_ATTRIBUTES_QUERY)
+            || contains_sequence(scan.as_ref(), PRIMARY_DEVICE_ATTRIBUTES_ZERO_QUERY)
         {
             let _ = self.write(b"\x1b[?1;2c");
         }
 
-        self.response_scan_tail = terminal_query_scan_tail(&scan);
+        self.response_scan_tail = terminal_query_scan_tail(scan.as_ref());
     }
 
     fn update_cwd_from_osc7(&mut self, bytes: &[u8]) {
         if self.osc_scan_tail.is_empty() && !bytes.contains(&0x1b) {
             return;
         }
-        let mut scan = Vec::with_capacity(self.osc_scan_tail.len() + bytes.len());
-        scan.extend_from_slice(&self.osc_scan_tail);
-        scan.extend_from_slice(bytes);
+        let scan = if self.osc_scan_tail.is_empty() {
+            Cow::Borrowed(bytes)
+        } else {
+            let mut scan = Vec::with_capacity(self.osc_scan_tail.len() + bytes.len());
+            scan.extend_from_slice(&self.osc_scan_tail);
+            scan.extend_from_slice(bytes);
+            Cow::Owned(scan)
+        };
 
-        for payload in osc_payloads(&scan) {
-            if let Some(path) = cwd_from_osc7_payload(payload) {
-                self.cwd = path;
+        if find_sequence(scan.as_ref(), b"\x1b]").is_some() {
+            for payload in osc_payloads(scan.as_ref()) {
+                if let Some(path) = cwd_from_osc7_payload(payload) {
+                    self.cwd = path;
+                }
             }
         }
 
-        self.osc_scan_tail = incomplete_osc_tail(&scan);
+        self.osc_scan_tail = incomplete_osc_tail(scan.as_ref());
     }
 
     pub fn terminate(&mut self) {
@@ -619,13 +632,13 @@ impl PtyPane {
         }
     }
 
-    fn append_plain_output(&mut self, plain: &str) {
+    fn append_plain_output(&mut self, plain: &str, plain_chars: usize) {
         if plain.is_empty() {
             return;
         }
 
         self.output_tail.push_str(plain);
-        self.output_tail_chars += plain.chars().count();
+        self.output_tail_chars += plain_chars;
         if self.output_tail_chars > OUTPUT_TAIL_TRIM_AT_CHARS {
             trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
             self.output_tail_chars = self.output_tail.chars().count();
@@ -1044,38 +1057,67 @@ fn history_replay_text(output_tail: &str, input_history: &[String]) -> String {
     replay
 }
 
-pub(crate) fn plain_terminal_text(bytes: &[u8]) -> String {
+#[cfg(test)]
+fn plain_terminal_text(bytes: &[u8]) -> String {
+    plain_terminal_text_with_char_count(bytes).0
+}
+
+fn plain_terminal_text_with_char_count(bytes: &[u8]) -> (String, usize) {
     let raw = String::from_utf8_lossy(bytes);
-    let mut plain = String::new();
-    let mut chars = raw.chars().peekable();
+    let bytes = raw.as_bytes();
+    let mut plain = String::with_capacity(bytes.len());
+    let mut plain_chars = 0;
+    let mut index = 0;
 
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            skip_escape_chars(&mut chars);
-            continue;
-        }
-
-        match ch {
-            '\r' => {
+    while index < bytes.len() {
+        match bytes[index] {
+            0x1b => index = skip_escape_sequence(bytes, index),
+            b'\r' | b'\n' => {
                 if !plain.ends_with('\n') {
                     plain.push('\n');
+                    plain_chars += 1;
                 }
+                index += 1;
             }
-            '\n' => {
-                if !plain.ends_with('\n') {
-                    plain.push('\n');
+            b'\t' => {
+                plain.push('\t');
+                plain_chars += 1;
+                index += 1;
+            }
+            0x08 => {
+                if plain.pop().is_some() {
+                    plain_chars -= 1;
                 }
+                index += 1;
             }
-            '\t' => plain.push(ch),
-            '\x08' => {
-                plain.pop();
+            byte if byte.is_ascii_control() => index += 1,
+            byte if byte.is_ascii() => {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && bytes[index].is_ascii()
+                    && !bytes[index].is_ascii_control()
+                {
+                    index += 1;
+                }
+                plain.push_str(&raw[start..index]);
+                plain_chars += index - start;
             }
-            ch if ch.is_control() => {}
-            ch => plain.push(ch),
+            _ => {
+                let ch = raw[index..]
+                    .chars()
+                    .next()
+                    .expect("index remains on a UTF-8 character boundary");
+                if !ch.is_control() {
+                    plain.push(ch);
+                    plain_chars += 1;
+                }
+                index += ch.len_utf8();
+            }
         }
     }
 
-    plain
+    (plain, plain_chars)
 }
 
 fn skip_escape_sequence(bytes: &[u8], start: usize) -> usize {
@@ -1119,35 +1161,6 @@ fn skip_escape_sequence(bytes: &[u8], start: usize) -> usize {
     }
 
     index
-}
-
-fn skip_escape_chars(chars: &mut std::iter::Peekable<impl Iterator<Item = char>>) {
-    let Some(kind) = chars.next() else {
-        return;
-    };
-    match kind {
-        '[' => {
-            for ch in chars.by_ref() {
-                if ('\u{40}'..='\u{7e}').contains(&ch) {
-                    break;
-                }
-            }
-        }
-        'O' => {
-            let _ = chars.next();
-        }
-        ']' => {
-            while let Some(ch) = chars.next() {
-                if ch == '\x07' {
-                    break;
-                }
-                if ch == '\x1b' && chars.next_if_eq(&'\\').is_some() {
-                    break;
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 fn incomplete_osc_tail(buffer: &[u8]) -> Vec<u8> {
@@ -1216,6 +1229,31 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    #[ignore = "manual performance benchmark"]
+    fn benchmark_plain_terminal_text() {
+        use std::hint::black_box;
+
+        const ITERATIONS: usize = 10_000;
+        let payload = (0..128)
+            .map(|index| {
+                format!(
+                    "\x1b[38;5;{}mGridBash output {index:03}: compile passed in 1.23s — 東京\x1b[0m\r\n",
+                    32 + index % 160
+                )
+            })
+            .collect::<String>();
+        let start = Instant::now();
+        for _ in 0..ITERATIONS {
+            black_box(plain_terminal_text(black_box(payload.as_bytes())));
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "plain terminal text: {ITERATIONS} iterations in {elapsed:?} ({:?}/iteration)",
+            elapsed / ITERATIONS as u32
+        );
+    }
 
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
 
@@ -1631,6 +1669,20 @@ mod tests {
         let plain = plain_terminal_text(b"\x1b[31mred\x1b[0m\r\nok\x1b]0;title\x07");
 
         assert_eq!(plain, "red\nok");
+    }
+
+    #[test]
+    fn plain_output_character_count_matches_filtered_unicode() {
+        for input in [
+            "plain ASCII output",
+            "Tokyo 東京 — ready",
+            "erase 東京\u{8}\u{8}京",
+            "\u{1b}[32mgreen\u{1b}[0m\r\nnext",
+            "visible\u{85}control",
+        ] {
+            let (plain, count) = plain_terminal_text_with_char_count(input.as_bytes());
+            assert_eq!(count, plain.chars().count(), "input: {input:?}");
+        }
     }
 
     #[cfg(windows)]
