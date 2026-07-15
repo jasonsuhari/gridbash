@@ -9,9 +9,10 @@ use vt100::Cell;
 
 use crate::{
     app::{
-        App, ExitedPaneRecoveryView, FollowUpDialog, GoalEditorView, GridPalette, PaneSelection,
-        PaneSettingsTarget, PaneSettingsView, PreviousPaneView, PreviousPanesView, RenamePaneView,
-        RenameTabView, SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
+        App, CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog, GoalEditorView,
+        GridPalette, PaneSelection, PaneSettingsTarget, PaneSettingsView, PreviousPaneView,
+        PreviousPanesView, RenamePaneView, RenameTabView, SettingsGroup, SettingsRow, SettingsTab,
+        SettingsValueKind, TabLabel,
     },
     auth::{AgentKind, AuthProfile},
     composer::GridPickerMode,
@@ -85,11 +86,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let follow_up_dialog = app.follow_up_dialog();
     let goal_editor_view = app.goal_editor_view();
     let pane_settings_view = app.pane_settings_view();
+    let command_palette_view = app.command_palette_view();
     let pane_settings_open = pane_settings_view.is_some();
     let grid_resizer = app.grid_resizer();
     let image_overlay = app.image_overlay_view();
     let help_open = app.help_open();
-    let exited_recovery = if help_open
+    let exited_recovery = if command_palette_view.is_some()
+        || help_open
         || app.settings_open()
         || previous_panes_view.is_some()
         || pane_settings_open
@@ -104,7 +107,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     } else {
         app.exited_recovery_view()
     };
-    let modal_open = help_open
+    let modal_open = command_palette_view.is_some()
+        || help_open
         || app.settings_open()
         || previous_panes_view.is_some()
         || pane_settings_open
@@ -235,7 +239,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(
-            " | Alt+h help | Alt+f zoom | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c CLI | Alt+Shift+V voice | Alt+p summary | Alt+Shift+p panes | Alt+x swap | Alt+z sleep | Alt+q quit",
+            " | Alt+k commands | Alt+h help | Alt+f zoom | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c CLI | Alt+Shift+V voice | Alt+p summary | Alt+Shift+p panes | Alt+x swap | Alt+z sleep | Alt+q quit",
         ),
     ]);
     frame.render_widget(
@@ -280,6 +284,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
     if help_open {
         render_help(frame, area, palette);
+    }
+    if let Some(view) = command_palette_view.as_ref() {
+        render_command_palette(frame, area, view, palette);
     }
 
     DrawState {
@@ -2486,6 +2493,7 @@ fn settings_panel_style() -> Style {
 fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
     const CONTROLS: &[(&str, &str)] = &[
         ("Alt+arrows", "move pane focus"),
+        ("Alt+k", "open searchable commands"),
         ("Alt+s", "toggle pane selection"),
         ("Alt+a", "select or clear all panes"),
         ("type/paste", "send to focused or selected panes"),
@@ -2556,6 +2564,92 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
             .style(Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)),
         modal,
     );
+}
+
+fn render_command_palette(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &CommandPaletteView,
+    palette: &GridPalette,
+) {
+    let width = area.width.saturating_sub(2).min(86).max(area.width.min(1));
+    let desired_height = (view.items.len() as u16).saturating_add(4).clamp(6, 18);
+    let height = desired_height
+        .min(area.height.saturating_sub(2))
+        .max(area.height.min(1));
+    let modal = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 3,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.accent()))
+        .title(" GridBash Commands ")
+        .title_bottom(" Enter runs | Up/Down selects | Esc closes ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let input_width = inner.width.saturating_sub(3) as usize;
+    let (query, cursor_offset) = visible_input(&view.query, view.cursor_chars, input_width);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "> ",
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(query, Style::default().fg(SETTINGS_TEXT)),
+    ])];
+
+    let item_count = inner.height.saturating_sub(1) as usize;
+    if view.items.is_empty() && item_count > 0 {
+        lines.push(Line::from(Span::styled(
+            "  No matching commands",
+            Style::default().fg(SETTINGS_MUTED),
+        )));
+    } else {
+        let start = view.selected.saturating_sub(item_count.saturating_sub(1));
+        for (index, item) in view.items.iter().enumerate().skip(start).take(item_count) {
+            let marker = if index == view.selected { ">" } else { " " };
+            let shortcut_width = item.shortcut.chars().count().min(18);
+            let label_width = inner
+                .width
+                .saturating_sub(shortcut_width as u16)
+                .saturating_sub(4) as usize;
+            let label = truncate_text(item.label, label_width);
+            let padding = " ".repeat(label_width.saturating_sub(label.chars().count()));
+            let style = if index == view.selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(palette.focus())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)
+            };
+            lines.push(
+                Line::from(format!(
+                    "{marker} {label}{padding}  {}",
+                    truncate_text(item.shortcut, shortcut_width)
+                ))
+                .style(style),
+            );
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines).style(settings_panel_style()), inner);
+    let cursor_x = inner
+        .x
+        .saturating_add(2)
+        .saturating_add(cursor_offset.min(input_width) as u16)
+        .min(inner.x.saturating_add(inner.width.saturating_sub(1)));
+    frame.set_cursor_position((cursor_x, inner.y));
 }
 
 fn help_control((key, action): (&str, &str), width: usize) -> String {
@@ -2974,6 +3068,39 @@ fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn command_palette_renders_at_narrow_sizes_and_handles_no_matches() {
+        let backend = TestBackend::new(24, 8);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let view = CommandPaletteView {
+            query: "missing 東京".into(),
+            cursor_chars: 10,
+            selected: 0,
+            items: Vec::new(),
+        };
+
+        terminal
+            .draw(|frame| {
+                render_command_palette(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render palette");
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("GridBash Commands"));
+        assert!(rendered.contains("No matching"));
+    }
 
     #[test]
     fn idle_pane_has_no_state_badges() {

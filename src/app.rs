@@ -30,6 +30,7 @@ use tokio::sync::mpsc;
 use vt100::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 
 use crate::{
+    actions::{Action, fuzzy_match_score},
     auth::{self, AgentKind, AuthProfile},
     cli::{Cli, GridMode},
     codex_sqlite::{CodexSqlitePool, PaneCodexSqlite},
@@ -103,6 +104,7 @@ pub struct App {
     rects: Vec<Rect>,
     mouse_enabled: bool,
     command_line: CommandLineState,
+    command_palette: CommandPaletteState,
     command_tx: mpsc::UnboundedSender<CommandRunEvent>,
     command_rx: mpsc::UnboundedReceiver<CommandRunEvent>,
     voice: VoiceInput,
@@ -689,6 +691,20 @@ pub struct RenameTabView {
 }
 
 #[derive(Debug, Clone)]
+pub struct CommandPaletteView {
+    pub query: String,
+    pub cursor_chars: usize,
+    pub selected: usize,
+    pub items: Vec<CommandPaletteItem>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandPaletteItem {
+    pub label: &'static str,
+    pub shortcut: &'static str,
+}
+
+#[derive(Debug, Clone)]
 pub struct PreviousPanesView {
     pub cursor: usize,
     pub panes: Vec<PreviousPaneView>,
@@ -1074,6 +1090,115 @@ struct CommandLineState {
     cursor: usize,
     output_lines: Vec<String>,
     running: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CommandPaletteState {
+    open: bool,
+    input: String,
+    cursor: usize,
+    selected: usize,
+}
+
+impl CommandPaletteState {
+    fn open(&mut self) {
+        self.open = true;
+        self.input.clear();
+        self.cursor = 0;
+        self.selected = 0;
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.input.clear();
+        self.cursor = 0;
+        self.selected = 0;
+    }
+
+    fn insert_text(&mut self, text: &str) {
+        for ch in text.chars().filter(|ch| !ch.is_control()) {
+            self.input.insert(self.cursor, ch);
+            self.cursor += ch.len_utf8();
+        }
+        self.selected = 0;
+    }
+
+    fn backspace(&mut self) -> bool {
+        let Some(previous) = previous_char_boundary(&self.input, self.cursor) else {
+            return false;
+        };
+        self.input.replace_range(previous..self.cursor, "");
+        self.cursor = previous;
+        self.selected = 0;
+        true
+    }
+
+    fn delete(&mut self) -> bool {
+        if self.cursor >= self.input.len() {
+            return false;
+        }
+        let next = next_char_boundary(&self.input, self.cursor);
+        self.input.replace_range(self.cursor..next, "");
+        self.selected = 0;
+        true
+    }
+
+    fn clear(&mut self) -> bool {
+        if self.input.is_empty() {
+            return false;
+        }
+        self.input.clear();
+        self.cursor = 0;
+        self.selected = 0;
+        true
+    }
+
+    fn move_cursor(&mut self, delta: isize) -> bool {
+        let next = if delta.is_negative() {
+            previous_char_boundary(&self.input, self.cursor).unwrap_or(self.cursor)
+        } else {
+            next_char_boundary(&self.input, self.cursor)
+        };
+        let changed = next != self.cursor;
+        self.cursor = next;
+        changed
+    }
+
+    fn move_to_start(&mut self) -> bool {
+        let changed = self.cursor != 0;
+        self.cursor = 0;
+        changed
+    }
+
+    fn move_to_end(&mut self) -> bool {
+        let changed = self.cursor != self.input.len();
+        self.cursor = self.input.len();
+        changed
+    }
+
+    fn matches(&self) -> Vec<Action> {
+        let mut actions = Action::PALETTE
+            .into_iter()
+            .filter_map(|action| {
+                fuzzy_match_score(&self.input, action).map(|score| (score, action))
+            })
+            .collect::<Vec<_>>();
+        actions.sort_by_key(|(score, action)| (*score, action.label()));
+        actions.into_iter().map(|(_, action)| action).collect()
+    }
+
+    fn move_selection(&mut self, delta: isize) {
+        let count = self.matches().len();
+        if count == 0 {
+            self.selected = 0;
+            return;
+        }
+        self.selected = (self.selected as isize + delta).rem_euclid(count as isize) as usize;
+    }
+
+    fn selected_action(&self) -> Option<Action> {
+        self.matches().get(self.selected).copied()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1836,10 +1961,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+k commands | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     } else {
-        "Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Alt+k commands | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     }
 }
@@ -1965,6 +2090,7 @@ impl App {
             rects: Vec::new(),
             mouse_enabled: init.mouse_enabled,
             command_line: CommandLineState::new(init.command_cwd),
+            command_palette: CommandPaletteState::default(),
             command_tx,
             command_rx,
             voice: VoiceInput::new(),
@@ -2132,6 +2258,7 @@ impl App {
     }
 
     fn close_tab_modals(&mut self) {
+        self.command_palette.close();
         self.rename.close();
         self.tab_rename.close();
         self.previous_panes.close();
@@ -2357,6 +2484,10 @@ impl App {
                 *needs_render = true;
             }
             Event::FocusLost => self.terminal_focused = false,
+            Event::Paste(text) if self.command_palette.open => {
+                self.command_palette.insert_text(&text);
+                *needs_render = true;
+            }
             Event::Paste(text) if self.tab_rename.open => {
                 self.tab_rename.insert_text(&text);
                 *needs_render = true;
@@ -2379,7 +2510,8 @@ impl App {
                 }
             }
             Event::Paste(text)
-                if !self.settings.open
+                if !self.command_palette.open
+                    && !self.settings.open
                     && self.grid_resizer.is_none()
                     && !self.rename.open
                     && !self.previous_panes.open
@@ -2397,6 +2529,7 @@ impl App {
             }
             Event::Mouse(mouse)
                 if (self.mouse_enabled || !self.sleeping.is_empty())
+                    && !self.command_palette.open
                     && !self.settings.open
                     && self.grid_resizer.is_none()
                     && self.follow_up.is_none()
@@ -3045,7 +3178,8 @@ impl App {
     }
 
     fn handle_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<KeyOutcome> {
-        if is_quit_shortcut(&key) {
+        let action = Action::from_key(&key);
+        if action == Some(Action::Quit) {
             return Ok(self.request_quit());
         }
 
@@ -3054,11 +3188,15 @@ impl App {
             self.status = "quit canceled".into();
         }
 
+        if self.command_palette.open {
+            return self.handle_command_palette_key(terminal, key);
+        }
+
         if self.help_open {
             return Ok(self.handle_help_key(key));
         }
 
-        if is_help_shortcut(&key) {
+        if action == Some(Action::OpenHelp) {
             self.open_help();
             return Ok(KeyOutcome::Render);
         }
@@ -3106,14 +3244,8 @@ impl App {
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
         }
 
-        if key.modifiers.contains(KeyModifiers::ALT)
-            && let Some(quit) = self.handle_app_key(terminal, key)?
-        {
-            return Ok(if quit {
-                KeyOutcome::Quit
-            } else {
-                KeyOutcome::Render
-            });
+        if let Some(action) = action {
+            return self.execute_action(terminal, action);
         }
 
         if self.command_line.focused {
@@ -3166,7 +3298,7 @@ impl App {
 
     fn handle_help_key(&mut self, key: KeyEvent) -> KeyOutcome {
         if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'))
-            || is_help_shortcut(&key)
+            || Action::from_key(&key) == Some(Action::OpenHelp)
         {
             self.help_open = false;
             self.status = "help closed".into();
@@ -3191,130 +3323,139 @@ impl App {
         }
     }
 
-    fn handle_app_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<Option<bool>> {
-        match key.code {
-            KeyCode::Char(ch) => self.handle_alt_char(terminal, ch, key.modifiers),
-            KeyCode::Left => {
-                self.focus_previous();
-                self.status = self.focus_status();
-                Ok(Some(false))
-            }
-            KeyCode::Right => {
-                self.focus_next();
-                self.status = self.focus_status();
-                Ok(Some(false))
-            }
-            KeyCode::Up => {
-                self.focus_in_grid(-1);
-                self.status = self.focus_status();
-                Ok(Some(false))
-            }
-            KeyCode::Down => {
-                self.focus_in_grid(1);
-                self.status = self.focus_status();
-                Ok(Some(false))
-            }
-            _ => Ok(None),
-        }
+    fn open_command_palette(&mut self) {
+        self.close_tab_modals();
+        self.settings.open = false;
+        self.image_overlay = None;
+        self.help_open = false;
+        self.command_palette.open();
+        self.status = "command palette open".into();
     }
 
-    fn handle_alt_char(
+    fn handle_command_palette_key(
         &mut self,
         terminal: &mut Tui,
-        ch: char,
-        modifiers: KeyModifiers,
-    ) -> Result<Option<bool>> {
-        let lower = ch.to_ascii_lowercase();
-        match lower {
-            'q' => Ok(Some(true)),
-            's' => {
+        key: KeyEvent,
+    ) -> Result<KeyOutcome> {
+        if Action::from_key(&key) == Some(Action::OpenCommandPalette) {
+            self.command_palette.close();
+            self.status = "command palette closed".into();
+            return Ok(KeyOutcome::Render);
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.command_palette.close();
+                self.status = "command palette closed".into();
+            }
+            KeyCode::Enter => {
+                let action = self.command_palette.selected_action();
+                self.command_palette.close();
+                let Some(action) = action else {
+                    self.status = "no matching command".into();
+                    return Ok(KeyOutcome::Render);
+                };
+                return self.execute_action(terminal, action);
+            }
+            KeyCode::Up => self.command_palette.move_selection(-1),
+            KeyCode::Down => self.command_palette.move_selection(1),
+            KeyCode::Backspace => {
+                self.command_palette.backspace();
+            }
+            KeyCode::Delete => {
+                self.command_palette.delete();
+            }
+            KeyCode::Left => {
+                self.command_palette.move_cursor(-1);
+            }
+            KeyCode::Right => {
+                self.command_palette.move_cursor(1);
+            }
+            KeyCode::Home => {
+                self.command_palette.move_to_start();
+            }
+            KeyCode::End => {
+                self.command_palette.move_to_end();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.command_palette.clear();
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.command_palette.insert_text(&ch.to_string());
+            }
+            _ => return Ok(KeyOutcome::Continue),
+        }
+        Ok(KeyOutcome::Render)
+    }
+
+    fn execute_action(&mut self, terminal: &mut Tui, action: Action) -> Result<KeyOutcome> {
+        match action {
+            Action::OpenCommandPalette => {
+                self.open_command_palette();
+            }
+            Action::FocusLeft => {
+                self.focus_previous();
+                self.status = self.focus_status();
+            }
+            Action::FocusRight => {
+                self.focus_next();
+                self.status = self.focus_status();
+            }
+            Action::FocusUp => {
+                self.focus_in_grid(-1);
+                self.status = self.focus_status();
+            }
+            Action::FocusDown => {
+                self.focus_in_grid(1);
+                self.status = self.focus_status();
+            }
+            Action::TogglePaneSelection => {
                 if self.command_line.focused {
                     self.status = "command line focused".into();
                 } else {
                     self.toggle_pane_selection(self.focus);
                 }
-                Ok(Some(false))
             }
-            'a' => {
+            Action::ToggleSelectAll => {
                 if self.selected.len() == self.panes.len() {
                     self.selected.clear();
                 } else {
                     self.selected = (0..self.panes.len()).collect();
                 }
                 self.status = format!("selected {} panes", self.selected.len());
-                Ok(Some(false))
             }
-            'z' => {
-                self.toggle_sleep_for_targets();
-                Ok(Some(false))
-            }
-            't' if modifiers.contains(KeyModifiers::SHIFT) => {
-                self.restart_exited_targets();
-                Ok(Some(false))
-            }
-            't' => {
-                self.next_tab();
-                Ok(Some(false))
-            }
-            'n' => {
-                self.open_new_tab(terminal)?;
-                Ok(Some(false))
-            }
-            'l' => {
-                self.open_grid_resizer();
-                Ok(Some(false))
-            }
-            'x' => {
-                self.swap_selected_tiles();
-                Ok(Some(false))
-            }
-            'f' => {
-                self.toggle_zoom();
-                Ok(Some(false))
-            }
-            'c' => {
+            Action::ToggleSleep => self.toggle_sleep_for_targets(),
+            Action::ToggleZoom => self.toggle_zoom(),
+            Action::RestartExited => self.restart_exited_targets(),
+            Action::NewTab => self.open_new_tab(terminal)?,
+            Action::NextTab => self.next_tab(),
+            Action::RenameTab => self.begin_tab_rename(),
+            Action::ResizeGrid => self.open_grid_resizer(),
+            Action::SwapSelected => self.swap_selected_tiles(),
+            Action::ToggleCommandLine => {
                 self.command_line.toggle_focus();
                 self.status = self.focus_status();
-                Ok(Some(false))
             }
-            'v' if is_voice_shortcut(ch, modifiers) => {
-                self.toggle_voice_input();
-                Ok(Some(false))
-            }
-            'g' => {
-                self.open_goal_editor_for(self.focus);
-                Ok(Some(false))
-            }
-            'u' => {
-                self.stop_pane_goal(self.focus);
-                Ok(Some(false))
-            }
-            'o' => {
+            Action::TogglePaneSummary => self.toggle_pane_settings(),
+            Action::TogglePreviousPanes => self.open_previous_panes(),
+            Action::RenamePane => self.begin_rename(),
+            Action::ToggleVoiceInput => self.toggle_voice_input(),
+            Action::EditGridGoal => self.open_goal_editor_for(self.focus),
+            Action::StopGridGoal => self.stop_pane_goal(self.focus),
+            Action::OpenSettings => {
                 self.settings.open = true;
                 if self.settings.tab == SettingsTab::Auth {
                     self.start_auth_refresh();
                 }
                 self.status = "settings open".into();
-                Ok(Some(false))
             }
-            'p' if modifiers.contains(KeyModifiers::SHIFT) => {
-                self.open_previous_panes();
-                Ok(Some(false))
-            }
-            'p' => {
-                self.toggle_pane_settings();
-                Ok(Some(false))
-            }
-            'r' if modifiers.contains(KeyModifiers::SHIFT) => {
-                self.begin_tab_rename();
-                Ok(Some(false))
-            }
-            'r' => {
-                self.begin_rename();
-                Ok(Some(false))
-            }
-            _ => Ok(None),
+            Action::OpenHelp => self.open_help(),
+            Action::Quit => return Ok(self.request_quit()),
         }
+        Ok(KeyOutcome::Render)
     }
 
     fn handle_exited_recovery_key(&mut self, key: KeyEvent) -> Option<KeyOutcome> {
@@ -5609,6 +5750,30 @@ impl App {
         self.image_overlay.as_ref()
     }
 
+    pub fn command_palette_view(&self) -> Option<CommandPaletteView> {
+        self.command_palette.open.then(|| {
+            let actions = self.command_palette.matches();
+            let selected = self
+                .command_palette
+                .selected
+                .min(actions.len().saturating_sub(1));
+            CommandPaletteView {
+                query: self.command_palette.input.clone(),
+                cursor_chars: self.command_palette.input[..self.command_palette.cursor]
+                    .chars()
+                    .count(),
+                selected,
+                items: actions
+                    .into_iter()
+                    .map(|action| CommandPaletteItem {
+                        label: action.label(),
+                        shortcut: action.default_shortcut(),
+                    })
+                    .collect(),
+            }
+        })
+    }
+
     pub fn exited_recovery_view(&self) -> Option<ExitedPaneRecoveryView> {
         let pane = self.panes.get(self.focus)?;
         if !pane.exited || self.sleeping.contains(&self.focus) {
@@ -7543,24 +7708,6 @@ fn pane_number_list(indices: &[usize]) -> String {
         .join(", ")
 }
 
-fn is_voice_shortcut(ch: char, modifiers: KeyModifiers) -> bool {
-    ch.eq_ignore_ascii_case(&'v')
-        && modifiers.contains(KeyModifiers::ALT)
-        && modifiers.contains(KeyModifiers::SHIFT)
-        && !modifiers.contains(KeyModifiers::CONTROL)
-}
-
-fn is_quit_shortcut(key: &KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::ALT)
-        && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
-}
-
-fn is_help_shortcut(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::F(1))
-        || (key.modifiers.contains(KeyModifiers::ALT)
-            && matches!(key.code, KeyCode::Char('h') | KeyCode::Char('H')))
-}
-
 fn control_byte(ch: char) -> Option<u8> {
     let lower = ch.to_ascii_lowercase();
     if lower.is_ascii_lowercase() {
@@ -8323,27 +8470,62 @@ mod tests {
     #[test]
     fn voice_shortcut_preserves_plain_alt_v_for_agent_image_paste() {
         let image_paste = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
-        assert!(!is_voice_shortcut('v', KeyModifiers::ALT));
+        assert_eq!(Action::from_key(&image_paste), None);
         assert_eq!(terminal_key_bytes(image_paste), Some(b"\x1bv".to_vec()));
 
         let voice_modifiers = KeyModifiers::ALT | KeyModifiers::SHIFT;
-        assert!(is_voice_shortcut('V', voice_modifiers));
+        assert_eq!(
+            Action::from_key(&KeyEvent::new(KeyCode::Char('V'), voice_modifiers)),
+            Some(Action::ToggleVoiceInput)
+        );
     }
 
     #[test]
     fn help_shortcuts_are_modeless_and_plain_h_passes_through() {
-        assert!(is_help_shortcut(&KeyEvent::new(
-            KeyCode::Char('h'),
-            KeyModifiers::ALT,
-        )));
-        assert!(is_help_shortcut(&KeyEvent::new(
-            KeyCode::F(1),
-            KeyModifiers::NONE,
-        )));
-        assert!(!is_help_shortcut(&KeyEvent::new(
-            KeyCode::Char('h'),
-            KeyModifiers::NONE,
-        )));
+        assert_eq!(
+            Action::from_key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT)),
+            Some(Action::OpenHelp)
+        );
+        assert_eq!(
+            Action::from_key(&KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
+            Some(Action::OpenHelp)
+        );
+        assert_eq!(
+            Action::from_key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            None
+        );
+    }
+
+    #[test]
+    fn command_palette_edits_unicode_at_character_boundaries() {
+        let mut palette = CommandPaletteState::default();
+        palette.open();
+        palette.insert_text("pane 東京");
+        assert!(palette.move_cursor(-1));
+        assert!(palette.delete());
+        palette.insert_text("京");
+
+        assert_eq!(palette.input, "pane 東京");
+        assert_eq!(palette.cursor, "pane 東京".len());
+    }
+
+    #[test]
+    fn command_palette_filters_and_wraps_selection() {
+        let mut palette = CommandPaletteState::default();
+        palette.open();
+        palette.insert_text("rename");
+        let matches = palette.matches();
+        assert!(matches.contains(&Action::RenamePane));
+        assert!(matches.contains(&Action::RenameTab));
+
+        palette.move_selection(-1);
+        assert_eq!(palette.selected, matches.len() - 1);
+        assert_eq!(palette.selected_action(), matches.last().copied());
+
+        palette.clear();
+        palette.insert_text("not a real action zzzz");
+        assert!(palette.matches().is_empty());
+        assert_eq!(palette.selected_action(), None);
     }
 
     #[test]
