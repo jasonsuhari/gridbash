@@ -20,6 +20,11 @@ selected = "cyan"
 quiet = "dark-gray"
 exited = "red"
 
+# Override any supported application action. Unlisted actions keep their defaults.
+[keys]
+zoom-pane = "alt+f"
+settings = "alt+o"
+
 [manager]
 endpoint = "https://api.openai.com/v1/chat/completions"
 model = "gpt-4o-mini"

@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use crate::{auth::AuthConfig, profiles::Profile};
+use crate::{auth::AuthConfig, keybindings::KeyBindings, profiles::Profile};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -22,6 +22,8 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default, skip_serializing_if = "ManagerConfig::is_empty")]
     pub manager: ManagerConfig,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keys: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, Profile>,
 }
@@ -289,7 +291,11 @@ impl Config {
 
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
-        toml::from_str(&raw).with_context(|| format!("failed to parse config {}", path.display()))
+        let config: Self = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config {}", path.display()))?;
+        KeyBindings::from_overrides(&config.keys)
+            .with_context(|| format!("failed to validate config {}", path.display()))?;
+        Ok(config)
     }
 
     pub fn save(&self, path: Option<&Path>) -> Result<PathBuf> {
@@ -556,5 +562,26 @@ mod tests {
         let serialized = toml::to_string(&config).expect("serialize config");
         assert!(serialized.contains("[manager]"));
         assert!(serialized.contains("api_key = \"secret\""));
+    }
+
+    #[test]
+    fn parses_and_round_trips_key_overrides() {
+        let config: Config = toml::from_str(
+            r#"
+            [keys]
+            zoom-pane = "ctrl+shift+k"
+            settings = "f8"
+            "#,
+        )
+        .expect("parse key config");
+
+        KeyBindings::from_overrides(&config.keys).expect("validate key config");
+        assert_eq!(
+            config.keys.get("zoom-pane").map(String::as_str),
+            Some("ctrl+shift+k")
+        );
+        let serialized = toml::to_string(&config).expect("serialize key config");
+        assert!(serialized.contains("[keys]"));
+        assert!(serialized.contains("zoom-pane = \"ctrl+shift+k\""));
     }
 }

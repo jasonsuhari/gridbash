@@ -6,6 +6,7 @@ mod composer;
 mod config;
 mod control;
 mod image_preview;
+mod keybindings;
 mod layout;
 mod manager;
 mod onboarding;

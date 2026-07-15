@@ -167,6 +167,27 @@ Pane Activity provides auth, rename, refresh, sleep/wake, and manager-goal contr
 
 If the focused pane exits, Enter, `r`, or `t` restarts it, while `z` sleeps it. Alt+Shift+T performs the same restart directly for exited target panes.
 
+### Configurable shortcuts
+
+Override application controls in the top-level `[keys]` table. Action names
+use kebab case and chord values combine `ctrl`, `alt`, or `shift` with one
+letter, an arrow name, or `f2` through `f12`:
+
+```toml
+[keys]
+zoom-pane = "ctrl+shift+k"
+settings = "f8"
+```
+
+Supported actions are `quit`, `help`, `focus-left`, `focus-right`, `focus-up`,
+`focus-down`, `toggle-selection`, `select-all`, `sleep-panes`, `restart-panes`,
+`next-tab`, `new-tab`, `resize-grid`, `swap-panes`, `zoom-pane`, `command-line`,
+`voice-input`, `edit-goal`, `stop-goal`, `settings`, `previous-panes`,
+`pane-activity`, `rename-tab`, and `rename-pane`. Unlisted actions retain their
+defaults. Duplicate chords and unmodified terminal keys are rejected. F1 and
+`Alt+q` remain reserved help and quit recovery paths; in-app help displays the
+effective bindings.
+
 The resize picker starts from the current dimensions. Shrinking a grid deactivates live panes outside the retained upper-left rectangle; changing `3x3` to `3x2`, for example, removes the rightmost column.
 
 A pane's top border shows its latest activity summary. A configured manager goal replaces that summary across the grid until removed. A quiet marker appears after roughly three seconds without output; it indicates output followed by inactivity, not completion or process exit. Saving a blank pane name restores its default number.
