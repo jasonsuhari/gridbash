@@ -2,10 +2,14 @@
 
 ## Status and goal
 
-This is a design proposal, not the v1 runtime contract. GridBash v1 intentionally
-owns PTYs inside the foreground TUI process. The next major architecture should
-let a user detach the UI while pane processes continue, then attach one or more
-clients without changing ordinary single-machine workflows.
+GridBash now has a first local detach/reattach layer: each pane PTY is owned by
+an authenticated background host, and the foreground TUI can reconnect through
+saved session metadata. That layer is intentionally single-client and keeps
+layout/session coordination in the TUI.
+
+This document remains the proposal for consolidating those hosts into a durable
+per-user `gridbashd` that owns complete sessions and supports multiple clients
+without changing ordinary single-machine workflows.
 
 The first daemon release should preserve local PTYs and local trust boundaries.
 Remote access, web clients, plugins, and multi-host orchestration should build on

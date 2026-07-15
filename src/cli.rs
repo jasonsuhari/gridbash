@@ -61,6 +61,10 @@ pub struct Cli {
     #[arg(long)]
     pub mcp: bool,
 
+    /// Internal launch specification for a detached pane host.
+    #[arg(long, hide = true)]
+    pub pane_host: Option<PathBuf>,
+
     /// Print detected launch profiles and exit.
     #[arg(long)]
     pub list_profiles: bool,

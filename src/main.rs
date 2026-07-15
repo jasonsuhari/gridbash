@@ -9,6 +9,7 @@ mod image_preview;
 mod layout;
 mod manager;
 mod onboarding;
+mod pane_host;
 mod process_priority;
 mod profiles;
 mod pty;
@@ -35,6 +36,10 @@ use crate::{
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    if let Some(spec_path) = cli.pane_host.as_deref() {
+        return pane_host::run_pane_host(spec_path);
+    }
 
     if cli.mcp {
         return control::run_mcp_server();

@@ -32,17 +32,17 @@ use vt100::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 use crate::{
     auth::{self, AgentKind, AuthProfile},
     cli::{Cli, GridMode},
-    codex_sqlite::{CodexSqlitePool, PaneCodexSqlite},
     composer::{Composer, GridPicker, GridPickerAction},
     config::{Config, PaletteColor, PaneWorkloadPolicy, UiConfig, UiPalette},
     control::{self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse},
     image_preview::{self, ImagePreview},
     layout::{GridLayout, GridSize, PaneId, pane_at},
     manager::{self, ManagerCommand, ManagerDecision},
+    pane_host::{PaneHostBusy, PaneHostIncompatible, PaneHostRejected, PtyHostRef, PtyPane},
     process_priority::PaneWorkloadClass,
     profiles::{default_profile_name, find_profile},
-    pty::{PtyEvent, PtyPane, PtyWriteToken},
-    session::{SavedPaneHistory, SessionRecord, SessionRecorder},
+    pty::{PtyEvent, PtyWriteToken},
+    session::{SavedPaneHistory, SavedTab, SessionRecord, SessionRecorder},
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
     usage::{self, UsageEvent, UsageTarget},
@@ -87,7 +87,6 @@ pub struct App {
     layout: GridLayout,
     grid_area: Rect,
     panes: Vec<PtyPane>,
-    codex_sqlite: CodexSqlitePool,
     pane_idle: Vec<PaneIdleState>,
     focus: usize,
     selected: BTreeSet<usize>,
@@ -122,6 +121,8 @@ pub struct App {
     pane_settings: PaneSettingsState,
     status: String,
     restored_histories: Vec<SavedPaneHistory>,
+    restored_hosts: Vec<Option<PtyHostRef>>,
+    restored_tabs: Vec<SavedTab>,
     session_recorder: Option<SessionRecorder>,
     next_pane_id: usize,
     next_tab_number: usize,
@@ -159,7 +160,10 @@ struct AppInit {
     control_handle: Option<ControlHandle>,
     control_rx: Option<std_mpsc::Receiver<ControlEnvelope>>,
     settings: SettingsState,
+    tab_title: String,
     restored_histories: Vec<SavedPaneHistory>,
+    restored_hosts: Vec<Option<PtyHostRef>>,
+    restored_tabs: Vec<SavedTab>,
     session_recorder: Option<SessionRecorder>,
     status: String,
 }
@@ -640,6 +644,7 @@ enum SettingsTarget {
     CompactTitles,
     ActivityBadges,
     ConfirmQuit,
+    KeepTerminalsRunning,
     IdleFollowups,
     IdleSeconds,
     Todo(usize),
@@ -1052,6 +1057,7 @@ struct SettingsState {
     compact_titles: bool,
     activity_badges: bool,
     confirm_quit: bool,
+    keep_terminals_running: bool,
     idle_followups: bool,
     idle_seconds: u64,
     todo_prompts: Vec<String>,
@@ -1219,6 +1225,7 @@ impl Default for SettingsState {
             compact_titles: false,
             activity_badges: true,
             confirm_quit: false,
+            keep_terminals_running: false,
             idle_followups: true,
             idle_seconds: crate::config::TodoSettings::default_idle_seconds(),
             todo_prompts: Vec::new(),
@@ -1239,6 +1246,7 @@ impl SettingsState {
             compact_titles: config.ui.compact_titles,
             activity_badges: config.ui.activity_badges,
             confirm_quit: config.ui.confirm_quit,
+            keep_terminals_running: config.ui.keep_terminals_running,
             idle_followups: config.todos.enabled,
             idle_seconds: config
                 .todos
@@ -1279,6 +1287,10 @@ impl SettingsState {
                 self.confirm_quit = !self.confirm_quit;
                 SettingsChange::SaveUi
             }
+            Some(SettingsTarget::KeepTerminalsRunning) => {
+                self.keep_terminals_running = !self.keep_terminals_running;
+                SettingsChange::SaveUi
+            }
             Some(SettingsTarget::IdleFollowups) => {
                 self.idle_followups = !self.idle_followups;
                 SettingsChange::SaveTodos
@@ -1314,6 +1326,12 @@ impl SettingsState {
             Some(SettingsTarget::ConfirmQuit) => {
                 if delta != 0 {
                     self.confirm_quit = !self.confirm_quit;
+                }
+                SettingsChange::SaveUi
+            }
+            Some(SettingsTarget::KeepTerminalsRunning) => {
+                if delta != 0 {
+                    self.keep_terminals_running = !self.keep_terminals_running;
                 }
                 SettingsChange::SaveUi
             }
@@ -1450,6 +1468,7 @@ impl SettingsState {
             compact_titles: self.compact_titles,
             activity_badges: self.activity_badges,
             confirm_quit: self.confirm_quit,
+            keep_terminals_running: self.keep_terminals_running,
             scrollback_rows: self.scrollback.clamp(1_000, 50_000) as usize,
             refresh_ms: self.refresh_ms.clamp(8, 100) as u64,
             palette: UiPalette::from(self.palette),
@@ -1585,6 +1604,7 @@ impl SettingsState {
             SettingsTarget::CompactTitles,
             SettingsTarget::ActivityBadges,
             SettingsTarget::ConfirmQuit,
+            SettingsTarget::KeepTerminalsRunning,
             SettingsTarget::IdleFollowups,
             SettingsTarget::IdleSeconds,
         ];
@@ -1665,6 +1685,14 @@ impl SettingsState {
             "Confirm before quit",
             switch_value(self.confirm_quit),
             "extra guard for Alt+q",
+        ));
+        rows.push(self.row(
+            SettingsTarget::KeepTerminalsRunning,
+            SettingsGroup::Workflow,
+            SettingsValueKind::Switch,
+            "Keep terminals running",
+            switch_value(self.keep_terminals_running),
+            "detach on quit; reconnect with gridbash resume",
         ));
         rows.push(self.row(
             SettingsTarget::IdleFollowups,
@@ -1893,7 +1921,10 @@ impl App {
             control_handle,
             control_rx,
             settings,
+            tab_title: "Grid 1".into(),
             restored_histories: Vec::new(),
+            restored_hosts: Vec::new(),
+            restored_tabs: Vec::new(),
             session_recorder: None,
             status,
         })
@@ -1904,6 +1935,13 @@ impl App {
         apply_auth_defaults(&mut launch_plan, &config)?;
         let grid = launch_plan.grid;
         let restored_histories = record.session.pane_histories();
+        let restored_hosts = record.session.pane_hosts();
+        let restored_tabs = record.session.tabs.clone();
+        let tab_title = if record.session.title.is_empty() {
+            "Grid 1".into()
+        } else {
+            record.session.title.clone()
+        };
         let session_id = record.session.id.clone();
         let recorder = SessionRecorder::continue_record(record);
         let settings = SettingsState::from_config(&config);
@@ -1924,7 +1962,10 @@ impl App {
             control_handle: None,
             control_rx: None,
             settings,
+            tab_title,
             restored_histories,
+            restored_hosts,
+            restored_tabs,
             session_recorder: Some(recorder),
             status: format!("resumed session {session_id}"),
         })
@@ -1942,12 +1983,11 @@ impl App {
             worktrees: init.worktrees,
             tabs: vec![None],
             active_tab: 0,
-            tab_title: "Grid 1".into(),
+            tab_title: init.tab_title,
             launch_plan: init.launch_plan,
             layout: GridLayout::new(init.grid),
             grid_area: Rect::default(),
             panes: Vec::new(),
-            codex_sqlite: CodexSqlitePool::new()?,
             pane_idle: Vec::new(),
             focus: 0,
             selected: BTreeSet::new(),
@@ -1982,6 +2022,8 @@ impl App {
             pane_settings: PaneSettingsState::default(),
             status: init.status,
             restored_histories: init.restored_histories,
+            restored_hosts: init.restored_hosts,
+            restored_tabs: init.restored_tabs,
             session_recorder: init.session_recorder,
             next_pane_id: 0,
             next_tab_number: 2,
@@ -2013,6 +2055,19 @@ impl App {
         let mut terminal = setup_terminal(self.mouse_enabled)?;
         let result = self.run_in_terminal(&mut terminal);
         teardown_terminal(&mut terminal, self.mouse_enabled)?;
+        if result.is_ok()
+            && self.settings.keep_terminals_running
+            && (self.panes.iter().any(|pane| !pane.exited)
+                || self
+                    .tabs
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .any(|tab| tab.panes.iter().any(|pane| !pane.exited)))
+        {
+            println!(
+                "gridbash: terminals are still running; reconnect with `gridbash resume --latest`"
+            );
+        }
         result
     }
 
@@ -2043,6 +2098,8 @@ impl App {
         self.layout = GridLayout::new(plan.grid);
         self.launch_plan = Some(plan);
         self.restored_histories.clear();
+        self.restored_hosts.clear();
+        self.restored_tabs.clear();
         Ok(())
     }
 
@@ -2054,8 +2111,6 @@ impl App {
         self.tabs.clear();
         self.tabs.push(None);
         self.active_tab = 0;
-        self.tab_title = "Grid 1".into();
-        self.next_tab_number = 2;
         self.tab_rename.close();
         self.layout = GridLayout::new(plan.grid);
         self.panes.clear();
@@ -2074,6 +2129,12 @@ impl App {
             self.spawn_pane_spec(index, spec)?;
         }
         self.restored_histories.clear();
+        self.restored_hosts.clear();
+        for saved_tab in mem::take(&mut self.restored_tabs) {
+            let snapshot = self.restore_saved_tab(saved_tab)?;
+            self.tabs.push(Some(snapshot));
+        }
+        self.next_tab_number = self.tabs.len() + 1;
         self.start_usage_monitor(&plan);
 
         self.save_session_snapshot()
@@ -2083,6 +2144,37 @@ impl App {
         let title = format!("Grid {}", self.next_tab_number);
         self.next_tab_number += 1;
         title
+    }
+
+    fn restore_saved_tab(&mut self, saved: SavedTab) -> Result<GridTabSnapshot> {
+        let mut plan = saved.launch_plan()?;
+        apply_auth_defaults(&mut plan, &self.config)?;
+        let histories = saved.pane_histories();
+        let hosts = saved.pane_hosts();
+        let mut panes = Vec::with_capacity(plan.panes.len());
+        for (index, spec) in plan.panes.iter().enumerate() {
+            let history = histories.get(index).cloned().unwrap_or_default();
+            let host = hosts.get(index).cloned().flatten();
+            panes.push(self.create_pane(spec, index, &history, host)?);
+        }
+        let pane_count = panes.len();
+        let grid = plan.grid;
+        Ok(GridTabSnapshot {
+            title: saved.title,
+            launch_plan: Some(plan),
+            layout: GridLayout::new(grid),
+            panes,
+            pane_idle: (0..pane_count)
+                .map(|_| PaneIdleState::new(Instant::now()))
+                .collect(),
+            focus: 0,
+            selected: BTreeSet::new(),
+            pane_names: vec![None; pane_count],
+            text_selection: None,
+            sleeping: BTreeSet::new(),
+            manager_goal: None,
+            rects: Vec::new(),
+        })
     }
 
     fn take_current_tab_snapshot(&mut self) -> GridTabSnapshot {
@@ -2155,6 +2247,7 @@ impl App {
         self.rects.clear();
         self.follow_up = None;
         self.restored_histories.clear();
+        self.restored_hosts.clear();
         if let Some(cwd) = plan.panes.first().map(|pane| pane.cwd.clone()) {
             self.command_line.cwd = cwd;
         }
@@ -2194,23 +2287,75 @@ impl App {
     }
 
     fn spawn_pane_spec(&mut self, index: usize, spec: &PaneLaunchSpec) -> Result<()> {
-        let mut pane = self.spawn_pane_instance(spec, index)?;
-        if let Some(history) = self.restored_histories.get(index) {
-            pane.restore_history_display(&history.output_tail, &history.input_history);
-        }
+        let history = self
+            .restored_histories
+            .get(index)
+            .cloned()
+            .unwrap_or_default();
+        let host = self.restored_hosts.get(index).cloned().flatten();
+        let pane = self.create_pane(spec, index, &history, host)?;
         self.panes.push(pane);
         self.pane_idle.push(PaneIdleState::new(Instant::now()));
         Ok(())
+    }
+
+    fn create_pane(
+        &mut self,
+        spec: &PaneLaunchSpec,
+        index: usize,
+        history: &SavedPaneHistory,
+        host: Option<PtyHostRef>,
+    ) -> Result<PtyPane> {
+        if let Some(host) = host {
+            let id = PaneId(self.next_pane_id);
+            self.next_pane_id += 1;
+            match PtyPane::attach(
+                host,
+                id,
+                0,
+                &spec.cwd,
+                self.config.ui.scrollback_rows,
+                self.config.ui.keep_terminals_running,
+                &history.output_tail,
+                &history.input_history,
+                self.event_tx.clone(),
+            ) {
+                Ok(pane) => return Ok(pane),
+                Err(error) => {
+                    if error.is::<PaneHostBusy>() {
+                        return Err(error).with_context(|| {
+                            format!(
+                                "background pane {} is already open in another GridBash client",
+                                index + 1
+                            )
+                        });
+                    }
+                    if error.is::<PaneHostIncompatible>() || error.is::<PaneHostRejected>() {
+                        return Err(error).with_context(|| {
+                            format!("background pane {} cannot be reattached", index + 1)
+                        });
+                    }
+                    self.status = format!(
+                        "background pane {} unavailable; started a new terminal ({error:#})",
+                        index + 1
+                    );
+                    let mut pane = self.spawn_pane_instance(spec, index)?;
+                    pane.restore_history_display(&history.output_tail, &history.input_history);
+                    return Ok(pane);
+                }
+            }
+        }
+
+        let mut pane = self.spawn_pane_instance(spec, index)?;
+        pane.restore_history_display(&history.output_tail, &history.input_history);
+        Ok(pane)
     }
 
     fn spawn_pane_instance(&mut self, spec: &PaneLaunchSpec, pane_index: usize) -> Result<PtyPane> {
         let launch = spec.resolved_command()?;
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
-        let PaneCodexSqlite {
-            env: extra_env,
-            lease: codex_sqlite_lease,
-        } = self.pane_env(pane_index, &spec.env)?;
+        let extra_env = self.pane_env(pane_index);
         PtyPane::spawn(
             &spec.profile_name,
             id,
@@ -2220,23 +2365,18 @@ impl App {
             &spec.env,
             &spec.cwd,
             &extra_env,
-            codex_sqlite_lease,
             self.config.ui.scrollback_rows,
             self.config.defaults.pane_priority,
             self.config.defaults.pane_workload,
+            self.config.ui.keep_terminals_running,
             self.event_tx.clone(),
         )
     }
 
-    fn pane_env(
-        &self,
-        pane_index: usize,
-        spec_env: &BTreeMap<String, String>,
-    ) -> Result<PaneCodexSqlite> {
-        let mut pane_sqlite = self.codex_sqlite.for_pane(spec_env)?;
-
+    fn pane_env(&self, pane_index: usize) -> Vec<(OsString, OsString)> {
+        let mut env = Vec::new();
         if let Some(control) = &self.control_handle {
-            pane_sqlite.env.extend([
+            env.extend([
                 (
                     "GRIDBASH_CONTROL_ADDR".into(),
                     control.endpoint().to_string().into(),
@@ -2251,8 +2391,7 @@ impl App {
                 ),
             ]);
         }
-
-        Ok(pane_sqlite)
+        env
     }
 
     fn run_loop(&mut self, terminal: &mut Tui) -> Result<()> {
@@ -5047,18 +5186,42 @@ impl App {
         let previous = self.config.ui.clone();
         self.config.ui = self.settings.ui_config();
         match self.config.save(self.config_path.as_deref()) {
-            Ok(_) => true,
+            Ok(_) => {
+                self.sync_keep_running_policy();
+                true
+            }
             Err(error) => {
                 self.config.ui = previous.clone();
                 self.settings.compact_titles = previous.compact_titles;
                 self.settings.activity_badges = previous.activity_badges;
                 self.settings.confirm_quit = previous.confirm_quit;
+                self.settings.keep_terminals_running = previous.keep_terminals_running;
                 self.settings.scrollback = previous.scrollback_rows.clamp(1_000, 50_000) as i32;
                 self.settings.refresh_ms = previous.refresh_ms.clamp(8, 100) as i32;
                 self.settings.palette = GridPalette::from(previous.palette);
                 self.status = format!("failed to save UI settings: {error:#}");
                 false
             }
+        }
+    }
+
+    fn sync_keep_running_policy(&mut self) {
+        let keep_running = self.settings.keep_terminals_running;
+        let mut first_error = None;
+        for pane in &mut self.panes {
+            if let Err(error) = pane.set_keep_running(keep_running) {
+                first_error.get_or_insert(error);
+            }
+        }
+        for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
+            for pane in &mut tab.panes {
+                if let Err(error) = pane.set_keep_running(keep_running) {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            self.status = format!("saved setting; failed to update a pane host: {error:#}");
         }
     }
 
@@ -6161,7 +6324,7 @@ impl App {
 
     fn start_session_recorder(&mut self, plan: &LaunchPlan) -> Result<()> {
         if self.session_recorder.is_none() {
-            self.session_recorder = Some(SessionRecorder::start_new(plan)?);
+            self.session_recorder = Some(SessionRecorder::start_new(&self.tab_title, plan)?);
         }
         Ok(())
     }
@@ -6170,11 +6333,21 @@ impl App {
         let Some(plan) = self.launch_plan.clone() else {
             return Ok(());
         };
+        let tabs = self
+            .tabs
+            .iter()
+            .filter_map(Option::as_ref)
+            .filter_map(|tab| {
+                tab.launch_plan
+                    .as_ref()
+                    .map(|plan| SavedTab::from_live(&tab.title, plan, &tab.panes))
+            })
+            .collect();
         let Some(recorder) = self.session_recorder.as_mut() else {
             return Ok(());
         };
 
-        recorder.update(&plan, &self.panes);
+        recorder.update(&self.tab_title, &plan, &self.panes, tabs);
         recorder.save()
     }
 }
