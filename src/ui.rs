@@ -127,6 +127,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         let Some(rect) = rects.get(index).copied() else {
             continue;
         };
+        if rect.width == 0 || rect.height == 0 {
+            continue;
+        }
 
         let focused = app.focused_pane() == Some(index);
         let selected = app.selected().contains(&index);
@@ -201,7 +204,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         ),
         Span::raw(" "),
         Span::styled(
-            if app.voice_listening() { "MIC" } else { "LIVE" },
+            if app.voice_listening() {
+                "MIC"
+            } else if app.zoomed() {
+                "ZOOM"
+            } else {
+                "LIVE"
+            },
             Style::default()
                 .fg(if app.voice_listening() {
                     palette.accent()
@@ -226,7 +235,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(
-            " | Alt+h help | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c CLI | Alt+Shift+V voice | Alt+p summary | Alt+Shift+p panes | Alt+x swap | Alt+z sleep | Alt+q quit",
+            " | Alt+h help | Alt+f zoom | Alt+l resize | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c CLI | Alt+Shift+V voice | Alt+p summary | Alt+Shift+p panes | Alt+x swap | Alt+z sleep | Alt+q quit",
         ),
     ]);
     frame.render_widget(
@@ -2487,6 +2496,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
         ("Alt+c", "expand or close the command line"),
         ("Alt+p", "show focused-pane activity summary"),
         ("Alt+Shift+p", "show previous panes"),
+        ("Alt+f", "zoom or restore focused pane"),
         ("Alt+l", "resize the grid"),
         ("Alt+r", "rename focused pane"),
         ("Alt+Shift+t", "restart exited panes"),
