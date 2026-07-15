@@ -16,12 +16,12 @@ grid without juggling terminal windows.
 [Releases](https://github.com/jasonsuhari/gridbash/releases) |
 [Full reference](docs/REFERENCE.md)
 
-[![GridBash running six CLI coding agents in one terminal grid](https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-launch-teaser-poster.png)](https://github.com/jasonsuhari/gridbash/blob/main/docs/assets/gridbash-launch-teaser.mp4)
+[![GridBash running six CLI coding agents in one terminal grid](https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-openvid-demo-poster.png)](https://github.com/jasonsuhari/gridbash/blob/main/docs/assets/gridbash-openvid-demo.mp4)
 
 ## Quick start
 
-Requires Node.js 18+. Published binaries support Windows x64, glibc-based Linux
-x64/arm64, and macOS 13+ on Apple Silicon or Intel.
+Requires Node.js 18+. GridBash releases Windows x64, glibc-based Linux
+x64/arm64, and macOS 13+ binaries for Apple Silicon and Intel.
 
 ```sh
 npm install -g gridbash
@@ -35,6 +35,9 @@ gridbash 2x3 --profile codex
 ```
 
 The npm package installs only the native binary for your current platform.
+The npm badge shows the version currently available from the registry. If it
+temporarily trails the [latest GitHub release](https://github.com/jasonsuhari/gridbash/releases/latest),
+use that release's matching native artifact until npm publication catches up.
 
 ## Why GridBash
 
@@ -141,11 +144,28 @@ packed copy instead of linking the command to a worktree.
 
 Release maintainers should follow [docs/RELEASING.md](docs/RELEASING.md).
 
+## Community
+
+- Share your current setup in the
+  [multi-agent workflow discussion](https://github.com/jasonsuhari/gridbash/discussions/256).
+- Start with a
+  [`good first issue`](https://github.com/jasonsuhari/gridbash/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
+  or an issue marked
+  [`help wanted`](https://github.com/jasonsuhari/gridbash/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22help%20wanted%22).
+- Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup, validation, and DCO
+  guidance.
+- Introduce yourself in the
+  [new-contributor discussion](https://github.com/jasonsuhari/gridbash/discussions/257)
+  if you want help choosing a task.
+- See the [user and contributor growth playbook](docs/OUTREACH.md) if you want
+  to help demonstrate GridBash, welcome testers, or recruit contributors.
+
 ## Project links
 
 - [User reference](docs/REFERENCE.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Devlogs](docs/devlogs/)
+- [Outreach playbook](docs/OUTREACH.md)
 - [Support](SUPPORT.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)

@@ -16,6 +16,23 @@ GridBash is a cross-platform Rust TUI. Changes affecting terminal behavior, proc
 
 Small fixes, documentation improvements, and focused tests can go straight to a pull request.
 
+## Find Work And Get Help
+
+The live issue lists are the source of truth:
+
+- [`good first issue`](https://github.com/jasonsuhari/gridbash/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22good%20first%20issue%22)
+  is reserved for tasks with a narrow outcome, named file area, and no hidden
+  design decision.
+- [`help wanted`](https://github.com/jasonsuhari/gridbash/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22help%20wanted%22)
+  identifies accepted work where outside experience would be useful.
+
+Comment on an issue before investing significant time so the maintainer can
+confirm that it is still available and help with orientation. Contributor
+questions are welcome in the issue or in
+[the new-contributor discussion](https://github.com/jasonsuhari/gridbash/discussions/257).
+Expect an initial maintainer response within one business day. If that does not
+happen, a polite follow-up is welcome.
+
 ## Development Setup
 
 Prerequisites:
@@ -98,6 +115,10 @@ Good first issues usually involve:
 - Tests around parsing, layout, profile resolution, or configuration.
 - Clear terminal profile detection improvements.
 - Small UI state or copy fixes that do not change core PTY behavior.
+
+Non-code contributions are also useful: reproduce platform-specific behavior,
+test a pull request on a terminal the maintainer does not have, improve an
+example, record a workflow, or turn a confusing setup step into clearer docs.
 
 Please coordinate first before working on:
 

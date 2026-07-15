@@ -1,179 +1,103 @@
-# Community Setup Notes
+# Community Operations
 
-This document records the contribution infrastructure added to GridBash, plus the live GitHub settings and follow-up maintainer actions.
+This document records how GridBash keeps contribution infrastructure healthy.
+Live repository settings and issue lists are the source of truth; avoid copying
+issue numbers or release status into this file because they become stale.
 
-## Research Basis
+## Public Community Surfaces
 
-The setup follows GitHub's community health model: a public repository is easier to evaluate when it has visible README, license, contributing, code of conduct, support, security, and issue template files in supported locations.
+- `README.md` explains the product, supported platforms, quick start, and ways
+  to participate.
+- `CONTRIBUTING.md` covers development setup, validation, issue selection, pull
+  requests, and DCO sign-offs.
+- `CODE_OF_CONDUCT.md`, `SECURITY.md`, and `SUPPORT.md` route conduct, private
+  vulnerability reports, and usage questions.
+- GitHub Discussions holds workflow examples, open-ended questions, and early
+  design conversations.
+- GitHub Issues holds reproducible bugs and accepted, scoped work.
+- [`OUTREACH.md`](OUTREACH.md) defines the user and contributor growth loop.
 
-GitHub surfaces `CONTRIBUTING.md` when people open issues or pull requests, and also shows it in repository navigation. Issue and pull request templates reduce maintainer back-and-forth by asking for the details reviewers need before the conversation starts.
+The repository description should lead with the current product:
 
-For contribution rights, this repo starts with DCO sign-offs because they are lightweight and familiar in open source. A separate CLA is kept as an optional template because CLAs can be useful for organizations, but they add more contributor friction and should be reviewed before enforcement.
+```text
+Cross-platform terminal workspace for running CLI coding agents side by side.
+```
 
-## What Is Now In The Repository
+Useful topics include `rust`, `tui`, `terminal`, `multiplexer`,
+`developer-tools`, `ai-agents`, `coding-agents`, `codex`, `claude`, `gemini`,
+`ratatui`, `pty`, `worktrees`, `windows`, `linux`, and `macos`.
 
-- `CONTRIBUTING.md` for contributor onboarding, setup, validation, issue guidance, pull request expectations, and DCO instructions.
-- `CODE_OF_CONDUCT.md` for community expectations and enforcement.
-- `SECURITY.md` for private vulnerability reporting.
-- `SUPPORT.md` for usage help routing.
-- `GOVERNANCE.md` for maintainer-led project governance.
-- `DCO.md` plus `.github/workflows/dco.yml` to require commit sign-offs on pull requests.
-- `CLA.md` as a CLA template if separate CLA enforcement is later needed.
-- `.github/ISSUE_TEMPLATE/` issue forms for bugs, features, and questions.
-- `.github/pull_request_template.md` for consistent review context.
-- `.github/CODEOWNERS` to route reviews to the maintainer when branch protection is enabled.
-- `docs/assets/gridbash-social-preview.png` as the repository social preview source asset.
+## Conversation Routing
 
-## GitHub Repository Settings
+- **Discussion:** workflow questions, show and tell, polls, and ideas that still
+  need discovery.
+- **Issue:** a concrete bug, accepted feature, documentation change, test, or
+  maintenance task.
+- **Pull request:** an implementation with a reviewable outcome.
+- **Private report:** a security vulnerability as described in `SECURITY.md`.
 
-Configured values:
-
-- Issues: enabled.
-- Projects: enabled.
-- Discussions: enabled.
-- Wiki: enabled.
-- Delete branch on merge: enabled.
-- Secret scanning: enabled.
-- Secret scanning push protection: enabled.
-- Description: `Windows-native terminal grids for running many CLI agents at once.`
-- Homepage: blank until npm metadata is corrected or a dedicated landing page exists.
-- Topics: `windows`, `rust`, `tui`, `terminal`, `multiplexer`, `cli`, `developer-tools`, `ai-agents`, `coding-agents`, `codex`, `claude`, `conpty`, `powershell`, `git-bash`, `ratatui`, `orchestration`, `npm-package`, `open-source`.
-
-Settings that still require browser or elevated-token access:
-
-- Upload `docs/assets/gridbash-social-preview.png` in Settings > General > Social preview.
-- Create the modern GitHub Project after refreshing the GitHub CLI token with `gh auth refresh --hostname github.com -s project,read:project`.
-- Enable private vulnerability reporting in Settings > Code security and analysis after `SECURITY.md` is on the default branch.
-- Protect `main` after the community files land:
-  - Require the `CI / windows` check.
-  - Require the `DCO / Signed-off-by` check.
-  - Require pull request review before merging.
-  - Require conversation resolution before merging.
-  - Block force pushes.
+When a Discussion reaches a concrete outcome, create an issue that captures the
+decision and links back to the conversation.
 
 ## Labels
 
-Default labels are preserved:
+Keep type, status, area, platform, and priority labels small enough to remain
+useful. Two labels are especially important for outside contributors:
 
-- `bug`
-- `documentation`
-- `duplicate`
-- `enhancement`
-- `good first issue`
-- `help wanted`
-- `invalid`
-- `question`
-- `wontfix`
+- `help wanted` means the task is accepted and outside contributions are
+  actively welcome.
+- `good first issue` is a stricter subset with a narrow outcome, named file
+  area, focused validation, and no hidden architecture decision.
 
-Additional labels:
+Do not label a broad roadmap idea as a good first issue merely to attract help.
+Keep three to five contributor-ready issues active and remove the labels when a
+task becomes stale, blocked, assigned, or underspecified.
 
-- `priority:p0`, `priority:p1`, `priority:p2`, `priority:p3`
-- `status:needs-triage`, `status:accepted`, `status:blocked`, `status:needs-repro`
-- `area:pty`, `area:tui`, `area:profiles`, `area:composer`, `area:config`, `area:packaging`, `area:docs`, `area:architecture`
-- `platform:windows`
-- `type:test`, `type:design`, `type:maintenance`
+## Contributor-Ready Issue Checklist
 
-New issues are classified by `.github/workflows/issue-labeler.yml`. The
-automation adds only missing type, triage-status, area, and Windows-platform
-labels; priorities and resolution labels remain maintainer decisions.
+Every promoted issue should include:
 
-## Milestones
+- the user or maintainer problem;
+- one concrete outcome;
+- the likely files or modules involved;
+- acceptance checks;
+- the narrowest useful validation command;
+- expected size or complexity;
+- a clear invitation to comment for orientation.
 
-- `v0.2 Nostromo`: public launch polish.
-- `v0.3 Nebuchadnezzar`: agent orchestration workflows.
-- `v0.4 Holodeck`: TUI/runtime experience.
-- `v1.0 Zion`: stable Windows release.
-- `v2.0 Morpheus`: daemon and reattach architecture.
+The maintainer should acknowledge contributor questions and claims within one
+business day, confirm scope before substantial work begins, and distinguish
+required review changes from optional follow-up ideas.
 
-Milestones intentionally have no due dates.
+## Contribution Rights
 
-## Starter Issues
+GridBash uses DCO sign-offs for routine contributions. `CLA.md` is an inactive
+template, not an additional current requirement. Do not require both a DCO and
+a separate CLA without a clear legal reason.
 
-- `#1 docs: add screenshot and quick-start flow to README`
-- `#2 chore: publish current npm package metadata under this repo`
-- `#3 docs: add release checklist for Windows binary and npm tarball`
-- `#4 test: verify first-run onboarding on clean Windows profile`
-- `#5 feat: improve profile detection diagnostics`
-- `#6 feat: polish startup picker controls`
-- `#7 test: add startup picker preview coverage`
-- `#8 feat: persist settings screen controls`
-- `#9 feat: add in-app help and legend overlay`
-- `#10 docs: define v1.0 acceptance checklist`
-- `#11 design: outline daemon detach and reattach architecture`
+## Repository Settings Audit
 
-## Project Setup
+Review these settings after major GitHub or release-workflow changes:
 
-Create a modern GitHub Project named `GridBash Roadmap` after the token has Project scopes:
+- Issues and Discussions are enabled.
+- The repository homepage and social preview are current.
+- Delete-branch-on-merge is enabled.
+- Secret scanning and push protection are enabled where available.
+- `main` blocks force pushes and requires the current CI and DCO checks.
+- Required check names match the current cross-platform CI matrix.
+- Private vulnerability reporting is enabled.
 
-```powershell
-gh auth refresh --hostname github.com -s project,read:project
-gh project create --owner jasonsuhari --title "GridBash Roadmap"
-```
+Do not preserve old required-check names such as a Windows-only CI job after the
+workflow becomes cross-platform.
 
-Add fields:
+## Monthly Maintenance
 
-- `Priority`: `P0`, `P1`, `P2`, `P3`
-- `Release`: `v0.2 Nostromo`, `v0.3 Nebuchadnezzar`, `v0.4 Holodeck`, `v1.0 Zion`, `v2.0 Morpheus`
-- `Area`: `Docs`, `Packaging`, `TUI`, `PTY`, `Profiles`, `Composer`, `Config`, `Architecture`
-- `Size`: `S`, `M`, `L`
+Once per month:
 
-Recommended views:
-
-- `Roadmap`
-- `Board by Status`
-- `Table by Release`
-- `Good First Issues`
-
-Add issues `#1` through `#11` to the project.
-
-## Community Surfaces
-
-- Discussions are enabled.
-- The seed discussion is `Welcome to the GridBash roadmap`.
-- Wiki is enabled. If `gridbash.wiki.git` does not exist yet, create the first page in the GitHub UI, then push a Home page that links to README, Contributing, Roadmap, Issues, Discussions, and the Project.
-
-## Branch Protection
-
-After this branch is merged, protect `main`:
-
-```text
-Require pull request before merging
-Require approvals: 1
-Require conversation resolution before merging
-Require status checks: CI / windows, DCO / Signed-off-by
-Block force pushes
-```
-
-## Social Preview
-
-Upload `docs/assets/gridbash-social-preview.png` in repository Settings > General > Social preview.
-
-The source asset is 1280x640 PNG and intentionally avoids third-party logos or copyrighted characters.
-
-## Private Vulnerability Reporting
-
-After `SECURITY.md` reaches the default branch, enable private vulnerability reporting in Settings > Code security and analysis.
-
-## CLA Activation
-
-GridBash currently uses DCO sign-offs because they are lighter for contributors than a separate CLA.
-
-If a separate CLA becomes necessary:
-
-1. Have qualified counsel review `CLA.md`.
-2. Publish the final CLA text somewhere stable, such as a GitHub Gist used only for the CLA.
-3. Link the repository or organization to a CLA tool such as CLA Assistant.
-4. Add the CLA status check to branch protection.
-5. Update `CONTRIBUTING.md` and `.github/pull_request_template.md` to state that CLA signing is mandatory.
-
-Do not require both DCO and a CLA unless there is a clear legal reason. That adds friction for new contributors.
-
-## Good First Issue Practice
-
-A good first issue should have:
-
-- A single clear outcome.
-- Reproduction steps or an exact file area.
-- A suggested validation command.
-- No hidden product decision.
-- No expected knowledge of GridBash internals beyond the files named in the issue.
+1. Review `good first issue` and `help wanted` for stale or blocked work.
+2. Check unanswered Discussions and contributor questions.
+3. Confirm README, website, roadmap, and launch copy agree on platforms and
+   installation status.
+4. Recognize merged outside contributions in release notes.
+5. Review the campaign log in [`OUTREACH.md`](OUTREACH.md) and continue only the
+   channels producing activated users, useful feedback, or contributors.

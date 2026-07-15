@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Workflow ideas and community discussion
+    url: https://github.com/jasonsuhari/gridbash/discussions
+    about: Share workflows, ask open-ended questions, and develop ideas before they become scoped issues.
+  - name: Contributor-ready work
+    url: https://github.com/jasonsuhari/gridbash/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22help%20wanted%22
+    about: Browse accepted tasks where outside contributions are actively wanted.
   - name: Security vulnerability
     url: https://github.com/jasonsuhari/gridbash/security/policy
     about: Please report vulnerabilities privately through the security policy.

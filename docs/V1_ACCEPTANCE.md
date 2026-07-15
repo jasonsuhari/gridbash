@@ -1,8 +1,8 @@
 # GridBash v1.0 Acceptance Checklist
 
-This checklist defines the minimum evidence required to call the Windows build
-of GridBash stable. A release candidate may ship before every box is checked,
-but the stable `v1.0.0` tag must not.
+This checklist defines the minimum evidence required to call the supported
+Windows, Linux, and macOS builds of GridBash stable. A release candidate may
+ship before every box is checked, but the stable `v1.0.0` tag must not.
 
 Record evidence beside each item in the release PR or linked test report. A
 passing check from an older commit does not qualify unless the release commit is
@@ -10,14 +10,16 @@ an ancestor of that tested commit and no relevant code changed afterward.
 
 ## Installation and launch
 
-- [ ] `npm install -g gridbash` succeeds for a clean Windows x64 user without a
-      Rust toolchain.
+- [ ] `npm install -g gridbash` succeeds without a Rust toolchain on clean
+      Windows x64, Linux x64/arm64, and macOS arm64/x64 machines.
 - [ ] `gridbash --version` reports the npm package version and launches the
       packaged native executable rather than a repository worktree.
-- [ ] First launch with no GridBash config discovers available Windows shells,
+- [ ] First launch with no GridBash config discovers available native shells,
       saves the chosen default, and uses it on the next launch.
 - [ ] PowerShell, PowerShell 7, cmd, and Git Bash invocation inheritance each
       select the expected pane shell unless an explicit profile overrides it.
+- [ ] zsh, bash, fish, sh, and PowerShell resolve consistently on supported
+      macOS and Linux machines when installed.
 - [ ] Paths containing spaces and non-ASCII characters work for installation,
       config, current directories, and managed worktrees.
 
@@ -25,8 +27,8 @@ an ancestor of that tested commit and no relevant code changed afterward.
 
 - [ ] A pane can launch, accept keyboard and pasted input, resize, produce ANSI
       output, report its cwd, and exit without corrupting sibling panes.
-- [ ] Closing GridBash terminates every owned child process tree without taskkill
-      success spam or orphaned descendants.
+- [ ] Closing GridBash terminates every owned child process tree without
+      platform command noise or orphaned descendants.
 - [ ] Restarting an exited pane preserves its profile, cwd, label, auth choice,
       and managed-worktree metadata.
 - [ ] A 10x10 grid can start and shut down cleanly; busy output does not make
@@ -38,7 +40,7 @@ an ancestor of that tested commit and no relevant code changed afterward.
 
 - [ ] `gridbash --list-profiles` clearly identifies available, missing, and
       selected profiles without exposing credentials or unnecessary user paths.
-- [ ] Built-in Windows profiles resolve expected executables, and a custom
+- [ ] Built-in platform profiles resolve expected executables, and a custom
       profile reports an actionable error when its executable is missing.
 - [ ] Config defaults remain backward compatible; unknown legacy tables do not
       prevent startup.
@@ -75,7 +77,7 @@ an ancestor of that tested commit and no relevant code changed afterward.
 - [ ] README install, quickstart, controls, config, profile, session, and local
       development instructions match the release candidate.
 - [ ] `--help`, example config, release documentation, and npm package contents
-      agree on supported Windows versions and profiles.
+      agree on supported operating systems, architectures, and profiles.
 - [ ] Security reporting, support, contribution, license, and code-of-conduct
       links are present and valid.
 - [ ] Known v1 limitations explicitly include single-process lifetime and the
@@ -85,14 +87,18 @@ an ancestor of that tested commit and no relevant code changed afterward.
 
 - [ ] `cargo fmt -- --check`, `cargo clippy --all-targets -- -D warnings`,
       `cargo test`, launcher tests, and a release build pass on the release commit.
-- [ ] CI builds and packs Windows x64 from a clean runner, and the produced npm
-      tarballs contain only the expected launcher, metadata, docs, and executable.
+- [ ] CI builds and packs Windows x64, Linux x64/arm64, and macOS arm64/x64 from
+      clean runners, and the produced npm tarballs contain only the expected
+      launcher, metadata, docs, and executables.
 - [ ] Native packages publish before the root launcher; exact versions match
       across Cargo, npm root, optional native package, tag, and GitHub release.
 - [ ] npm trusted publishing/provenance and the token fallback are tested or
       explicitly waived with a documented reason.
-- [ ] A clean-machine smoke test installs from the intended npm dist-tag, launches
-      a real pane, exercises input/resize/quit, and removes the package cleanly.
+- [ ] Clean-machine smoke tests on every advertised OS install from the intended
+      npm dist-tag, launch a real pane, exercise input/resize/quit, and remove
+      the package cleanly.
+- [ ] Stable macOS artifacts are signed and notarized, or the release notes and
+      install flow present an explicit, reviewed exception.
 
 ## Stability decision
 
