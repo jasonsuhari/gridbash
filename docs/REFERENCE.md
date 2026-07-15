@@ -135,6 +135,7 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Drag mouse | Select terminal text inside the pane where the drag began and copy it on release. |
 | Right-click pane | Add or remove that pane from the selected set. |
 | Mouse wheel | Scroll only the pane under the pointer; selected panes use GridBash scrollback. |
+| Alt+k | Open the searchable command palette. Type to filter, use Up/Down to select, and press Enter to run an action. |
 | Alt+Left / Alt+Right | Focus the previous or next pane in the row, wrapping at the edge. |
 | Alt+Up / Alt+Down | Focus the pane above or below, wrapping at the edge. |
 | Alt+l | Resize the current grid. |
@@ -161,6 +162,8 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 Drag selection is contained to its source pane and copies through the standard OSC 52 clipboard sequence. Use `--no-mouse` if the host terminal, serial link, or multiplexer cannot forward mouse reporting.
 
 When multiple panes are selected, typing is broadcast to them. With zero or one selected pane, input goes only to the focused pane. The Alt+c command line captures its output and runs Enter-submitted commands in the cwd shown in its prompt.
+
+The command palette lists the available pane, tab, grid, manager, settings, help, and quit actions together with their shortcuts. Its query supports tolerant subsequence matching, pasted Unicode text, and cursor editing. Palette input is never sent to a child terminal; press Esc or Alt+k to close it without running anything.
 
 Pane Activity provides auth, rename, refresh, sleep/wake, and manager-goal controls. Navigate with Up/Down and activate with Enter or Space. Direct keys inside the view are `n` to rename, `r` to refresh, `z` to sleep or wake, `g` to edit the grid goal, and `u` to stop it. Close it with Esc, `q`, or Alt+p; Alt+o switches to overall settings.
 
