@@ -9,6 +9,7 @@ mod image_preview;
 mod layout;
 mod manager;
 mod onboarding;
+mod output_capture;
 mod process_priority;
 mod profiles;
 mod pty;

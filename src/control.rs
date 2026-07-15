@@ -47,6 +47,17 @@ pub enum ControlCommand {
         path: PathBuf,
         title: Option<String>,
     },
+    CaptureOutput {
+        panes: Vec<usize>,
+        directory: Option<PathBuf>,
+    },
+    StartLogging {
+        panes: Vec<usize>,
+        directory: Option<PathBuf>,
+    },
+    StopLogging {
+        panes: Vec<usize>,
+    },
 }
 
 #[derive(Debug)]
@@ -308,6 +319,68 @@ fn tools_list_result() -> Value {
                     },
                     "required": ["message"]
                 }
+            },
+            {
+                "name": "gridbash_capture_output",
+                "title": "Capture Pane Output",
+                "description": "Save bounded recent plain-text output from one or more GridBash panes.",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "panes": {
+                            "type": "array",
+                            "description": "1-based pane numbers to capture.",
+                            "items": { "type": "integer", "minimum": 1 },
+                            "minItems": 1
+                        },
+                        "directory": {
+                            "type": "string",
+                            "description": "Optional output directory. GridBash local data storage is used by default."
+                        }
+                    },
+                    "required": ["panes"]
+                }
+            },
+            {
+                "name": "gridbash_start_logging",
+                "title": "Start Pane Logging",
+                "description": "Continuously append new plain-text output from one or more GridBash panes to separate files.",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "panes": {
+                            "type": "array",
+                            "description": "1-based pane numbers to log.",
+                            "items": { "type": "integer", "minimum": 1 },
+                            "minItems": 1
+                        },
+                        "directory": {
+                            "type": "string",
+                            "description": "Optional output directory. GridBash local data storage is used by default."
+                        }
+                    },
+                    "required": ["panes"]
+                }
+            },
+            {
+                "name": "gridbash_stop_logging",
+                "title": "Stop Pane Logging",
+                "description": "Stop and flush continuous output logs for one or more GridBash panes.",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "panes": {
+                            "type": "array",
+                            "description": "1-based pane numbers to stop logging.",
+                            "items": { "type": "integer", "minimum": 1 },
+                            "minItems": 1
+                        }
+                    },
+                    "required": ["panes"]
+                }
             }
         ]
     })
@@ -370,6 +443,42 @@ fn tool_arguments_to_command(tool_name: &str, arguments: Value) -> Result<Contro
             Ok(ControlCommand::SetStatus {
                 message: args.message,
             })
+        }
+        "gridbash_capture_output" | "gridbash_start_logging" => {
+            #[derive(Deserialize)]
+            struct Args {
+                panes: Vec<usize>,
+                directory: Option<PathBuf>,
+            }
+
+            let args: Args = serde_json::from_value(arguments).context("invalid output args")?;
+            if args.panes.is_empty() {
+                return Err(anyhow!("at least one pane is required"));
+            }
+            let directory = args.directory.map(absolute_tool_path).transpose()?;
+            if tool_name == "gridbash_capture_output" {
+                Ok(ControlCommand::CaptureOutput {
+                    panes: args.panes,
+                    directory,
+                })
+            } else {
+                Ok(ControlCommand::StartLogging {
+                    panes: args.panes,
+                    directory,
+                })
+            }
+        }
+        "gridbash_stop_logging" => {
+            #[derive(Deserialize)]
+            struct Args {
+                panes: Vec<usize>,
+            }
+
+            let args: Args = serde_json::from_value(arguments).context("invalid logging args")?;
+            if args.panes.is_empty() {
+                return Err(anyhow!("at least one pane is required"));
+            }
+            Ok(ControlCommand::StopLogging { panes: args.panes })
         }
         _ => Err(anyhow!("unknown GridBash tool: {tool_name}")),
     }
@@ -472,7 +581,10 @@ mod tests {
             vec![
                 "gridbash_show_image",
                 "gridbash_send_command",
-                "gridbash_set_status"
+                "gridbash_set_status",
+                "gridbash_capture_output",
+                "gridbash_start_logging",
+                "gridbash_stop_logging"
             ]
         );
     }
@@ -495,6 +607,27 @@ mod tests {
                 command,
                 submit: true
             } if panes == vec![2] && command == "cargo test"
+        ));
+    }
+
+    #[test]
+    fn output_tools_parse_targets_and_optional_directories() {
+        let capture = tool_arguments_to_command(
+            "gridbash_capture_output",
+            json!({ "panes": [1, 3], "directory": "captures" }),
+        )
+        .expect("capture command");
+        assert!(matches!(
+            capture,
+            ControlCommand::CaptureOutput { panes, directory: Some(path) }
+                if panes == vec![1, 3] && path.is_absolute() && path.ends_with("captures")
+        ));
+
+        let stop = tool_arguments_to_command("gridbash_stop_logging", json!({ "panes": [2] }))
+            .expect("stop command");
+        assert!(matches!(
+            stop,
+            ControlCommand::StopLogging { panes } if panes == vec![2]
         ));
     }
 }

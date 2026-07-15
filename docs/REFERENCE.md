@@ -123,6 +123,9 @@ The MCP server exposes:
 | `gridbash_show_image` | Display a local PNG, JPEG, GIF, or WebP file in an overlay. |
 | `gridbash_send_command` | Send text to one or more 1-based pane numbers; submitting with Enter is optional. |
 | `gridbash_set_status` | Replace the current session's status-bar message. |
+| `gridbash_capture_output` | Save each target pane's bounded recent plain-text output. |
+| `gridbash_start_logging` | Start a separate continuous plain-text output log for each target pane. |
+| `gridbash_stop_logging` | Stop and flush each target pane's active output log. |
 
 The API binds only to localhost, authenticates with a per-session token, and is disabled by default.
 
@@ -144,6 +147,8 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+s | Toggle selection of the focused pane. |
 | Alt+a | Select all panes, or clear the set when all are selected. |
 | Alt+c | Open or close the expanded command line. |
+| Alt+Shift+C | Save bounded recent plain-text output from the focused or selected panes. |
+| Alt+Shift+L | Start or stop continuous output logs for the focused or selected panes. |
 | Alt+f | Zoom the focused pane to the full grid area, or restore the grid. |
 | Alt+Shift+V | Dictate one utterance, or cancel active listening. |
 | Alt+h / F1 | Open or close help. |
@@ -161,6 +166,16 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+q | Quit. |
 
 Drag selection is contained to its source pane and copies through the standard OSC 52 clipboard sequence. Use `--no-mouse` if the host terminal, serial link, or multiplexer cannot forward mouse reporting.
+
+Output capture writes the same bounded, ANSI-stripped pane tail used for session
+context. Continuous logging appends only new PTY output; submitted input,
+environment variables, and sibling panes are never added separately. With
+multiple selected panes, capture and logging create one file per selected pane;
+otherwise they target the focused pane. Active logs show a `logging` pane badge.
+Default collision-safe files live under GridBash's platform-local data `output`
+directory, and every operation reports its resolved path. Agent API capture and
+start-log calls may provide an explicit output directory. A write failure stops
+only the affected log and is reported in the status bar.
 
 When multiple panes are selected, typing is broadcast to them. With zero or one selected pane, input goes only to the focused pane. The Alt+c command line captures its output and runs Enter-submitted commands in the cwd shown in its prompt.
 

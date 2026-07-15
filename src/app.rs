@@ -39,6 +39,7 @@ use crate::{
     image_preview::{self, ImagePreview},
     layout::{GridLayout, GridSize, PaneId, pane_at},
     manager::{self, ManagerCommand, ManagerDecision},
+    output_capture::{self, OutputLogs, PaneLogKey},
     process_priority::PaneWorkloadClass,
     profiles::{default_profile_name, find_profile},
     pty::{PtyEvent, PtyPane, PtyWriteToken},
@@ -124,6 +125,7 @@ pub struct App {
     status: String,
     restored_histories: Vec<SavedPaneHistory>,
     session_recorder: Option<SessionRecorder>,
+    output_logs: OutputLogs,
     next_pane_id: usize,
     next_tab_number: usize,
     previous_panes_button: Option<Rect>,
@@ -1994,6 +1996,7 @@ impl App {
             status: init.status,
             restored_histories: init.restored_histories,
             session_recorder: init.session_recorder,
+            output_logs: OutputLogs::default(),
             next_pane_id: 0,
             next_tab_number: 2,
             previous_panes_button: None,
@@ -2573,20 +2576,28 @@ impl App {
             let bytes = pending_output
                 .remove(&(pane, generation))
                 .expect("pending output order and batches stay in sync");
+            let log_key = PaneLogKey::new(pane, generation);
             match routes.get(&(pane, generation)).copied() {
                 Some(PaneRoute::Visible(index)) => {
                     let target = &mut self.panes[index];
                     let plain = target.process_output(&bytes);
                     self.capture_goal_output(index, &plain);
+                    changed |= self.append_output_log(log_key, index + 1, &plain);
                     self.mark_pane_touched(index);
                     changed |= !self.sleeping.contains(&index);
                 }
                 Some(PaneRoute::Inactive { tab, pane }) => {
-                    if let Some(tab) = self.tabs.get_mut(tab).and_then(Option::as_mut) {
+                    let plain = if let Some(tab) = self.tabs.get_mut(tab).and_then(Option::as_mut) {
                         let was_active = tab.panes[pane].active;
                         let plain = tab.panes[pane].process_output(&bytes);
                         capture_goal_text(&mut tab.manager_goal, &tab.sleeping, pane, &plain);
                         changed |= !was_active;
+                        Some(plain)
+                    } else {
+                        None
+                    };
+                    if let Some(plain) = plain {
+                        changed |= self.append_output_log(log_key, pane + 1, &plain);
                     }
                 }
                 None => {}
@@ -2594,6 +2605,18 @@ impl App {
         }
 
         for (pane, generation) in exited {
+            let log_key = PaneLogKey::new(pane, generation);
+            match self.output_logs.stop(log_key) {
+                Ok(Some(path)) => {
+                    self.status = format!("pane output log saved to {}", path.display());
+                    changed = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    self.status = format!("failed to finish pane output log: {error:#}");
+                    changed = true;
+                }
+            }
             match routes.get(&(pane, generation)).copied() {
                 Some(PaneRoute::Visible(index)) => {
                     let target = &mut self.panes[index];
@@ -2629,6 +2652,18 @@ impl App {
         }
 
         changed
+    }
+
+    fn append_output_log(&mut self, key: PaneLogKey, pane_number: usize, plain_text: &str) -> bool {
+        match self.output_logs.append(key, plain_text) {
+            Ok(()) => false,
+            Err(error) => {
+                self.status = format!(
+                    "pane {pane_number} output logging stopped after a write failure: {error:#}"
+                );
+                true
+            }
+        }
     }
 
     fn poll_exited_panes(&mut self) -> bool {
@@ -2950,6 +2985,13 @@ impl App {
                 submit,
             } => self.send_control_command(&panes, &command, submit),
             ControlCommand::ShowImage { path, title } => self.show_control_image(path, title),
+            ControlCommand::CaptureOutput { panes, directory } => {
+                self.capture_control_output(&panes, directory.as_deref())
+            }
+            ControlCommand::StartLogging { panes, directory } => {
+                self.start_control_logging(&panes, directory.as_deref())
+            }
+            ControlCommand::StopLogging { panes } => self.stop_control_logging(&panes),
         }
     }
 
@@ -3032,6 +3074,187 @@ impl App {
         );
         self.image_overlay = Some(preview);
         ControlResponse::with_data(self.status.clone(), data)
+    }
+
+    fn capture_control_output(
+        &mut self,
+        pane_numbers: &[usize],
+        directory: Option<&Path>,
+    ) -> ControlResponse {
+        let targets = match self.control_pane_indices(pane_numbers) {
+            Ok(targets) => targets,
+            Err(error) => return ControlResponse::error(format!("{error:#}")),
+        };
+        self.capture_output_for_indices(&targets, directory)
+    }
+
+    fn capture_output_for_indices(
+        &mut self,
+        targets: &[usize],
+        directory: Option<&Path>,
+    ) -> ControlResponse {
+        if targets.is_empty() {
+            return ControlResponse::error("no target panes available to capture");
+        }
+        let directory = match output_capture::prepare_output_directory(directory) {
+            Ok(directory) => directory,
+            Err(error) => return ControlResponse::error(format!("{error:#}")),
+        };
+
+        let mut files = Vec::new();
+        let mut paths = Vec::new();
+        for index in targets {
+            let Some(pane) = self.panes.get(*index) else {
+                return ControlResponse::error(format!("pane {} is unavailable", index + 1));
+            };
+            let path =
+                match output_capture::capture_output(&directory, index + 1, pane.output_tail()) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.status = format!("pane {} capture failed: {error:#}", index + 1);
+                        return ControlResponse::error(self.status.clone());
+                    }
+                };
+            files.push(serde_json::json!({
+                "pane": index + 1,
+                "path": path.display().to_string()
+            }));
+            paths.push(path);
+        }
+
+        self.status = if let [path] = paths.as_slice() {
+            format!("captured pane output to {}", path.display())
+        } else {
+            format!(
+                "captured {} {} to {}",
+                targets.len(),
+                pane_word(targets.len()),
+                directory.display()
+            )
+        };
+        ControlResponse::with_data(
+            self.status.clone(),
+            serde_json::json!({
+                "directory": directory.display().to_string(),
+                "files": files
+            }),
+        )
+    }
+
+    fn start_control_logging(
+        &mut self,
+        pane_numbers: &[usize],
+        directory: Option<&Path>,
+    ) -> ControlResponse {
+        let targets = match self.control_pane_indices(pane_numbers) {
+            Ok(targets) => targets,
+            Err(error) => return ControlResponse::error(format!("{error:#}")),
+        };
+        self.start_logging_for_indices(&targets, directory)
+    }
+
+    fn start_logging_for_indices(
+        &mut self,
+        targets: &[usize],
+        directory: Option<&Path>,
+    ) -> ControlResponse {
+        if targets.is_empty() {
+            return ControlResponse::error("no target panes available to log");
+        }
+        let directory = match output_capture::prepare_output_directory(directory) {
+            Ok(directory) => directory,
+            Err(error) => return ControlResponse::error(format!("{error:#}")),
+        };
+
+        let mut logs = Vec::new();
+        let mut paths = Vec::new();
+        for index in targets {
+            let Some(pane) = self.panes.get(*index) else {
+                return ControlResponse::error(format!("pane {} is unavailable", index + 1));
+            };
+            let key = PaneLogKey::new(pane.id(), pane.generation());
+            let path = match self.output_logs.path(key) {
+                Some(path) => path.to_path_buf(),
+                None => match self.output_logs.start(key, index + 1, &directory) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.status = format!("pane {} logging failed: {error:#}", index + 1);
+                        return ControlResponse::error(self.status.clone());
+                    }
+                },
+            };
+            logs.push(serde_json::json!({
+                "pane": index + 1,
+                "path": path.display().to_string()
+            }));
+            paths.push(path);
+        }
+
+        self.status = if let [path] = paths.as_slice() {
+            format!("logging pane output to {}", path.display())
+        } else {
+            format!(
+                "logging {} {} to {}",
+                targets.len(),
+                pane_word(targets.len()),
+                directory.display()
+            )
+        };
+        ControlResponse::with_data(
+            self.status.clone(),
+            serde_json::json!({
+                "directory": directory.display().to_string(),
+                "logs": logs
+            }),
+        )
+    }
+
+    fn stop_control_logging(&mut self, pane_numbers: &[usize]) -> ControlResponse {
+        let targets = match self.control_pane_indices(pane_numbers) {
+            Ok(targets) => targets,
+            Err(error) => return ControlResponse::error(format!("{error:#}")),
+        };
+        self.stop_logging_for_indices(&targets)
+    }
+
+    fn stop_logging_for_indices(&mut self, targets: &[usize]) -> ControlResponse {
+        if targets.is_empty() {
+            return ControlResponse::error("no target panes available to stop logging");
+        }
+
+        let mut stopped = Vec::new();
+        for index in targets {
+            let Some(pane) = self.panes.get(*index) else {
+                return ControlResponse::error(format!("pane {} is unavailable", index + 1));
+            };
+            let key = PaneLogKey::new(pane.id(), pane.generation());
+            match self.output_logs.stop(key) {
+                Ok(Some(path)) => stopped.push(serde_json::json!({
+                    "pane": index + 1,
+                    "path": path.display().to_string()
+                })),
+                Ok(None) => {}
+                Err(error) => {
+                    self.status = format!("pane {} log stop failed: {error:#}", index + 1);
+                    return ControlResponse::error(self.status.clone());
+                }
+            }
+        }
+
+        self.status = if stopped.is_empty() {
+            "target panes were not being logged".into()
+        } else if stopped.len() == 1 {
+            format!(
+                "stopped pane output log: {}",
+                stopped[0]["path"].as_str().unwrap_or("unknown path")
+            )
+        } else {
+            format!("stopped {} pane output log(s)", stopped.len())
+        };
+        ControlResponse::with_data(
+            self.status.clone(),
+            serde_json::json!({ "stopped": stopped }),
+        )
     }
 
     fn control_pane_indices(&self, pane_numbers: &[usize]) -> Result<Vec<usize>> {
@@ -3303,6 +3526,10 @@ impl App {
                 self.open_new_tab(terminal)?;
                 Ok(Some(false))
             }
+            'l' if modifiers.contains(KeyModifiers::SHIFT) => {
+                self.toggle_target_output_logging();
+                Ok(Some(false))
+            }
             'l' => {
                 self.open_grid_resizer();
                 Ok(Some(false))
@@ -3313,6 +3540,10 @@ impl App {
             }
             'f' => {
                 self.toggle_zoom();
+                Ok(Some(false))
+            }
+            'c' if modifiers.contains(KeyModifiers::SHIFT) => {
+                self.capture_target_output();
                 Ok(Some(false))
             }
             'c' => {
@@ -5462,6 +5693,32 @@ impl App {
         input_targets_for(self.focus, &self.selected, self.panes.len())
     }
 
+    fn capture_target_output(&mut self) {
+        let targets = self.target_panes();
+        let response = self.capture_output_for_indices(&targets, None);
+        self.status = response.message;
+    }
+
+    fn toggle_target_output_logging(&mut self) {
+        let targets = self.target_panes();
+        if targets.is_empty() {
+            self.status = "no target panes available to log".into();
+            return;
+        }
+        let all_logging = targets.iter().all(|index| {
+            self.panes.get(*index).is_some_and(|pane| {
+                self.output_logs
+                    .is_active(PaneLogKey::new(pane.id(), pane.generation()))
+            })
+        });
+        let response = if all_logging {
+            self.stop_logging_for_indices(&targets)
+        } else {
+            self.start_logging_for_indices(&targets, None)
+        };
+        self.status = response.message;
+    }
+
     fn toggle_sleep_for_focused_pane(&mut self) {
         if self.panes.is_empty() {
             self.status = "no panes to sleep".into();
@@ -5702,6 +5959,13 @@ impl App {
 
     pub fn pane_sleeping(&self, index: usize) -> bool {
         self.sleeping.contains(&index)
+    }
+
+    pub fn pane_logging(&self, index: usize) -> bool {
+        self.panes.get(index).is_some_and(|pane| {
+            self.output_logs
+                .is_active(PaneLogKey::new(pane.id(), pane.generation()))
+        })
     }
 
     pub fn status(&self) -> &str {
@@ -8250,6 +8514,16 @@ mod tests {
     #[test]
     fn input_targets_selected_panes_when_multiple_panes_are_selected() {
         assert_eq!(input_targets_for(2, &selected(&[0, 3]), 4), vec![0, 3]);
+    }
+
+    #[test]
+    fn output_actions_use_the_focused_or_multi_selected_target_set() {
+        assert_eq!(input_targets_for(2, &selected(&[]), 4), vec![2]);
+        assert_eq!(input_targets_for(2, &selected(&[1]), 4), vec![2]);
+        assert_eq!(
+            input_targets_for(2, &selected(&[0, 1, 3]), 4),
+            vec![0, 1, 3]
+        );
     }
 
     #[test]
