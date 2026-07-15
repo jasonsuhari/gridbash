@@ -7,9 +7,9 @@
 
 **The sexiest way to tokenmaxx.**
 
-GridBash is a cross-platform Rust TUI for running CLI agents and shells side by
-side in real PTY panes. Send input to one pane, selected panes, or the whole
-grid without juggling terminal windows.
+GridBash is a local workspace for running and coordinating CLI coding agents in
+parallel. Launch, authenticate, isolate, monitor, and steer Codex, Claude, and
+other agents side by side, each in a real PTY pane.
 
 [Website](https://jasonsuhari.github.io/gridbash/) |
 [npm](https://www.npmjs.com/package/gridbash) |
@@ -40,7 +40,10 @@ The npm package installs only the native binary for your current platform.
 
 - **Precise input routing.** Type into the focused pane, a selected set, or the
   entire grid.
-- **Real terminals.** Run up to 100 PTY-backed panes across tabbed grids.
+- **Managed agent launch.** Choose the agent, auth profile, project, layout, and
+  worktree policy before GridBash starts any panes.
+- **Real terminals underneath.** Run up to 100 PTY-backed panes across tabbed
+  grids, with raw shell grids still available as a secondary path.
 - **Safer parallel work.** Give every pane an isolated repo-local git worktree.
 - **Agent-first profiles.** Launch Codex, Claude, Gemini, Aider, OpenCode, Goose,
   Amp, Cursor, Copilot, shells, or custom commands.
@@ -51,7 +54,7 @@ The npm package installs only the native binary for your current platform.
 
 | Command | Result |
 | --- | --- |
-| `gridbash` | Open the interactive grid picker |
+| `gridbash` | Create a managed agent workspace interactively |
 | `gridbash 2x3 --profile codex` | Launch a 2-by-3 Codex grid |
 | `gridbash --count 12 --layout auto --profile claude` | Auto-arrange 12 Claude panes |
 | `gridbash 2x3 --profile codex --worktrees` | Isolate every pane in a git worktree |
@@ -89,6 +92,16 @@ See the [full controls reference](docs/REFERENCE.md#controls) for resizing,
 renaming, sleeping, restarting, scrolling, settings, and recovery actions.
 
 ## Profiles and configuration
+
+A bare `gridbash` opens the agent-workspace setup. Detected agent profiles are
+listed first; choose a compatible managed auth profile, project folder, grid
+dimensions, and optional worktree isolation, then launch. Built-in shell
+profiles remain available in the same screen as clearly labeled raw-terminal
+options.
+
+Managed auth applies to Claude or Codex processes GridBash launches. GridBash
+does not install global shims, replace the normal `codex` or `claude` commands,
+or intercept commands typed in an unmanaged shell.
 
 Agent profiles are available on every platform: `codex`, `claude`, `gemini`,
 `opencode`, `aider`, `amp`, `goose`, `copilot`, and `cursor`.

@@ -2022,7 +2022,7 @@ impl App {
     fn run_in_terminal(&mut self, terminal: &mut Tui) -> Result<()> {
         if self.launch_plan.is_none() {
             let current_dir = resolved_current_dir()?;
-            let mut composer = Composer::new(current_dir, self.worktrees.clone());
+            let mut composer = Composer::new(current_dir, self.worktrees.clone(), &self.config)?;
             let Some(plan) = composer.run(terminal, &self.config)? else {
                 return Ok(());
             };
@@ -2043,6 +2043,9 @@ impl App {
 
     fn set_launch_plan(&mut self, mut plan: LaunchPlan) -> Result<()> {
         apply_auth_defaults(&mut plan, &self.config)?;
+        if let Some(cwd) = plan.panes.first().map(|pane| pane.cwd.clone()) {
+            self.command_line.cwd = cwd;
+        }
         self.layout = GridLayout::new(plan.grid);
         self.launch_plan = Some(plan);
         self.restored_histories.clear();
@@ -3383,7 +3386,7 @@ impl App {
 
     fn open_new_tab(&mut self, terminal: &mut Tui) -> Result<()> {
         let current_dir = self.active_pane_cwd().unwrap_or(resolved_current_dir()?);
-        let mut composer = Composer::new(current_dir, self.worktrees.clone());
+        let mut composer = Composer::new(current_dir, self.worktrees.clone(), &self.config)?;
         match composer.run(terminal, &self.config)? {
             Some(plan) => {
                 self.add_tab_from_plan(plan)?;

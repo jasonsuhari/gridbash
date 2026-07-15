@@ -4,7 +4,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "gridbash")]
-#[command(about = "Fast, beautiful terminal grids for CLI agents")]
+#[command(about = "A local workspace for running CLI coding agents in parallel")]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]

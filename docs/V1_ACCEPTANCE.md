@@ -14,8 +14,10 @@ an ancestor of that tested commit and no relevant code changed afterward.
       Rust toolchain.
 - [ ] `gridbash --version` reports the npm package version and launches the
       packaged native executable rather than a repository worktree.
-- [ ] First launch with no GridBash config discovers available Windows shells,
-      saves the chosen default, and uses it on the next launch.
+- [ ] Bare launch discovers available agents and shells, leads with managed
+      agent-workspace setup, and labels raw terminals as a secondary path.
+- [ ] Workspace setup can choose profile, compatible auth, project, dimensions,
+      and worktree isolation without globally replacing agent commands.
 - [ ] PowerShell, PowerShell 7, cmd, and Git Bash invocation inheritance each
       select the expected pane shell unless an explicit profile overrides it.
 - [ ] Paths containing spaces and non-ASCII characters work for installation,

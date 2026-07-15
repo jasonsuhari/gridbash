@@ -8,7 +8,6 @@ mod control;
 mod image_preview;
 mod layout;
 mod manager;
-mod onboarding;
 mod process_priority;
 mod profiles;
 mod pty;
@@ -28,7 +27,6 @@ use crate::{
     app::App,
     cli::{Cli, Command},
     config::Config,
-    onboarding::OnboardingResult,
     profiles::{find_profile, profile_diagnostics},
     session::select_resume_session,
 };
@@ -75,12 +73,6 @@ fn main() -> Result<()> {
 
         let mut app = App::resume(config, record, !cli.no_mouse)?;
         return app.run();
-    }
-
-    if onboarding::should_run(&cli, &config)
-        && onboarding::run(&mut config, cli.config.as_deref())? == OnboardingResult::Quit
-    {
-        return Ok(());
     }
 
     let mut app = App::new(cli, config)?;

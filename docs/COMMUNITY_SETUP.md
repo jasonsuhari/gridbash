@@ -35,9 +35,9 @@ Configured values:
 - Delete branch on merge: enabled.
 - Secret scanning: enabled.
 - Secret scanning push protection: enabled.
-- Description: `Windows-native terminal grids for running many CLI agents at once.`
+- Description: `Local workspace for running and coordinating CLI coding agents in parallel.`
 - Homepage: blank until npm metadata is corrected or a dedicated landing page exists.
-- Topics: `windows`, `rust`, `tui`, `terminal`, `multiplexer`, `cli`, `developer-tools`, `ai-agents`, `coding-agents`, `codex`, `claude`, `conpty`, `powershell`, `git-bash`, `ratatui`, `orchestration`, `npm-package`, `open-source`.
+- Topics: `rust`, `tui`, `terminal`, `agent-workspace`, `cli`, `developer-tools`, `ai-agents`, `coding-agents`, `codex`, `claude`, `ratatui`, `orchestration`, `npm-package`, `open-source`.
 
 Settings that still require browser or elevated-token access:
 
