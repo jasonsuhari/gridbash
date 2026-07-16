@@ -140,6 +140,9 @@ The MCP server exposes:
 | `gridbash_read_pane_output` | Return bounded recent output for explicitly requested stable pane IDs. |
 | `gridbash_send_command` | Send text to one or more 1-based pane numbers; submitting with Enter is optional. |
 | `gridbash_set_status` | Replace the current session's status-bar message. |
+| `gridbash_capture_output` | Save each target pane's bounded recent plain-text output. |
+| `gridbash_start_logging` | Start a separate continuous plain-text output log for each target pane. |
+| `gridbash_stop_logging` | Stop and flush each target pane's active output log. |
 
 Snapshots include each pane's current visible number and stable ID so a later
 output read remains attached to the intended live pane if the grid is reordered.
@@ -171,6 +174,8 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+s | Toggle selection of the focused pane. |
 | Alt+a | Select all panes, or clear the set when all are selected. |
 | Alt+c | Open or close the expanded command line. |
+| Alt+Shift+C | Save bounded recent plain-text output from the focused or selected panes. |
+| Alt+Shift+L | Start or stop continuous output logs for the focused or selected panes. |
 | Alt+f | Zoom the focused pane to the full grid area, or restore the grid. |
 | Alt+b | Open keyboard scrollback search and copy mode for the focused pane. |
 | Alt+Shift+V | Dictate one utterance, or cancel active listening. |
@@ -199,6 +204,16 @@ selection through the same clipboard path as mouse selection. With no active
 selection, `y` copies the current line. Escape, `q`, or Alt+B closes the viewer
 and restores ordinary terminal input.
 
+Output capture writes the same bounded, ANSI-stripped pane tail used for session
+context. Continuous logging appends only new PTY output; submitted input,
+environment variables, and sibling panes are never added separately. With
+multiple selected panes, capture and logging create one file per selected pane;
+otherwise they target the focused pane. Active logs show a `logging` pane badge.
+Default collision-safe files live under GridBash's platform-local data `output`
+directory, and every operation reports its resolved path. Agent API capture and
+start-log calls may provide an explicit output directory. A write failure stops
+only the affected log and is reported in the status bar.
+
 When multiple panes are selected, typing is broadcast to them. With zero or one selected pane, input goes only to the focused pane. The Alt+c command line captures its output and runs Enter-submitted commands in the cwd shown in its prompt.
 
 Pane Activity provides auth, rename, refresh, sleep/wake, deactivate, and manager-goal controls. Navigate with Up/Down and activate with Enter or Space. Direct keys inside the view are `n` to rename, `r` to refresh, `z` to sleep or wake, `d` to deactivate, `g` to edit the grid goal, and `u` to stop it. Close it with Esc, `q`, or Alt+p; Alt+Shift+A opens Auth Profiles and Alt+o switches to overall settings.
@@ -223,7 +238,8 @@ Supported actions are `quit`, `help`, `focus-left`, `focus-right`, `focus-up`,
 `focus-down`, `toggle-selection`, `select-all`, `sleep-panes`, `restart-panes`,
 `next-tab`, `new-tab`, `resize-grid`, `swap-panes`, `zoom-pane`, `command-line`,
 `voice-input`, `edit-goal`, `stop-goal`, `settings`, `previous-panes`,
-`pane-activity`, `copy-mode`, `auth-profiles`, `rename-tab`, and `rename-pane`. Unlisted actions retain their
+`pane-activity`, `copy-mode`, `auth-profiles`, `capture-output`,
+`toggle-output-logging`, `rename-tab`, and `rename-pane`. Unlisted actions retain their
 defaults. Duplicate chords and unmodified terminal keys are rejected. F1 and
 `Alt+q` remain reserved help and quit recovery paths; in-app help displays the
 effective bindings.

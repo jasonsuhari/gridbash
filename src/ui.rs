@@ -141,6 +141,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         let selected = app.selected().contains(&index);
         let sleeping = app.pane_sleeping(index);
         let quiet = app.activity_badges_enabled() && pane.output_quiet();
+        let logging = app.pane_logging(index);
         let chrome = pane_chrome(
             selected,
             focused,
@@ -150,6 +151,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             quiet,
             palette,
         );
+        let badge = if logging {
+            format!("{} logging", chrome.badge)
+        } else {
+            chrome.badge.to_string()
+        };
 
         let header_summary = app.pane_header_summary(index, rect.width as usize);
         let usage = app.pane_usage_label(index);
@@ -158,7 +164,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             chrome.quiet_marker,
             &header_summary,
             usage.as_deref(),
-            chrome.badge,
+            &badge,
             app.compact_titles_enabled(),
             rect.width.saturating_sub(2),
         );

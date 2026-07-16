@@ -10,6 +10,7 @@ mod image_preview;
 mod keybindings;
 mod layout;
 mod manager;
+mod output_capture;
 mod process_priority;
 mod profiles;
 mod pty;

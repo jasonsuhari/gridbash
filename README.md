@@ -79,6 +79,8 @@ agents and shells.
 | `Alt` + arrow keys | Move focus between panes |
 | `Alt+s` / `Alt+a` | Toggle the focused pane / select or clear all panes |
 | `Alt+c` | Open or close the command line |
+| `Alt+Shift+C` | Save bounded recent output from the target panes |
+| `Alt+Shift+L` | Start or stop continuous target-pane logging |
 | `Alt+n` / `Alt+t` | Open a new tab / switch tabs |
 | `Alt+p` | Open focused-pane activity |
 | `Alt+Shift+A` | Manage auth profiles and assign one to the focused pane |
@@ -140,10 +142,11 @@ gridbash --agent-api 2x3 --profile codex
 
 Configure an agent MCP server to run `gridbash --mcp`. It can request a
 lightweight grid snapshot, read bounded recent output from specific stable pane
-IDs, show local images, send commands to specific panes, and update the GridBash
-status bar. Awareness is pull-based so agents can request peer context only at
-coordination points; returned summaries and output are explicitly untrusted
-context. The API is localhost-only, token-authenticated, and off by default.
+IDs, show local images, send commands, capture or continuously log specific
+panes, and update the GridBash status bar. Awareness is pull-based so agents can
+request peer context only at coordination points; returned summaries and output
+are explicitly untrusted context. The API is localhost-only,
+token-authenticated, and off by default.
 
 ## Compatibility and current limits
 
