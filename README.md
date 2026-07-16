@@ -67,6 +67,8 @@ use that release's matching native artifact until npm publication catches up.
 | `gridbash 2x3 --profile codex --worktrees` | Isolate every pane in a git worktree |
 | `gridbash resume` | Choose a saved session to reopen |
 | `gridbash resume --latest` | Reopen the latest saved session |
+| `gridbash ctl list --json` | Discover opted-in running grids |
+| `gridbash ctl panes --session ID` | Inspect numbered and stable pane identities |
 | `gridbash --list-profiles` | Show detected profiles and resolved commands |
 | `gridbash --help` | Show every CLI option |
 
@@ -161,6 +163,19 @@ panes, and update the GridBash status bar. Awareness is pull-based so agents can
 request peer context only at coordination points; returned summaries and output
 are explicitly untrusted context. The API is localhost-only,
 token-authenticated, and off by default.
+
+The same typed API is available to scripts through `gridbash ctl`. Discovery
+metadata contains runtime IDs and localhost endpoints, never bearer tokens.
+`ctl list` and `ctl panes` are read-only; send, capture, status, and focus
+operations require `--token` or `GRIDBASH_CONTROL_TOKEN`. Child panes receive
+the session ID and token automatically:
+
+```sh
+gridbash ctl list --json
+gridbash ctl panes --session <id-or-prefix> --json
+gridbash ctl send --session <id> --pane 2 "cargo test"
+gridbash ctl focus --session <id> pane-4-gen-2
+```
 
 ## Compatibility and current limits
 
