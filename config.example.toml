@@ -1,6 +1,7 @@
 [defaults]
+# Default for direct launches and the initial managed-workspace selection.
 # Set this to a key reported by `gridbash --list-profiles`.
-# profile = "git-bash"
+# profile = "codex"
 # Keeps compilers and other pane workloads from starving interactive desktop apps.
 pane_priority = "below-normal"
 # Shares CPU fairly under contention while keeping every pane process running.
@@ -10,6 +11,8 @@ pane_workload = "adaptive"
 compact_titles = false
 activity_badges = true
 confirm_quit = false
+# Leave live pane processes in local background hosts when the UI closes.
+keep_terminals_running = false
 scrollback_rows = 10000
 refresh_ms = 16
 
@@ -20,7 +23,13 @@ selected = "cyan"
 quiet = "dark-gray"
 exited = "red"
 
+# Override any supported application action. Unlisted actions keep their defaults.
+[keys]
+zoom-pane = "alt+f"
+settings = "alt+o"
+
 [manager]
+activity_summaries = false # opt in: sends bounded active-tab output to this API
 endpoint = "https://api.openai.com/v1/chat/completions"
 model = "gpt-4o-mini"
 api_key = ""

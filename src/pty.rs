@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::BTreeMap,
     env,
     ffi::OsString,
@@ -225,13 +226,22 @@ impl OutputActivity {
 }
 
 pub struct PtyPane {
+    #[allow(dead_code)]
     id: PaneId,
+    #[allow(dead_code)]
     generation: u64,
     master: Box<dyn MasterPty + Send>,
     child: SpawnGuard,
     writer: PtyWriterQueue,
     workload: PaneWorkloadController,
     workload_error: Option<String>,
+    view: PtyView,
+    pub active: bool,
+    pub exited: bool,
+    child_reaped: bool,
+}
+
+pub(crate) struct PtyView {
     parser: Parser,
     screen_revision: u64,
     cwd: PathBuf,
@@ -245,11 +255,171 @@ pub struct PtyPane {
     input_revision: u64,
     output_tail: String,
     output_tail_chars: usize,
-    pub active: bool,
-    pub exited: bool,
-    child_reaped: bool,
 }
 
+impl PtyView {
+    pub(crate) fn new(cwd: PathBuf, scrollback_rows: usize) -> Self {
+        Self {
+            parser: Parser::new(24, 80, scrollback_rows.clamp(1_000, 50_000)),
+            screen_revision: 0,
+            cwd,
+            rows: 24,
+            cols: 80,
+            response_scan_tail: Vec::new(),
+            output_activity: OutputActivity::default(),
+            osc_scan_tail: Vec::new(),
+            input_history: Vec::new(),
+            pending_input: String::new(),
+            input_revision: 0,
+            output_tail: String::new(),
+            output_tail_chars: 0,
+        }
+    }
+
+    pub(crate) fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    pub(crate) fn set_cwd(&mut self, cwd: PathBuf) {
+        self.cwd = cwd;
+    }
+
+    pub(crate) fn screen(&self) -> &Screen {
+        self.parser.screen()
+    }
+
+    pub(crate) fn screen_revision(&self) -> u64 {
+        self.screen_revision
+    }
+
+    pub(crate) fn scroll_view(&mut self, rows: isize) -> bool {
+        let changed = scroll_screen(self.parser.screen_mut(), rows);
+        if changed {
+            self.screen_revision = self.screen_revision.wrapping_add(1);
+        }
+        changed
+    }
+
+    pub(crate) fn reset_view(&mut self) -> bool {
+        let screen = self.parser.screen_mut();
+        let changed = screen.scrollback() > 0;
+        screen.set_scrollback(0);
+        if changed {
+            self.screen_revision = self.screen_revision.wrapping_add(1);
+        }
+        changed
+    }
+
+    pub(crate) fn history_lines(&mut self) -> Vec<String> {
+        screen_history_lines(self.parser.screen_mut())
+    }
+
+    pub(crate) fn process_output(&mut self, bytes: &[u8]) -> String {
+        self.update_cwd_from_osc7(bytes);
+        self.parser.process(bytes);
+        let (plain, plain_chars) = plain_terminal_text_with_char_count(bytes);
+        self.append_plain_output(&plain, plain_chars);
+        self.screen_revision = self.screen_revision.wrapping_add(1);
+        self.output_activity.record_output(Instant::now());
+        plain
+    }
+
+    pub(crate) fn output_quiet(&self) -> bool {
+        self.output_activity.is_quiet()
+    }
+
+    pub(crate) fn refresh_output_activity(&mut self, now: Instant, quiet_after: Duration) -> bool {
+        self.output_activity.refresh(now, quiet_after)
+    }
+
+    pub(crate) fn record_input(&mut self, bytes: &[u8]) {
+        self.record_input_activity(bytes);
+        record_input_bytes(bytes, &mut self.pending_input, &mut self.input_history);
+    }
+
+    pub(crate) fn record_input_activity(&mut self, bytes: &[u8]) {
+        advance_input_revision(&mut self.input_revision, bytes);
+    }
+
+    pub(crate) fn input_revision(&self) -> u64 {
+        self.input_revision
+    }
+
+    pub(crate) fn has_pending_input(&self) -> bool {
+        !self.pending_input.is_empty()
+    }
+
+    pub(crate) fn input_history(&self) -> &[String] {
+        &self.input_history
+    }
+
+    pub(crate) fn output_tail(&self) -> &str {
+        &self.output_tail
+    }
+
+    pub(crate) fn restore_history_display(&mut self, output_tail: &str, input_history: &[String]) {
+        self.output_tail = output_tail.to_string();
+        trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
+        self.output_tail_chars = self.output_tail.chars().count();
+        self.input_history = input_history
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .rev()
+            .take(MAX_INPUT_HISTORY)
+            .cloned()
+            .collect::<Vec<_>>();
+        self.input_history.reverse();
+
+        let replay = history_replay_text(&self.output_tail, &self.input_history);
+        if !replay.is_empty() {
+            self.parser.process(replay.as_bytes());
+            self.screen_revision = self.screen_revision.wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn resize_view(&mut self, rows: u16, cols: u16) -> bool {
+        if self.rows == rows && self.cols == cols {
+            return false;
+        }
+        self.parser.screen_mut().set_size(rows, cols);
+        self.rows = rows;
+        self.cols = cols;
+        self.screen_revision = self.screen_revision.wrapping_add(1);
+        true
+    }
+
+    fn update_cwd_from_osc7(&mut self, bytes: &[u8]) {
+        if self.osc_scan_tail.is_empty() && !bytes.contains(&0x1b) {
+            return;
+        }
+        let mut scan = Vec::with_capacity(self.osc_scan_tail.len() + bytes.len());
+        scan.extend_from_slice(&self.osc_scan_tail);
+        scan.extend_from_slice(bytes);
+
+        for payload in osc_payloads(&scan) {
+            if let Some(path) = cwd_from_osc7_payload(payload) {
+                self.cwd = path;
+            }
+        }
+
+        self.osc_scan_tail = incomplete_osc_tail(&scan);
+    }
+
+    fn append_plain_output(&mut self, plain: &str, plain_chars: usize) {
+        if plain.is_empty() {
+            return;
+        }
+
+        self.output_tail.push_str(plain);
+        self.output_tail_chars += plain_chars;
+        if self.output_tail_chars > OUTPUT_TAIL_TRIM_AT_CHARS {
+            trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
+            self.output_tail_chars = self.output_tail.chars().count();
+        }
+    }
+}
+
+#[allow(dead_code)]
 impl PtyPane {
     #[allow(clippy::too_many_arguments)]
     pub fn spawn(
@@ -332,19 +502,7 @@ impl PtyPane {
             writer,
             workload,
             workload_error,
-            parser: Parser::new(24, 80, scrollback_rows.clamp(1_000, 50_000)),
-            screen_revision: 0,
-            cwd: cwd.to_path_buf(),
-            rows: 24,
-            cols: 80,
-            response_scan_tail: Vec::new(),
-            output_activity: OutputActivity::default(),
-            osc_scan_tail: Vec::new(),
-            input_history: Vec::new(),
-            pending_input: String::new(),
-            input_revision: 0,
-            output_tail: String::new(),
-            output_tail_chars: 0,
+            view: PtyView::new(cwd.to_path_buf(), scrollback_rows),
             active: false,
             exited: false,
             child_reaped: false,
@@ -362,49 +520,38 @@ impl PtyPane {
     }
 
     pub fn cwd(&self) -> &Path {
-        &self.cwd
+        self.view.cwd()
     }
 
     pub fn screen(&self) -> &Screen {
-        self.parser.screen()
+        self.view.screen()
     }
 
     pub fn screen_revision(&self) -> u64 {
-        self.screen_revision
+        self.view.screen_revision()
+    }
+
+    pub fn history_lines(&mut self) -> Vec<String> {
+        self.view.history_lines()
     }
 
     pub fn scroll_view(&mut self, rows: isize) -> bool {
-        let changed = scroll_screen(self.parser.screen_mut(), rows);
-        if changed {
-            self.screen_revision = self.screen_revision.wrapping_add(1);
-        }
-        changed
+        self.view.scroll_view(rows)
     }
 
     pub fn reset_view(&mut self) -> bool {
-        let screen = self.parser.screen_mut();
-        let changed = screen.scrollback() > 0;
-        screen.set_scrollback(0);
-        if changed {
-            self.screen_revision = self.screen_revision.wrapping_add(1);
-        }
-        changed
+        self.view.reset_view()
     }
 
     pub fn process_output(&mut self, bytes: &[u8]) -> String {
-        self.update_cwd_from_osc7(bytes);
-        self.parser.process(bytes);
-        let plain = plain_terminal_text(bytes);
-        self.append_plain_output(&plain);
+        let plain = self.view.process_output(bytes);
         self.active = true;
-        self.screen_revision = self.screen_revision.wrapping_add(1);
-        self.output_activity.record_output(Instant::now());
         self.answer_terminal_queries(bytes);
         plain
     }
 
     pub fn output_quiet(&self) -> bool {
-        !self.exited && self.output_activity.is_quiet()
+        !self.exited && self.view.output_quiet()
     }
 
     pub fn refresh_output_activity(&mut self, now: Instant, quiet_after: Duration) -> bool {
@@ -412,48 +559,36 @@ impl PtyPane {
             return false;
         }
 
-        self.output_activity.refresh(now, quiet_after)
+        self.view.refresh_output_activity(now, quiet_after)
     }
 
     pub fn record_input(&mut self, bytes: &[u8]) {
-        self.record_input_activity(bytes);
-        record_input_bytes(bytes, &mut self.pending_input, &mut self.input_history);
+        self.view.record_input(bytes);
     }
 
     pub fn record_input_activity(&mut self, bytes: &[u8]) {
-        advance_input_revision(&mut self.input_revision, bytes);
+        self.view.record_input_activity(bytes);
     }
 
     pub fn input_revision(&self) -> u64 {
-        self.input_revision
+        self.view.input_revision()
+    }
+
+    pub fn has_pending_input(&self) -> bool {
+        self.view.has_pending_input()
     }
 
     pub fn input_history(&self) -> &[String] {
-        &self.input_history
+        self.view.input_history()
     }
 
     pub fn output_tail(&self) -> &str {
-        &self.output_tail
+        self.view.output_tail()
     }
 
     pub fn restore_history_display(&mut self, output_tail: &str, input_history: &[String]) {
-        self.output_tail = output_tail.to_string();
-        trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
-        self.output_tail_chars = self.output_tail.chars().count();
-        self.input_history = input_history
-            .iter()
-            .filter(|line| !line.trim().is_empty())
-            .rev()
-            .take(MAX_INPUT_HISTORY)
-            .cloned()
-            .collect::<Vec<_>>();
-        self.input_history.reverse();
-
-        let replay = history_replay_text(&self.output_tail, &self.input_history);
-        if !replay.is_empty() {
-            self.parser.process(replay.as_bytes());
-            self.screen_revision = self.screen_revision.wrapping_add(1);
-        }
+        self.view
+            .restore_history_display(output_tail, input_history);
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
@@ -486,11 +621,10 @@ impl PtyPane {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
-        if self.rows == rows && self.cols == cols {
+        if !self.view.resize_view(rows, cols) {
             return Ok(());
         }
 
-        self.parser.screen_mut().set_size(rows, cols);
         self.master
             .resize(PtySize {
                 rows,
@@ -499,9 +633,6 @@ impl PtyPane {
                 pixel_height: 0,
             })
             .context("failed to resize PTY")?;
-        self.rows = rows;
-        self.cols = cols;
-        self.screen_revision = self.screen_revision.wrapping_add(1);
         Ok(())
     }
 
@@ -518,20 +649,25 @@ impl PtyPane {
     }
 
     fn answer_terminal_queries(&mut self, bytes: &[u8]) {
-        if self.response_scan_tail.is_empty() && !bytes.contains(&0x1b) {
+        if self.view.response_scan_tail.is_empty() && !bytes.contains(&0x1b) {
             return;
         }
-        let mut scan = Vec::with_capacity(self.response_scan_tail.len() + bytes.len());
-        scan.extend_from_slice(&self.response_scan_tail);
-        scan.extend_from_slice(bytes);
+        let scan = if self.view.response_scan_tail.is_empty() {
+            Cow::Borrowed(bytes)
+        } else {
+            let mut scan = Vec::with_capacity(self.view.response_scan_tail.len() + bytes.len());
+            scan.extend_from_slice(&self.view.response_scan_tail);
+            scan.extend_from_slice(bytes);
+            Cow::Owned(scan)
+        };
 
-        if contains_sequence(&scan, DEVICE_STATUS_QUERY) {
+        if contains_sequence(scan.as_ref(), DEVICE_STATUS_QUERY) {
             let _ = self.write(b"\x1b[0n");
         }
 
-        let cursor_position_requests = count_sequence(&scan, CURSOR_POSITION_QUERY);
+        let cursor_position_requests = count_sequence(scan.as_ref(), CURSOR_POSITION_QUERY);
         if cursor_position_requests > 0 {
-            let (row, column) = self.parser.screen().cursor_position();
+            let (row, column) = self.view.parser.screen().cursor_position();
             let response = format!(
                 "\x1b[{};{}R",
                 row.saturating_add(1),
@@ -542,30 +678,13 @@ impl PtyPane {
             }
         }
 
-        if contains_sequence(&scan, PRIMARY_DEVICE_ATTRIBUTES_QUERY)
-            || contains_sequence(&scan, PRIMARY_DEVICE_ATTRIBUTES_ZERO_QUERY)
+        if contains_sequence(scan.as_ref(), PRIMARY_DEVICE_ATTRIBUTES_QUERY)
+            || contains_sequence(scan.as_ref(), PRIMARY_DEVICE_ATTRIBUTES_ZERO_QUERY)
         {
             let _ = self.write(b"\x1b[?1;2c");
         }
 
-        self.response_scan_tail = terminal_query_scan_tail(&scan);
-    }
-
-    fn update_cwd_from_osc7(&mut self, bytes: &[u8]) {
-        if self.osc_scan_tail.is_empty() && !bytes.contains(&0x1b) {
-            return;
-        }
-        let mut scan = Vec::with_capacity(self.osc_scan_tail.len() + bytes.len());
-        scan.extend_from_slice(&self.osc_scan_tail);
-        scan.extend_from_slice(bytes);
-
-        for payload in osc_payloads(&scan) {
-            if let Some(path) = cwd_from_osc7_payload(payload) {
-                self.cwd = path;
-            }
-        }
-
-        self.osc_scan_tail = incomplete_osc_tail(&scan);
+        self.view.response_scan_tail = terminal_query_scan_tail(scan.as_ref());
     }
 
     pub fn terminate(&mut self) {
@@ -618,19 +737,6 @@ impl PtyPane {
             thread::sleep(CHILD_REAP_POLL_INTERVAL.min(deadline - now));
         }
     }
-
-    fn append_plain_output(&mut self, plain: &str) {
-        if plain.is_empty() {
-            return;
-        }
-
-        self.output_tail.push_str(plain);
-        self.output_tail_chars += plain.chars().count();
-        if self.output_tail_chars > OUTPUT_TAIL_TRIM_AT_CHARS {
-            trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
-            self.output_tail_chars = self.output_tail.chars().count();
-        }
-    }
 }
 
 fn scroll_screen(screen: &mut Screen, rows: isize) -> bool {
@@ -642,6 +748,34 @@ fn scroll_screen(screen: &mut Screen, rows: isize) -> bool {
     };
     screen.set_scrollback(next);
     screen.scrollback() != before
+}
+
+fn screen_history_lines(screen: &mut Screen) -> Vec<String> {
+    let original_scrollback = screen.scrollback();
+    let (rows, columns) = screen.size();
+    let page_rows = usize::from(rows).max(1);
+    let mut lines = Vec::new();
+
+    screen.set_scrollback(usize::MAX);
+    let history_rows = screen.scrollback();
+    let mut history_start = 0;
+    while history_start < history_rows {
+        screen.set_scrollback(history_rows - history_start);
+        let rows_to_take = (history_rows - history_start).min(page_rows);
+        lines.extend(screen.rows(0, columns).take(rows_to_take));
+        history_start += rows_to_take;
+    }
+
+    screen.set_scrollback(0);
+    lines.extend(screen.rows(0, columns));
+    screen.set_scrollback(original_scrollback);
+
+    let first_content = lines.iter().position(|line| !line.is_empty());
+    let last_content = lines.iter().rposition(|line| !line.is_empty());
+    match (first_content, last_content) {
+        (Some(first), Some(last)) => lines[first..=last].to_vec(),
+        _ => vec![String::new()],
+    }
 }
 
 impl Drop for PtyPane {
@@ -1044,38 +1178,67 @@ fn history_replay_text(output_tail: &str, input_history: &[String]) -> String {
     replay
 }
 
-pub(crate) fn plain_terminal_text(bytes: &[u8]) -> String {
+#[cfg(test)]
+fn plain_terminal_text(bytes: &[u8]) -> String {
+    plain_terminal_text_with_char_count(bytes).0
+}
+
+fn plain_terminal_text_with_char_count(bytes: &[u8]) -> (String, usize) {
     let raw = String::from_utf8_lossy(bytes);
-    let mut plain = String::new();
-    let mut chars = raw.chars().peekable();
+    let bytes = raw.as_bytes();
+    let mut plain = String::with_capacity(bytes.len());
+    let mut plain_chars = 0;
+    let mut index = 0;
 
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            skip_escape_chars(&mut chars);
-            continue;
-        }
-
-        match ch {
-            '\r' => {
+    while index < bytes.len() {
+        match bytes[index] {
+            0x1b => index = skip_escape_sequence(bytes, index),
+            b'\r' | b'\n' => {
                 if !plain.ends_with('\n') {
                     plain.push('\n');
+                    plain_chars += 1;
                 }
+                index += 1;
             }
-            '\n' => {
-                if !plain.ends_with('\n') {
-                    plain.push('\n');
+            b'\t' => {
+                plain.push('\t');
+                plain_chars += 1;
+                index += 1;
+            }
+            0x08 => {
+                if plain.pop().is_some() {
+                    plain_chars -= 1;
                 }
+                index += 1;
             }
-            '\t' => plain.push(ch),
-            '\x08' => {
-                plain.pop();
+            byte if byte.is_ascii_control() => index += 1,
+            byte if byte.is_ascii() => {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && bytes[index].is_ascii()
+                    && !bytes[index].is_ascii_control()
+                {
+                    index += 1;
+                }
+                plain.push_str(&raw[start..index]);
+                plain_chars += index - start;
             }
-            ch if ch.is_control() => {}
-            ch => plain.push(ch),
+            _ => {
+                let ch = raw[index..]
+                    .chars()
+                    .next()
+                    .expect("index remains on a UTF-8 character boundary");
+                if !ch.is_control() {
+                    plain.push(ch);
+                    plain_chars += 1;
+                }
+                index += ch.len_utf8();
+            }
         }
     }
 
-    plain
+    (plain, plain_chars)
 }
 
 fn skip_escape_sequence(bytes: &[u8], start: usize) -> usize {
@@ -1119,35 +1282,6 @@ fn skip_escape_sequence(bytes: &[u8], start: usize) -> usize {
     }
 
     index
-}
-
-fn skip_escape_chars(chars: &mut std::iter::Peekable<impl Iterator<Item = char>>) {
-    let Some(kind) = chars.next() else {
-        return;
-    };
-    match kind {
-        '[' => {
-            for ch in chars.by_ref() {
-                if ('\u{40}'..='\u{7e}').contains(&ch) {
-                    break;
-                }
-            }
-        }
-        'O' => {
-            let _ = chars.next();
-        }
-        ']' => {
-            while let Some(ch) = chars.next() {
-                if ch == '\x07' {
-                    break;
-                }
-                if ch == '\x1b' && chars.next_if_eq(&'\\').is_some() {
-                    break;
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 fn incomplete_osc_tail(buffer: &[u8]) -> Vec<u8> {
@@ -1216,6 +1350,31 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    #[ignore = "manual performance benchmark"]
+    fn benchmark_plain_terminal_text() {
+        use std::hint::black_box;
+
+        const ITERATIONS: usize = 10_000;
+        let payload = (0..128)
+            .map(|index| {
+                format!(
+                    "\x1b[38;5;{}mGridBash output {index:03}: compile passed in 1.23s — 東京\x1b[0m\r\n",
+                    32 + index % 160
+                )
+            })
+            .collect::<String>();
+        let start = Instant::now();
+        for _ in 0..ITERATIONS {
+            black_box(plain_terminal_text(black_box(payload.as_bytes())));
+        }
+        let elapsed = start.elapsed();
+        eprintln!(
+            "plain terminal text: {ITERATIONS} iterations in {elapsed:?} ({:?}/iteration)",
+            elapsed / ITERATIONS as u32
+        );
+    }
 
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
 
@@ -1614,6 +1773,26 @@ mod tests {
     }
 
     #[test]
+    fn history_snapshot_includes_bounded_scrollback_and_restores_the_view() {
+        let mut parser = Parser::new(3, 20, 4);
+        parser.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+        parser.screen_mut().set_scrollback(2);
+
+        let lines = screen_history_lines(parser.screen_mut());
+
+        assert_eq!(lines, ["one", "two", "three", "four", "five", "six"]);
+        assert_eq!(parser.screen().scrollback(), 2);
+    }
+
+    #[test]
+    fn empty_history_snapshot_keeps_one_renderable_line() {
+        let mut parser = Parser::new(2, 10, 10);
+
+        assert_eq!(screen_history_lines(parser.screen_mut()), [""]);
+        assert_eq!(parser.screen().scrollback(), 0);
+    }
+
+    #[test]
     fn records_entered_command_lines() {
         let mut pending = String::new();
         let mut history = Vec::new();
@@ -1631,6 +1810,20 @@ mod tests {
         let plain = plain_terminal_text(b"\x1b[31mred\x1b[0m\r\nok\x1b]0;title\x07");
 
         assert_eq!(plain, "red\nok");
+    }
+
+    #[test]
+    fn plain_output_character_count_matches_filtered_unicode() {
+        for input in [
+            "plain ASCII output",
+            "Tokyo 東京 — ready",
+            "erase 東京\u{8}\u{8}京",
+            "\u{1b}[32mgreen\u{1b}[0m\r\nnext",
+            "visible\u{85}control",
+        ] {
+            let (plain, count) = plain_terminal_text_with_char_count(input.as_bytes());
+            assert_eq!(count, plain.chars().count(), "input: {input:?}");
+        }
     }
 
     #[cfg(windows)]

@@ -176,17 +176,42 @@ pub fn profile_diagnostics(config: &Config) -> Vec<ProfileDiagnostic> {
         .collect()
 }
 
-pub fn terminal_profiles(config: &Config) -> Vec<(String, Profile)> {
-    let profiles = all_profiles(config);
-    TERMINAL_PROFILE_NAMES
+pub fn startup_profiles(config: &Config) -> Vec<(String, Profile)> {
+    let mut profiles = all_profiles(config)
+        .into_iter()
+        .filter(|(_, profile)| profile.resolved_executable().is_some())
+        .collect::<Vec<_>>();
+    profiles.sort_by(|(left_name, left), (right_name, right)| {
+        startup_profile_rank(left_name, left)
+            .cmp(&startup_profile_rank(right_name, right))
+            .then_with(|| left_name.cmp(right_name))
+    });
+    profiles
+}
+
+pub fn is_terminal_profile(name: &str) -> bool {
+    TERMINAL_PROFILE_NAMES.contains(&name)
+}
+
+pub fn is_agent_profile(name: &str, profile: &Profile) -> bool {
+    profile.agent_kind.is_some() || AGENT_PROFILE_NAMES.contains(&name)
+}
+
+fn startup_profile_rank(name: &str, profile: &Profile) -> (u8, usize) {
+    if is_agent_profile(name, profile) {
+        let index = AGENT_PROFILE_NAMES
+            .iter()
+            .position(|agent| *agent == name)
+            .unwrap_or(AGENT_PROFILE_NAMES.len());
+        return (0, index);
+    }
+    if let Some(index) = TERMINAL_PROFILE_NAMES
         .iter()
-        .filter_map(|name| {
-            profiles
-                .get(*name)
-                .cloned()
-                .map(|profile| ((*name).to_string(), profile))
-        })
-        .collect()
+        .position(|terminal| *terminal == name)
+    {
+        return (2, index);
+    }
+    (1, AGENT_PROFILE_NAMES.len())
 }
 
 fn builtin_profiles() -> BTreeMap<String, Profile> {
@@ -415,5 +440,25 @@ mod tests {
         assert!(!missing.selected);
         assert!(missing.custom);
         assert!(missing.executable.is_none());
+    }
+
+    #[test]
+    fn startup_profiles_put_agents_before_raw_terminals() {
+        let profiles = startup_profiles(&Config::default());
+        let first_terminal = profiles
+            .iter()
+            .position(|(name, _)| is_terminal_profile(name))
+            .unwrap_or(profiles.len());
+
+        assert!(
+            profiles[..first_terminal]
+                .iter()
+                .all(|(name, _)| !is_terminal_profile(name))
+        );
+        assert!(
+            profiles[first_terminal..]
+                .iter()
+                .all(|(name, _)| is_terminal_profile(name))
+        );
     }
 }

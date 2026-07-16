@@ -1,7 +1,7 @@
 {
   "name": "gridbash",
   "version": "0.2.0",
-  "description": "Cross-platform terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side.",
+  "description": "Local agent workspace for running and coordinating CLI coding agents in parallel.",
   "license": "MIT",
   "homepage": "https://jasonsuhari.github.io/gridbash/",
   "repository": {
@@ -43,7 +43,7 @@
     "terminal",
     "terminal-grid",
     "terminal-ui",
-    "multiplexer",
+    "agent-workspace",
     "agents",
     "ai-agents",
     "cli-agents",

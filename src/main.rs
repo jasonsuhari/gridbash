@@ -1,3 +1,4 @@
+mod actions;
 mod app;
 mod auth;
 mod cli;
@@ -5,10 +6,14 @@ mod codex_sqlite;
 mod composer;
 mod config;
 mod control;
+mod control_discovery;
+mod copy_mode;
 mod image_preview;
+mod keybindings;
 mod layout;
 mod manager;
-mod onboarding;
+mod output_capture;
+mod pane_host;
 mod process_priority;
 mod profiles;
 mod pty;
@@ -28,7 +33,6 @@ use crate::{
     app::App,
     cli::{Cli, Command},
     config::Config,
-    onboarding::OnboardingResult,
     profiles::{find_profile, profile_diagnostics},
     session::select_resume_session,
 };
@@ -36,8 +40,16 @@ use crate::{
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    if let Some(spec_path) = cli.pane_host.as_deref() {
+        return pane_host::run_pane_host(spec_path);
+    }
+
     if cli.mcp {
         return control::run_mcp_server();
+    }
+
+    if let Some(Command::Ctl(args)) = &cli.command {
+        return control::run_ctl(args);
     }
 
     let mut config = Config::load(cli.config.as_deref())?;
@@ -75,12 +87,6 @@ fn main() -> Result<()> {
 
         let mut app = App::resume(config, record, !cli.no_mouse)?;
         return app.run();
-    }
-
-    if onboarding::should_run(&cli, &config)
-        && onboarding::run(&mut config, cli.config.as_deref())? == OnboardingResult::Quit
-    {
-        return Ok(());
     }
 
     let mut app = App::new(cli, config)?;

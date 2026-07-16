@@ -9,8 +9,8 @@ Release target: unreleased
 
 ## What Changed
 
-- Added `Alt+B` to background selected or focused panes and atomically launch fresh replacements with the same configuration.
-- Added `Alt+Shift+B` and a status-bar counter for browsing working, quiet, exited, and offline background agents.
+- Added `Alt+Shift+B` to background selected or focused panes and atomically launch fresh replacements with the same configuration.
+- Added `Alt+Ctrl+B` and a status-bar counter for browsing working, quiet, exited, and offline background agents.
 - Added non-destructive insertion, confirmed live-job termination, explicit offline restart, background output routing, and saved-session metadata.
 
 ## Why It Matters

@@ -4,7 +4,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "gridbash")]
-#[command(about = "Fast, beautiful terminal grids for CLI agents")]
+#[command(about = "A local workspace for running CLI coding agents in parallel")]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
@@ -61,6 +61,10 @@ pub struct Cli {
     #[arg(long)]
     pub mcp: bool,
 
+    /// Internal launch specification for a detached pane host.
+    #[arg(long, hide = true)]
+    pub pane_host: Option<PathBuf>,
+
     /// Print detected launch profiles and exit.
     #[arg(long)]
     pub list_profiles: bool,
@@ -80,6 +84,8 @@ pub enum GridMode {
 pub enum Command {
     /// Find and reopen a saved GridBash session.
     Resume(ResumeArgs),
+    /// Inspect or control an opted-in running GridBash session.
+    Ctl(CtlArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -94,6 +100,62 @@ pub struct ResumeArgs {
     /// Resume the most recently updated session without prompting.
     #[arg(long)]
     pub latest: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct CtlArgs {
+    /// Runtime session id or unique id prefix. Required when multiple sessions are running.
+    #[arg(long, global = true)]
+    pub session: Option<String>,
+
+    /// Session bearer token. Defaults to GRIDBASH_CONTROL_TOKEN.
+    #[arg(long, global = true)]
+    pub token: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    #[command(subcommand)]
+    pub action: CtlAction,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum CtlAction {
+    /// List discoverable running sessions.
+    List,
+    /// List panes and stable pane identities.
+    Panes,
+    /// Send text to one or more panes.
+    Send {
+        /// Pane number or stable pane-<id>-gen-<generation> identity. Repeat for multiple panes.
+        #[arg(short = 'p', long = "pane", required = true)]
+        panes: Vec<String>,
+        /// Text to send. Quote shell-sensitive content.
+        command: String,
+        /// Write the text without pressing Enter.
+        #[arg(long)]
+        no_submit: bool,
+    },
+    /// Capture bounded recent plain-text pane output.
+    Capture {
+        /// Pane number or stable pane identity. Repeat for multiple panes.
+        #[arg(short = 'p', long = "pane", required = true)]
+        panes: Vec<String>,
+        /// Optional output directory.
+        #[arg(long)]
+        directory: Option<PathBuf>,
+    },
+    /// Replace the running session status-bar message.
+    Status {
+        /// New status text.
+        message: String,
+    },
+    /// Focus one pane by number or stable identity.
+    Focus {
+        /// Pane number or stable pane-<id>-gen-<generation> identity.
+        pane: String,
+    },
 }
 
 #[cfg(test)]
@@ -118,5 +180,30 @@ mod tests {
         assert!(cli.command.is_none());
         assert_eq!(cli.grid.as_deref(), Some("2x3"));
         assert_eq!(cli.profile.as_deref(), Some("git-bash"));
+    }
+
+    #[test]
+    fn parses_scriptable_control_commands() {
+        let cli = Cli::parse_from([
+            "gridbash",
+            "ctl",
+            "send",
+            "--session",
+            "abc",
+            "--pane",
+            "pane-4-gen-2",
+            "--no-submit",
+            "echo ready",
+        ]);
+        let Some(Command::Ctl(args)) = cli.command else {
+            panic!("expected ctl command");
+        };
+
+        assert_eq!(args.session.as_deref(), Some("abc"));
+        assert!(matches!(
+            args.action,
+            CtlAction::Send { panes, command, no_submit: true }
+                if panes == vec!["pane-4-gen-2"] && command == "echo ready"
+        ));
     }
 }
