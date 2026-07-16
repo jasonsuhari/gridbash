@@ -80,8 +80,8 @@ an ancestor of that tested commit and no relevant code changed afterward.
       agree on supported Windows versions and profiles.
 - [ ] Security reporting, support, contribution, license, and code-of-conduct
       links are present and valid.
-- [ ] Known v1 limitations explicitly include single-process lifetime and the
-      lack of daemon-backed detach/reattach.
+- [ ] Known v1 limitations explicitly include single-client background hosts and
+      the lack of a consolidated, multi-client session daemon.
 
 ## Packaging and release
 

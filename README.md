@@ -48,7 +48,10 @@ The npm package installs only the native binary for your current platform.
 - **Agent-first profiles.** Launch Codex, Claude, Gemini, Aider, OpenCode, Goose,
   Amp, Cursor, Copilot, shells, or custom commands.
 - **Built-in workflow tools.** Resize grids, restore sessions, dictate prompts,
-  inspect stable pane activity, and optionally generate concise AI work summaries.
+  inspect stable pane activity, optionally generate concise AI work summaries,
+  and let a manager route targeted follow-ups.
+- **Optional background terminals.** Close the UI without stopping live panes,
+  then reconnect to the same processes from a saved session.
 
 ## Common commands
 
@@ -94,6 +97,11 @@ agents and shells.
 
 See the [full controls reference](docs/REFERENCE.md#controls) for resizing,
 renaming, sleeping, restarting, scrolling, settings, and recovery actions.
+
+To keep live terminals running after GridBash closes, open Settings with
+`Alt+o` and enable **Keep terminals running**. GridBash returns control to the
+launching shell when you quit; reconnect later with `gridbash resume --latest`
+or select the session with `gridbash resume`.
 
 ## Profiles and configuration
 
@@ -154,9 +162,9 @@ token-authenticated, and off by default.
   SSH or tmux when the remote session advertises a color-capable `TERM`.
 - Use `--no-mouse` when a terminal or multiplexer does not forward mouse input.
   `TERM=dumb` and Linux kernel consoles are not supported.
-- GridBash v1 is single-process: quitting it closes its child agents. Session
-  resume restores layout, pane metadata, and recent context by relaunching
-  terminals; it does not reattach live processes or replay commands.
+- Background pane hosts are local and single-client. Closing GridBash can leave
+  them running, but rebooting the machine or stopping a host loses the live PTY;
+  saved history and launch metadata remain available for a fresh resume.
 
 ## Development
 

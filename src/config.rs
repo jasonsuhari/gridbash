@@ -39,6 +39,8 @@ pub struct UiConfig {
     pub activity_badges: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub confirm_quit: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_terminals_running: bool,
     #[serde(
         default = "UiConfig::default_scrollback_rows",
         skip_serializing_if = "UiConfig::is_default_scrollback_rows"
@@ -91,6 +93,7 @@ impl Default for UiConfig {
             compact_titles: false,
             activity_badges: Self::default_activity_badges(),
             confirm_quit: false,
+            keep_terminals_running: false,
             scrollback_rows: Self::default_scrollback_rows(),
             refresh_ms: Self::default_refresh_ms(),
             palette: UiPalette::default(),
@@ -115,6 +118,7 @@ impl UiConfig {
         !self.compact_titles
             && self.activity_badges == Self::default_activity_badges()
             && !self.confirm_quit
+            && !self.keep_terminals_running
             && self.scrollback_rows == Self::default_scrollback_rows()
             && self.refresh_ms == Self::default_refresh_ms()
             && self.palette.is_default()
@@ -523,6 +527,7 @@ mod tests {
             compact_titles = true
             activity_badges = false
             confirm_quit = true
+            keep_terminals_running = true
             scrollback_rows = 24000
             refresh_ms = 32
 
@@ -539,6 +544,7 @@ mod tests {
         assert!(config.ui.compact_titles);
         assert!(!config.ui.activity_badges);
         assert!(config.ui.confirm_quit);
+        assert!(config.ui.keep_terminals_running);
         assert_eq!(config.ui.scrollback_rows, 24_000);
         assert_eq!(config.ui.refresh_ms, 32);
         assert_eq!(config.ui.palette.accent, PaletteColor::Amber);

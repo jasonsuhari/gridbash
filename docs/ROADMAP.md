@@ -8,11 +8,12 @@
 - Built-in CLI agent profiles.
 - Demo-ready dark theme.
 - Release as a single Windows x64 executable.
+- Optional local background pane hosts with saved-session reattachment.
 - Stable-release gates are tracked in [`V1_ACCEPTANCE.md`](V1_ACCEPTANCE.md).
 
 ## V2
 
-- Background daemon for detach/reattach.
+- Consolidated per-user session daemon and durable detach/reattach state.
 - Multi-client attach.
 - Agent status classifiers.
 - Plugin API.

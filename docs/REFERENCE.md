@@ -87,10 +87,15 @@ gridbash resume <session-id>
 
 A snapshot restores grid dimensions, pane profiles, working directories,
 worktree names, auth assignments, and a pane-local view of recent submitted
-commands and output. Resume starts new child terminals. It does not reattach old
-processes or replay commands into a shell.
+commands and output. By default, resume starts new child terminals and does not
+replay old commands into a shell.
 
-GridBash is currently single-process: closing it closes its child agents. Session resume is recovery context, not detach and reattach.
+Enable **Keep terminals running** in Settings to detach live pane hosts when the
+GridBash UI closes. `gridbash resume` then reconnects to the same PTYs; output
+produced while detached is added to the restored view. If a host is no longer
+available, GridBash starts a replacement terminal and retains the saved context.
+The background hosts are local, authenticated, and accept one GridBash client at
+a time.
 
 ## Managed git worktrees
 
@@ -346,6 +351,7 @@ pane_workload = "adaptive"     # or "unrestricted"
 compact_titles = false
 activity_badges = true
 confirm_quit = false
+keep_terminals_running = false
 scrollback_rows = 10000
 refresh_ms = 16
 
@@ -372,7 +378,7 @@ claude = "claude-1"
 codex = "codex-2"
 ```
 
-Settings persist compact titles, activity badges, quit confirmation, new-pane scrollback, refresh delay, todo prompts, auth and workload policy, and the interface palette. Supported runtime changes apply immediately.
+Settings persist compact titles, activity badges, quit confirmation, background-terminal behavior, new-pane scrollback, refresh delay, todo prompts, auth and workload policy, and the interface palette. Supported runtime changes apply immediately.
 
 ### Grid manager
 

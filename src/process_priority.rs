@@ -1,8 +1,11 @@
 use std::io;
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::{PaneProcessPriority, PaneWorkloadPolicy};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum PaneWorkloadClass {
     Focused,
     Selected,
