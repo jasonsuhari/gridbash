@@ -20,6 +20,7 @@ fn search_keywords(action: Action) -> &'static str {
         Action::AuthProfiles => "accounts credentials profiles",
         Action::CaptureOutput | Action::ToggleOutputLogging => "save terminal logs",
         Action::CopyMode => "scrollback clipboard search",
+        Action::BackgroundPanes | Action::BackgroundJobs => "agents pool stash restore swap",
         Action::BashBot => "assistant brief delegate coordinate",
         _ => "",
     }

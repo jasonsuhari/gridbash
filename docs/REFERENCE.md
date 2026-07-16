@@ -218,6 +218,8 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+p | Open the focused-pane activity summary. |
 | Alt+Shift+P | Open the previous-panes list. |
 | Alt+Shift+A | Open Auth Profiles to manage accounts or assign one to the focused pane. |
+| Alt+Shift+B | Move selected panes, or the focused pane, into the background and launch fresh replacements. |
+| Alt+Ctrl+B | Open the session-wide background-agents list. |
 | Alt+r | Rename the focused pane. |
 | Alt+Shift+R | Rename the current tab. |
 | Alt+Shift+T | Restart the exited focused pane, or all exited selected panes. |
@@ -258,6 +260,10 @@ The command palette lists the available pane, tab, grid, manager, settings, help
 Pane Activity provides auth, rename, refresh, sleep/wake, deactivate, and manager-goal controls. Navigate with Up/Down and activate with Enter or Space. Direct keys inside the view are `n` to rename, `r` to refresh, `z` to sleep or wake, `d` to deactivate, `g` to edit the grid goal, and `u` to stop it. Close it with Esc, `q`, or Alt+p; Alt+Shift+A opens Auth Profiles and Alt+o switches to overall settings.
 
 Deactivating a pane ends its terminal process, compacts the remaining panes, and shrinks the grid whenever a smaller dimension can still hold them. Columns are removed before rows, so deactivating two panes from a `2x3` grid compacts it to `2x2`. The final pane cannot be deactivated.
+
+Alt+Shift+B backgrounds every explicitly selected pane, or the focused pane when the selected set is empty. GridBash first launches fresh panes with the same profile, command, auth, folder, and worktree; only after all replacements succeed are the original PTYs moved into the session-wide pool. Custom pane names follow the original jobs, while fresh replacements return to numbered labels.
+
+Alt+Ctrl+B opens Background Agents. Rows show whether each job is working, quiet, exited, or offline, together with its agent, source tab, folder/worktree, and latest activity. Use Up/Down to choose a row and Enter or Space to swap it into the focused cell; the displaced visible pane goes into the pool instead of being terminated. `R` explicitly restarts an exited or offline row. Delete removes exited/offline rows immediately and requires a second press before stopping a live process.
 
 If the focused pane exits, Enter, `r`, or `t` restarts it, while `z` sleeps it. Alt+Shift+T performs the same restart directly for exited target panes.
 

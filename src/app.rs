@@ -49,7 +49,9 @@ use crate::{
     process_priority::PaneWorkloadClass,
     profiles::{default_profile_name, find_profile},
     pty::{PtyEvent, PtyWriteToken},
-    session::{SavedPaneHistory, SavedTab, SessionRecord, SessionRecorder},
+    session::{
+        SavedBackgroundPane, SavedPane, SavedPaneHistory, SavedTab, SessionRecord, SessionRecorder,
+    },
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
     usage::{self, UsageEvent, UsageTarget},
@@ -145,6 +147,8 @@ pub struct App {
     rename: RenamePaneState,
     tab_rename: RenameTabState,
     previous_panes: PreviousPanesState,
+    background_jobs: Vec<BackgroundJob>,
+    background_picker: BackgroundPickerState,
     follow_up: Option<FollowUpPromptState>,
     auth_profiles: Vec<AuthProfile>,
     auth_refresh_rx: Option<std_mpsc::Receiver<Result<Vec<AuthProfile>, String>>>,
@@ -156,6 +160,7 @@ pub struct App {
     session_recorder: Option<SessionRecorder>,
     output_logs: OutputLogs,
     next_pane_id: usize,
+    next_background_job_id: u64,
     next_tab_number: usize,
     previous_panes_button: Option<Rect>,
     previous_pane_rows: Vec<(usize, Rect)>,
@@ -166,6 +171,8 @@ pub struct App {
     pane_settings_deactivate_button: Option<Rect>,
     pane_settings_goal_button: Option<Rect>,
     pane_settings_stop_goal_button: Option<Rect>,
+    background_jobs_button: Option<Rect>,
+    background_job_rows: Vec<(usize, Rect)>,
     event_tx: mpsc::Sender<PtyEvent>,
     event_rx: mpsc::Receiver<PtyEvent>,
     pane_render_cache: RefCell<HashMap<PaneId, ui::PaneRenderCache>>,
@@ -193,6 +200,7 @@ struct AppInit {
     settings: SettingsState,
     tab_title: String,
     restored_histories: Vec<SavedPaneHistory>,
+    restored_background_panes: Vec<SavedBackgroundPane>,
     restored_hosts: Vec<Option<PtyHostRef>>,
     restored_tabs: Vec<SavedTab>,
     session_recorder: Option<SessionRecorder>,
@@ -213,6 +221,55 @@ struct GridTabSnapshot {
     sleeping: BTreeSet<usize>,
     manager_goal: Option<ManagerGoal>,
     rects: Vec<Rect>,
+}
+
+struct BackgroundJob {
+    id: u64,
+    source_tab: String,
+    name: Option<String>,
+    spec: PaneLaunchSpec,
+    pane: Option<PtyPane>,
+    host: Option<PtyHostRef>,
+    history: SavedPaneHistory,
+    idle: PaneIdleState,
+}
+
+impl BackgroundJob {
+    fn from_saved(saved: &SavedBackgroundPane) -> Self {
+        Self {
+            id: saved.id,
+            source_tab: saved.source_tab.clone(),
+            name: saved.name.clone(),
+            spec: saved.pane.launch_spec(),
+            pane: None,
+            host: saved.pane.host.clone(),
+            history: saved.pane.history.clone(),
+            idle: PaneIdleState::new(Instant::now()),
+        }
+    }
+
+    fn history(&self) -> SavedPaneHistory {
+        self.pane
+            .as_ref()
+            .map(SavedPaneHistory::from_pane)
+            .unwrap_or_else(|| self.history.clone())
+    }
+
+    fn saved(&self) -> SavedBackgroundPane {
+        SavedBackgroundPane {
+            id: self.id,
+            source_tab: self.source_tab.clone(),
+            name: self.name.clone(),
+            pane: SavedPane::from_background(
+                &self.spec,
+                self.history(),
+                self.pane
+                    .as_ref()
+                    .map(PtyPane::host_ref)
+                    .or_else(|| self.host.clone()),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +339,7 @@ struct ActivitySummaryState {
 enum PaneRoute {
     Visible(usize),
     Inactive { tab: usize, pane: usize },
+    Background(usize),
 }
 
 struct PtyDrainBudget {
@@ -974,6 +1032,76 @@ impl PreviousPanesState {
 
     fn move_to_end(&mut self, pane_count: usize) {
         self.cursor = pane_count.saturating_sub(1);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundJobState {
+    Working,
+    Quiet,
+    Exited,
+    Offline,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackgroundJobsView {
+    pub cursor: usize,
+    pub pending_delete: Option<u64>,
+    pub jobs: Vec<BackgroundJobView>,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackgroundJobView {
+    pub id: u64,
+    pub label: String,
+    pub agent: String,
+    pub source_tab: String,
+    pub folder: String,
+    pub worktree: Option<String>,
+    pub summary: String,
+    pub state: BackgroundJobState,
+}
+
+#[derive(Debug, Clone, Default)]
+struct BackgroundPickerState {
+    open: bool,
+    cursor: usize,
+    pending_delete: Option<u64>,
+}
+
+impl BackgroundPickerState {
+    fn begin(&mut self, job_count: usize) {
+        self.open = true;
+        self.cursor = self.cursor.min(job_count.saturating_sub(1));
+        self.pending_delete = None;
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.pending_delete = None;
+    }
+
+    fn move_cursor(&mut self, delta: isize, job_count: usize) {
+        self.pending_delete = None;
+        if job_count == 0 {
+            self.cursor = 0;
+            return;
+        }
+        self.cursor = (self.cursor as isize + delta).clamp(0, job_count as isize - 1) as usize;
+    }
+
+    fn move_to_start(&mut self) {
+        self.cursor = 0;
+        self.pending_delete = None;
+    }
+
+    fn move_to_end(&mut self, job_count: usize) {
+        self.cursor = job_count.saturating_sub(1);
+        self.pending_delete = None;
+    }
+
+    fn clamp_cursor(&mut self, job_count: usize) {
+        self.cursor = self.cursor.min(job_count.saturating_sub(1));
     }
 }
 
@@ -2242,10 +2370,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+k commands | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+k commands | Alt+Shift+b background | Alt+Ctrl+b jobs | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     } else {
-        "Alt+k commands | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Alt+k commands | Alt+Shift+b background | Alt+Ctrl+b jobs | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     }
 }
@@ -2307,6 +2435,7 @@ impl App {
             settings,
             tab_title: "Grid 1".into(),
             restored_histories: Vec::new(),
+            restored_background_panes: Vec::new(),
             restored_hosts: Vec::new(),
             restored_tabs: Vec::new(),
             session_recorder: None,
@@ -2319,6 +2448,7 @@ impl App {
         apply_auth_defaults(&mut launch_plan, &config)?;
         let grid = launch_plan.grid;
         let restored_histories = record.session.pane_histories();
+        let restored_background_panes = record.session.background_panes.clone();
         let restored_hosts = record.session.pane_hosts();
         let restored_tabs = record.session.tabs.clone();
         let tab_title = if record.session.title.is_empty() {
@@ -2348,6 +2478,7 @@ impl App {
             settings,
             tab_title,
             restored_histories,
+            restored_background_panes,
             restored_hosts,
             restored_tabs,
             session_recorder: Some(recorder),
@@ -2360,6 +2491,17 @@ impl App {
         let (usage_tx, usage_rx) = std_mpsc::channel();
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (goal_tx, goal_rx) = std_mpsc::channel();
+        let background_jobs = init
+            .restored_background_panes
+            .iter()
+            .map(BackgroundJob::from_saved)
+            .collect::<Vec<_>>();
+        let next_background_job_id = background_jobs
+            .iter()
+            .map(|job| job.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
         let (activity_summary_tx, activity_summary_rx) = std_mpsc::channel();
         let keybindings = KeyBindings::from_overrides(&init.config.keys)?;
         let (assistant_tx, assistant_rx) = std_mpsc::channel();
@@ -2417,6 +2559,8 @@ impl App {
             rename: RenamePaneState::default(),
             tab_rename: RenameTabState::default(),
             previous_panes: PreviousPanesState::default(),
+            background_jobs,
+            background_picker: BackgroundPickerState::default(),
             follow_up: None,
             auth_profiles: Vec::new(),
             auth_refresh_rx: None,
@@ -2428,6 +2572,7 @@ impl App {
             session_recorder: init.session_recorder,
             output_logs: OutputLogs::default(),
             next_pane_id: 0,
+            next_background_job_id,
             next_tab_number: 2,
             previous_panes_button: None,
             previous_pane_rows: Vec::new(),
@@ -2438,6 +2583,8 @@ impl App {
             pane_settings_deactivate_button: None,
             pane_settings_goal_button: None,
             pane_settings_stop_goal_button: None,
+            background_jobs_button: None,
+            background_job_rows: Vec::new(),
             event_tx,
             event_rx,
             pane_render_cache: RefCell::new(HashMap::new()),
@@ -2540,10 +2687,45 @@ impl App {
             let snapshot = self.restore_saved_tab(saved_tab)?;
             self.tabs.push(Some(snapshot));
         }
+        self.restore_background_panes();
         self.next_tab_number = self.tabs.len() + 1;
         self.start_usage_monitor(&plan);
 
         self.save_session_snapshot()
+    }
+
+    fn restore_background_panes(&mut self) {
+        let mut jobs = mem::take(&mut self.background_jobs);
+        for (index, job) in jobs.iter_mut().enumerate() {
+            let Some(host) = job.host.clone() else {
+                continue;
+            };
+            let id = PaneId(self.next_pane_id);
+            self.next_pane_id += 1;
+            match PtyPane::attach(
+                host,
+                id,
+                0,
+                &job.spec.cwd,
+                self.config.ui.scrollback_rows,
+                self.config.ui.keep_terminals_running,
+                &job.history.output_tail,
+                &job.history.input_history,
+                self.event_tx.clone(),
+            ) {
+                Ok(pane) => {
+                    job.pane = Some(pane);
+                    job.host = None;
+                }
+                Err(error) => {
+                    self.status = format!(
+                        "background agent {} is offline and can be restarted ({error:#})",
+                        index + 1
+                    );
+                }
+            }
+        }
+        self.background_jobs = jobs;
     }
 
     fn next_tab_title(&mut self) -> String {
@@ -2632,6 +2814,7 @@ impl App {
         self.rename.close();
         self.tab_rename.close();
         self.previous_panes.close();
+        self.background_picker.close();
         self.pane_settings.close();
         self.follow_up = None;
         self.goal_editor = None;
@@ -2765,6 +2948,18 @@ impl App {
     }
 
     fn spawn_pane_instance(&mut self, spec: &PaneLaunchSpec, pane_index: usize) -> Result<PtyPane> {
+        self.spawn_pane_instance_for(spec, Some(pane_index))
+    }
+
+    fn spawn_background_pane_instance(&mut self, spec: &PaneLaunchSpec) -> Result<PtyPane> {
+        self.spawn_pane_instance_for(spec, None)
+    }
+
+    fn spawn_pane_instance_for(
+        &mut self,
+        spec: &PaneLaunchSpec,
+        pane_index: Option<usize>,
+    ) -> Result<PtyPane> {
         let launch = spec.resolved_command()?;
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
@@ -2786,9 +2981,9 @@ impl App {
         )
     }
 
-    fn pane_env(&self, pane_index: usize, pane_id: PaneId) -> Vec<(OsString, OsString)> {
+    fn pane_env(&self, pane_index: Option<usize>, pane_id: PaneId) -> Vec<(OsString, OsString)> {
         let mut env = Vec::new();
-        if let Some(control) = &self.control_handle {
+        if let (Some(control), Some(pane_index)) = (&self.control_handle, pane_index) {
             env.extend([
                 (
                     "GRIDBASH_CONTROL_ADDR".into(),
@@ -2876,6 +3071,8 @@ impl App {
                         draw_state.pane_settings_deactivate_button;
                     self.pane_settings_goal_button = draw_state.pane_settings_goal_button;
                     self.pane_settings_stop_goal_button = draw_state.pane_settings_stop_goal_button;
+                    self.background_jobs_button = draw_state.background_jobs_button;
+                    self.background_job_rows = draw_state.background_job_rows;
                 })?;
                 self.sync_pane_sizes();
                 immediate_render = false;
@@ -2955,6 +3152,7 @@ impl App {
                     && !self.settings.open
                     && self.grid_resizer.is_none()
                     && !self.rename.open
+                    && !self.background_picker.open
                     && !self.previous_panes.open
                     && !self.pane_settings.open
                     && self.image_overlay.is_none()
@@ -2986,7 +3184,19 @@ impl App {
     }
 
     fn output_frame_interval(&self) -> Duration {
-        adaptive_output_frame_interval(self.settings.refresh_ms, self.panes.len())
+        let pane_count = self.panes.len()
+            + self
+                .tabs
+                .iter()
+                .filter_map(Option::as_ref)
+                .map(|tab| tab.panes.len())
+                .sum::<usize>()
+            + self
+                .background_jobs
+                .iter()
+                .filter(|job| job.pane.is_some())
+                .count();
+        adaptive_output_frame_interval(self.settings.refresh_ms, pane_count)
     }
 
     fn refresh_workload_classes(&mut self) -> bool {
@@ -3023,6 +3233,20 @@ impl App {
                     }
                     self.applied_workloads.insert(pane.id(), (policy, class));
                 }
+            }
+        }
+
+        for job in &self.background_jobs {
+            let Some(pane) = job.pane.as_ref() else {
+                continue;
+            };
+            let class = PaneWorkloadClass::Background;
+            seen.insert(pane.id());
+            if self.applied_workloads.get(&pane.id()) != Some(&(policy, class)) {
+                if let Err(error) = pane.apply_workload(policy, class) {
+                    failure.get_or_insert(error);
+                }
+                self.applied_workloads.insert(pane.id(), (policy, class));
             }
         }
 
@@ -3169,6 +3393,23 @@ impl App {
                         None
                     }
                 }
+                Some(PaneRoute::Background(index)) => {
+                    let activity_and_plain = self.background_jobs.get_mut(index).and_then(|job| {
+                        let target = job.pane.as_mut()?;
+                        let was_active = target.active;
+                        let plain = target.process_output(&bytes);
+                        let activity = (target.id(), target.generation());
+                        job.idle.last_output_at = Instant::now();
+                        changed |= self.background_picker.open || !was_active;
+                        Some((activity, plain))
+                    });
+                    if let Some((activity, plain)) = activity_and_plain {
+                        changed |= self.append_output_log(log_key, index + 1, &plain);
+                        Some(activity)
+                    } else {
+                        None
+                    }
+                }
                 None => None,
             };
             if let Some((pane_id, pane_generation)) = activity {
@@ -3209,6 +3450,17 @@ impl App {
                         .get_mut(tab)
                         .and_then(Option::as_mut)
                         .and_then(|tab| tab.panes.get_mut(pane))
+                        && !target.exited
+                    {
+                        target.exited = true;
+                        changed = true;
+                    }
+                }
+                Some(PaneRoute::Background(index)) => {
+                    if let Some(target) = self
+                        .background_jobs
+                        .get_mut(index)
+                        .and_then(|job| job.pane.as_mut())
                         && !target.exited
                     {
                         target.exited = true;
@@ -3256,6 +3508,11 @@ impl App {
                 changed |= pane.poll_exit();
             }
         }
+        for job in &mut self.background_jobs {
+            if let Some(pane) = job.pane.as_mut() {
+                changed |= pane.poll_exit();
+            }
+        }
         self.last_exit_poll = Instant::now();
         changed
     }
@@ -3277,6 +3534,11 @@ impl App {
                         pane: pane_index,
                     },
                 );
+            }
+        }
+        for (index, job) in self.background_jobs.iter().enumerate() {
+            if let Some(pane) = job.pane.as_ref() {
+                routes.insert((pane.id(), pane.generation()), PaneRoute::Background(index));
             }
         }
         routes
@@ -3540,6 +3802,28 @@ impl App {
                                 .map_err(|error| format!("could not accept input: {error:#}"))
                                 .map(|_| target_pane.record_input(&bytes))
                         }
+                    }
+                }
+                PaneRoute::Background(index) => {
+                    let Some(target_pane) = self
+                        .background_jobs
+                        .get_mut(index)
+                        .and_then(|job| job.pane.as_mut())
+                    else {
+                        failures.push(format!("target {} left the background pool", command.pane));
+                        continue;
+                    };
+                    if target_pane.exited {
+                        Err("is no longer available".to_string())
+                    } else if target_pane.screen_revision() != target.screen_revision
+                        || target_pane.input_revision() != target.input_revision
+                    {
+                        Err("changed while BashBot was reviewing it".to_string())
+                    } else {
+                        target_pane
+                            .write(&bytes)
+                            .map_err(|error| format!("could not accept input: {error:#}"))
+                            .map(|_| target_pane.record_input(&bytes))
                     }
                 }
             };
@@ -4525,6 +4809,14 @@ impl App {
                 }
             }
         }
+        for job in &mut self.background_jobs {
+            if let Some(pane) = job.pane.as_mut()
+                && pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER)
+            {
+                pane.active = false;
+                changed |= self.background_picker.open;
+            }
+        }
         self.last_activity_decay = now;
         changed
     }
@@ -4608,6 +4900,11 @@ impl App {
         }
 
         let selection_cleared = self.clear_text_selection();
+
+        if self.background_picker.open {
+            let outcome = self.handle_background_jobs_key(key)?;
+            return Ok(render_if_selection_cleared(outcome, selection_cleared));
+        }
 
         if self.previous_panes.open {
             let outcome = self.handle_previous_panes_key(key);
@@ -5149,6 +5446,12 @@ impl App {
             Action::CopyMode => {
                 self.open_copy_mode();
             }
+            Action::BackgroundPanes => {
+                self.background_targets()?;
+            }
+            Action::BackgroundJobs => {
+                self.open_background_jobs();
+            }
             Action::AuthProfiles => {
                 self.open_auth_profiles();
             }
@@ -5449,6 +5752,308 @@ impl App {
         } else {
             format!("focused pane {}", index + 1)
         };
+    }
+
+    fn open_background_jobs(&mut self) {
+        self.close_tab_modals();
+        self.settings.open = false;
+        self.image_overlay = None;
+        self.background_picker.begin(self.background_jobs.len());
+        self.status = if self.background_jobs.is_empty() {
+            "no background agents yet; press Alt+Shift+B to background a pane".into()
+        } else {
+            format!("{} background agent(s)", self.background_jobs.len())
+        };
+    }
+
+    fn close_background_jobs(&mut self) {
+        self.background_picker.close();
+        self.status = "background agents closed".into();
+    }
+
+    fn handle_background_jobs_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return Ok(KeyOutcome::Quit);
+        }
+        if self.keybindings.action_for(&key) == Some(Action::BackgroundJobs) {
+            self.close_background_jobs();
+            return Ok(KeyOutcome::Render);
+        }
+
+        let changed = match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.close_background_jobs();
+                true
+            }
+            KeyCode::Up => {
+                self.background_picker
+                    .move_cursor(-1, self.background_jobs.len());
+                true
+            }
+            KeyCode::Down => {
+                self.background_picker
+                    .move_cursor(1, self.background_jobs.len());
+                true
+            }
+            KeyCode::Home => {
+                self.background_picker.move_to_start();
+                true
+            }
+            KeyCode::End => {
+                self.background_picker
+                    .move_to_end(self.background_jobs.len());
+                true
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                self.insert_background_job(self.background_picker.cursor)?;
+                true
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.restart_background_job(self.background_picker.cursor)?;
+                true
+            }
+            KeyCode::Delete => {
+                self.delete_background_job(self.background_picker.cursor)?;
+                true
+            }
+            _ => {
+                let changed = self.background_picker.pending_delete.take().is_some();
+                if changed {
+                    self.status = "background job stop canceled".into();
+                }
+                changed
+            }
+        };
+
+        Ok(if changed {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        })
+    }
+
+    fn background_targets(&mut self) -> Result<()> {
+        if self.panes.is_empty() {
+            self.status = "no panes to background".into();
+            return Ok(());
+        }
+
+        let targets = background_target_indices(self.focus, &self.selected, self.panes.len());
+        if targets.is_empty() {
+            self.status = "no selected panes to background".into();
+            return Ok(());
+        }
+
+        let Some(plan) = self.launch_plan.as_ref() else {
+            self.status = "cannot background panes without a launch plan".into();
+            return Ok(());
+        };
+        let specs = targets
+            .iter()
+            .filter_map(|index| plan.panes.get(*index).cloned().map(|spec| (*index, spec)))
+            .collect::<Vec<_>>();
+        if specs.len() != targets.len() {
+            self.status = "one or more selected pane configurations are unavailable".into();
+            return Ok(());
+        }
+
+        let mut replacements = Vec::with_capacity(specs.len());
+        for (index, spec) in &specs {
+            match self.spawn_pane_instance(spec, *index) {
+                Ok(pane) => replacements.push((*index, pane)),
+                Err(error) => {
+                    self.status = format!(
+                        "background canceled; fresh pane {} failed to launch: {error:#}",
+                        index + 1
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        let source_tab = self.tab_title.clone();
+        let mut jobs = Vec::with_capacity(replacements.len());
+        for ((index, spec), (_, replacement)) in specs.into_iter().zip(replacements) {
+            let pane = mem::replace(&mut self.panes[index], replacement);
+            let idle = self
+                .pane_idle
+                .get_mut(index)
+                .map(|idle| mem::replace(idle, PaneIdleState::new(Instant::now())))
+                .unwrap_or_else(|| PaneIdleState::new(Instant::now()));
+            let name = self.pane_names.get_mut(index).and_then(Option::take);
+            let history = SavedPaneHistory::from_pane(&pane);
+            let id = self.next_background_job_id;
+            self.next_background_job_id = self.next_background_job_id.saturating_add(1);
+            jobs.push(BackgroundJob {
+                id,
+                source_tab: source_tab.clone(),
+                name,
+                spec,
+                pane: Some(pane),
+                host: None,
+                history,
+                idle,
+            });
+            self.sleeping.remove(&index);
+        }
+
+        self.background_jobs.splice(0..0, jobs);
+        self.selected.clear();
+        self.follow_up = self
+            .follow_up
+            .filter(|prompt| !targets.contains(&prompt.pane_index));
+        self.pane_settings.close();
+        self.sync_pane_sizes();
+        self.save_session_snapshot()?;
+        self.status = format!(
+            "backgrounded {} {}; launched fresh replacements",
+            targets.len(),
+            pane_word(targets.len())
+        );
+        Ok(())
+    }
+
+    fn insert_background_job(&mut self, index: usize) -> Result<()> {
+        let Some(job) = self.background_jobs.get(index) else {
+            self.status = "no background agent selected".into();
+            return Ok(());
+        };
+        if job.pane.is_none() {
+            self.background_picker.pending_delete = None;
+            self.status = "background agent is offline; press R to restart it first".into();
+            return Ok(());
+        }
+        if self.panes.is_empty() {
+            self.status = "no visible pane is available for insertion".into();
+            return Ok(());
+        }
+
+        let target = self.focus.min(self.panes.len() - 1);
+        if self
+            .launch_plan
+            .as_ref()
+            .is_none_or(|plan| target >= plan.panes.len())
+        {
+            self.status = "focused pane configuration is unavailable".into();
+            return Ok(());
+        }
+
+        let mut job = self.background_jobs.remove(index);
+        let restored_name = job.name.clone();
+        let restored_label = restored_name
+            .clone()
+            .or_else(|| job.spec.agent_label())
+            .unwrap_or_else(|| "terminal".into());
+        let restored_pane = job.pane.take().expect("checked live background pane");
+        let displaced_pane = mem::replace(&mut self.panes[target], restored_pane);
+        let displaced_name = self
+            .pane_names
+            .get_mut(target)
+            .map(|name| mem::replace(name, restored_name))
+            .unwrap_or(None);
+        let displaced_idle = self
+            .pane_idle
+            .get_mut(target)
+            .map(|idle| mem::replace(idle, job.idle))
+            .unwrap_or_else(|| PaneIdleState::new(Instant::now()));
+        let displaced_spec = {
+            let plan = self.launch_plan.as_mut().expect("checked launch plan");
+            mem::replace(&mut plan.panes[target], job.spec)
+        };
+        let displaced_history = SavedPaneHistory::from_pane(&displaced_pane);
+        let displaced_id = self.next_background_job_id;
+        self.next_background_job_id = self.next_background_job_id.saturating_add(1);
+        self.background_jobs.insert(
+            0,
+            BackgroundJob {
+                id: displaced_id,
+                source_tab: self.tab_title.clone(),
+                name: displaced_name,
+                spec: displaced_spec,
+                pane: Some(displaced_pane),
+                host: None,
+                history: displaced_history,
+                idle: displaced_idle,
+            },
+        );
+
+        self.selected.clear();
+        self.sleeping.remove(&target);
+        self.follow_up = self.follow_up.filter(|prompt| prompt.pane_index != target);
+        self.background_picker.close();
+        self.pane_settings.close();
+        self.rename.close();
+        self.sync_pane_sizes();
+        self.save_session_snapshot()?;
+        self.status = format!("inserted {restored_label} into pane {}", target + 1);
+        Ok(())
+    }
+
+    fn restart_background_job(&mut self, index: usize) -> Result<()> {
+        let Some(job) = self.background_jobs.get(index) else {
+            self.status = "no background agent selected".into();
+            return Ok(());
+        };
+        if job.pane.as_ref().is_some_and(|pane| !pane.exited) {
+            self.status = "background agent is already running".into();
+            return Ok(());
+        }
+
+        let spec = job.spec.clone();
+        let history = job.history();
+        let label = job
+            .name
+            .clone()
+            .or_else(|| spec.agent_label())
+            .unwrap_or_else(|| "terminal".into());
+        let mut pane = match self.spawn_background_pane_instance(&spec) {
+            Ok(pane) => pane,
+            Err(error) => {
+                self.status = format!("failed to restart {label}: {error:#}");
+                return Ok(());
+            }
+        };
+        pane.restore_history_display(&history.output_tail, &history.input_history);
+        let job = &mut self.background_jobs[index];
+        job.pane = Some(pane);
+        job.history = history;
+        job.idle = PaneIdleState::new(Instant::now());
+        self.background_picker.pending_delete = None;
+        self.save_session_snapshot()?;
+        self.status = format!("restarted {label} in the background");
+        Ok(())
+    }
+
+    fn delete_background_job(&mut self, index: usize) -> Result<()> {
+        let Some(job) = self.background_jobs.get(index) else {
+            self.status = "no background agent selected".into();
+            return Ok(());
+        };
+        let id = job.id;
+        let label = job
+            .name
+            .clone()
+            .or_else(|| job.spec.agent_label())
+            .unwrap_or_else(|| "terminal".into());
+        let live = job.pane.as_ref().is_some_and(|pane| !pane.exited);
+        if live && self.background_picker.pending_delete != Some(id) {
+            self.background_picker.pending_delete = Some(id);
+            self.status = format!("press Delete again to stop and remove {label}");
+            return Ok(());
+        }
+
+        let mut job = self.background_jobs.remove(index);
+        if let Some(pane) = job.pane.as_mut()
+            && !pane.exited
+        {
+            pane.terminate()?;
+        }
+        self.background_picker.pending_delete = None;
+        self.background_picker
+            .clamp_cursor(self.background_jobs.len());
+        self.save_session_snapshot()?;
+        self.status = format!("removed background agent {label}");
+        Ok(())
     }
 
     fn begin_rename(&mut self) {
@@ -6366,6 +6971,18 @@ impl App {
 
         if self.mouse_enabled
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.background_jobs_button_at(mouse.column, mouse.row)
+        {
+            if self.background_picker.open {
+                self.close_background_jobs();
+            } else {
+                self.open_background_jobs();
+            }
+            return Ok(true);
+        }
+
+        if self.mouse_enabled
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.previous_panes_button_at(mouse.column, mouse.row)
         {
             if self.previous_panes.open {
@@ -6382,6 +6999,14 @@ impl App {
         {
             self.toggle_pane_settings();
             return Ok(true);
+        }
+
+        if self.background_picker.open {
+            return if self.mouse_enabled {
+                self.handle_background_jobs_mouse(mouse)
+            } else {
+                Ok(false)
+            };
         }
 
         if self.previous_panes.open {
@@ -6524,6 +7149,21 @@ impl App {
         self.previous_panes.cursor = index;
         self.focus_previous_pane_entry(index);
         true
+    }
+
+    fn handle_background_jobs_mouse(&mut self, mouse: MouseEvent) -> Result<bool> {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return Ok(false);
+        }
+
+        let Some(index) = self.background_job_row_at(mouse.column, mouse.row) else {
+            return Ok(false);
+        };
+
+        self.background_picker.cursor = index;
+        self.background_picker.pending_delete = None;
+        self.insert_background_job(index)?;
+        Ok(true)
     }
 
     fn handle_pane_settings_mouse(&mut self, mouse: MouseEvent) -> bool {
@@ -8048,6 +8688,71 @@ impl App {
         })
     }
 
+    fn background_jobs_button_at(&self, x: u16, y: u16) -> bool {
+        self.background_jobs_button
+            .is_some_and(|rect| rect_contains(rect, x, y))
+    }
+
+    fn background_job_row_at(&self, x: u16, y: u16) -> Option<usize> {
+        self.background_job_rows
+            .iter()
+            .find_map(|(index, rect)| rect_contains(*rect, x, y).then_some(*index))
+    }
+
+    pub fn background_jobs_view(&self) -> Option<BackgroundJobsView> {
+        self.background_picker.open.then(|| BackgroundJobsView {
+            cursor: self
+                .background_picker
+                .cursor
+                .min(self.background_jobs.len().saturating_sub(1)),
+            pending_delete: self.background_picker.pending_delete,
+            jobs: self
+                .background_jobs
+                .iter()
+                .map(|job| {
+                    let state = match job.pane.as_ref() {
+                        None => BackgroundJobState::Offline,
+                        Some(pane) if pane.exited => BackgroundJobState::Exited,
+                        Some(pane) if pane.active && !pane.output_quiet() => {
+                            BackgroundJobState::Working
+                        }
+                        Some(_) => BackgroundJobState::Quiet,
+                    };
+                    let summary = job
+                        .pane
+                        .as_ref()
+                        .and_then(pane_activity_summary)
+                        .or_else(|| output_tail_summary(&job.history.output_tail))
+                        .unwrap_or_else(|| "waiting for output".into());
+                    BackgroundJobView {
+                        id: job.id,
+                        label: job
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| format!("job {}", job.id)),
+                        agent: job
+                            .spec
+                            .agent_label()
+                            .unwrap_or_else(|| job.spec.profile_name.clone()),
+                        source_tab: job.source_tab.clone(),
+                        folder: job.spec.folder_name.clone(),
+                        worktree: job.spec.worktree_name.clone(),
+                        summary,
+                        state,
+                    }
+                })
+                .collect(),
+        })
+    }
+
+    pub fn background_jobs_open(&self) -> bool {
+        self.background_picker.open
+    }
+
+    pub fn background_job_count(&self) -> usize {
+        self.background_jobs.len()
+    }
+
     pub fn follow_up_dialog(&self) -> Option<FollowUpDialog> {
         let prompt = self.follow_up.as_ref()?;
         let todo = self.settings.todo_prompts.get(prompt.todo_index)?;
@@ -8560,7 +9265,12 @@ impl App {
             return Ok(());
         };
 
-        recorder.update(&self.tab_title, &plan, &self.panes, tabs);
+        let background_panes = self
+            .background_jobs
+            .iter()
+            .map(BackgroundJob::saved)
+            .collect();
+        recorder.update(&self.tab_title, &plan, &self.panes, tabs, background_panes);
         recorder.save()
     }
 }
@@ -9853,6 +10563,24 @@ fn zoomed_pane_rects(area: Rect, pane_count: usize, focus: usize) -> Vec<Rect> {
     rects
 }
 
+fn background_target_indices(
+    focus: usize,
+    selected: &BTreeSet<usize>,
+    pane_count: usize,
+) -> Vec<usize> {
+    if pane_count == 0 {
+        return Vec::new();
+    }
+    if selected.is_empty() {
+        return vec![focus.min(pane_count - 1)];
+    }
+    selected
+        .iter()
+        .copied()
+        .filter(|index| *index < pane_count)
+        .collect()
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct RestartTargets {
     indices: Vec<usize>,
@@ -10692,6 +11420,34 @@ mod tests {
             selected_swap_pair(&selected(&[0, 1, 2])),
             SwapSelection::TooMany
         );
+    }
+
+    #[test]
+    fn background_targets_use_any_explicit_selection_before_focus() {
+        assert_eq!(background_target_indices(2, &selected(&[]), 4), vec![2]);
+        assert_eq!(background_target_indices(2, &selected(&[0]), 4), vec![0]);
+        assert_eq!(
+            background_target_indices(0, &selected(&[1, 3, 8]), 4),
+            vec![1, 3]
+        );
+        assert!(background_target_indices(0, &selected(&[]), 0).is_empty());
+    }
+
+    #[test]
+    fn background_picker_navigation_clamps_and_cancels_pending_stop() {
+        let mut picker = BackgroundPickerState::default();
+        picker.begin(3);
+        assert!(picker.open);
+        picker.move_to_end(3);
+        assert_eq!(picker.cursor, 2);
+        picker.pending_delete = Some(7);
+        picker.move_cursor(-1, 3);
+        assert_eq!(picker.cursor, 1);
+        assert_eq!(picker.pending_delete, None);
+        picker.clamp_cursor(1);
+        assert_eq!(picker.cursor, 0);
+        picker.close();
+        assert!(!picker.open);
     }
 
     #[test]

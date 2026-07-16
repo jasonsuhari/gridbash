@@ -525,6 +525,12 @@ impl PtyPane {
         self.send(&HostCommand::SetKeepRunning { keep_running })
     }
 
+    pub fn terminate(&mut self) -> Result<()> {
+        self.send(&HostCommand::Terminate)?;
+        self.exited = true;
+        Ok(())
+    }
+
     fn send(&self, command: &HostCommand) -> Result<()> {
         let mut stream = self
             .connection

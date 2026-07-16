@@ -10,10 +10,11 @@ use vt100::Cell;
 
 use crate::{
     app::{
-        App, AssistantMessageRole, CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog,
-        GoalEditorView, GridPalette, PaneSelection, PaneSettingsTarget, PaneSettingsView,
-        PreviousPaneView, PreviousPanesView, RenamePaneView, RenameTabView, SettingsGroup,
-        SettingsRow, SettingsTab, SettingsValueKind, TabLabel, WorkspaceAssistantView,
+        App, AssistantMessageRole, BackgroundJobState, BackgroundJobView, BackgroundJobsView,
+        CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog, GoalEditorView, GridPalette,
+        PaneSelection, PaneSettingsTarget, PaneSettingsView, PreviousPaneView, PreviousPanesView,
+        RenamePaneView, RenameTabView, SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind,
+        TabLabel, WorkspaceAssistantView,
     },
     auth::{AgentKind, AuthProfile},
     composer::GridPickerMode,
@@ -42,6 +43,8 @@ pub struct DrawState {
     pub pane_settings_deactivate_button: Option<Rect>,
     pub pane_settings_goal_button: Option<Rect>,
     pub pane_settings_stop_goal_button: Option<Rect>,
+    pub background_jobs_button: Option<Rect>,
+    pub background_job_rows: Vec<(usize, Rect)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -86,6 +89,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let rename_view = app.rename_pane_view();
     let tab_rename_view = app.rename_tab_view();
     let previous_panes_view = app.previous_panes_view();
+    let background_jobs_view = app.background_jobs_view();
     let follow_up_dialog = app.follow_up_dialog();
     let goal_editor_view = app.goal_editor_view();
     let pane_settings_view = app.pane_settings_view();
@@ -101,6 +105,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || copy_mode_open
         || app.settings_open()
         || previous_panes_view.is_some()
+        || background_jobs_view.is_some()
         || pane_settings_open
         || rename_view.is_some()
         || tab_rename_view.is_some()
@@ -119,6 +124,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || copy_mode_open
         || app.settings_open()
         || previous_panes_view.is_some()
+        || background_jobs_view.is_some()
         || pane_settings_open
         || rename_view.is_some()
         || tab_rename_view.is_some()
@@ -205,6 +211,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let input_scope = app.input_scope_label();
     let previous_panes_button = previous_panes_button_rect(status_area);
     let pane_settings_button = pane_settings_button_rect(status_area);
+    let background_jobs_button =
+        background_jobs_button_rect(status_area, app.background_job_count());
     let status = Line::from(vec![
         Span::styled(
             STATUS_BRAND,
@@ -222,6 +230,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::styled(
             PANE_SETTINGS_BUTTON,
             pane_settings_button_style(app.pane_settings_open(), palette),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            background_jobs_button_label(app.background_job_count()),
+            background_jobs_button_style(app.background_jobs_open(), palette),
         ),
         Span::raw(" "),
         Span::styled(
@@ -280,6 +293,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     } else {
         Vec::new()
     };
+    let background_job_rows = if let Some(view) = background_jobs_view.as_ref() {
+        render_background_jobs(frame, area, view, palette)
+    } else {
+        Vec::new()
+    };
     if let Some(rename) = rename_view.as_ref() {
         render_rename_pane(frame, area, rename);
     }
@@ -320,6 +338,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         pane_settings_deactivate_button,
         pane_settings_goal_button,
         pane_settings_stop_goal_button,
+        background_jobs_button,
+        background_job_rows,
     }
 }
 
@@ -683,6 +703,43 @@ fn pane_settings_button_style(open: bool, palette: &GridPalette) -> Style {
         Style::default()
             .fg(Color::Black)
             .bg(palette.focus())
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
+fn background_jobs_button_label(count: usize) -> String {
+    format!(" BG {count} ")
+}
+
+fn background_jobs_button_rect(status_area: Rect, count: usize) -> Option<Rect> {
+    let offset = STATUS_BRAND.len() as u16
+        + 1
+        + PREVIOUS_PANES_BUTTON.len() as u16
+        + 1
+        + PANE_SETTINGS_BUTTON.len() as u16
+        + 1;
+    let width = background_jobs_button_label(count).len() as u16;
+    if status_area.height == 0 || status_area.width < offset.saturating_add(width) {
+        return None;
+    }
+
+    Some(Rect {
+        x: status_area.x.saturating_add(offset),
+        y: status_area.y,
+        width,
+        height: 1,
+    })
+}
+
+fn background_jobs_button_style(open: bool, palette: &GridPalette) -> Style {
+    if open {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(palette.accent())
             .add_modifier(Modifier::BOLD)
     }
 }
@@ -1717,6 +1774,192 @@ fn previous_panes_command_bar(width: u16) -> Line<'static> {
         Span::styled(" move  ", Style::default().fg(Color::Gray)),
         command_key("Enter"),
         Span::styled(" focus  ", Style::default().fg(Color::Gray)),
+        command_key("Esc"),
+        Span::styled(" close", Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn render_background_jobs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &BackgroundJobsView,
+    palette: &GridPalette,
+) -> Vec<(usize, Rect)> {
+    let modal = previous_panes_modal_rect(area, view.jobs.len().max(1));
+    let shadow = settings_shadow_rect(area, modal);
+    let mut row_hits = Vec::new();
+
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.accent())
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" Background Agents ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    if inner.width == 0 || inner.height == 0 {
+        return row_hits;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    let count_label = if view.jobs.len() == 1 {
+        "1 background agent".into()
+    } else {
+        format!("{} background agents", view.jobs.len())
+    };
+    let header = Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            count_label,
+            Style::default()
+                .fg(palette.accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  session-wide pool", Style::default().fg(Color::Gray)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(vec![header, Line::from("")]).style(settings_panel_style()),
+        chunks[0],
+    );
+
+    let list_area = chunks[1];
+    if view.jobs.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    "No background agents. Press Alt+Shift+B from the grid to add one.",
+                    Style::default().fg(SETTINGS_MUTED),
+                ),
+            ]))
+            .style(settings_panel_style()),
+            list_area,
+        );
+    } else {
+        let visible =
+            visible_previous_pane_range(view.jobs.len(), view.cursor, list_area.height as usize);
+        let mut rows = Vec::new();
+        for (row_offset, index) in visible.enumerate() {
+            let Some(job) = view.jobs.get(index) else {
+                continue;
+            };
+            let row_area = Rect {
+                x: list_area.x,
+                y: list_area.y.saturating_add(row_offset as u16),
+                width: list_area.width,
+                height: 1,
+            };
+            row_hits.push((index, row_area));
+            rows.push(background_job_line(
+                job,
+                view.cursor == index,
+                view.pending_delete == Some(job.id),
+                list_area.width,
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(rows).style(settings_panel_style()),
+            list_area,
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(background_jobs_command_bar(chunks[2].width)).style(settings_panel_style()),
+        chunks[2],
+    );
+    row_hits
+}
+
+fn background_job_line(
+    job: &BackgroundJobView,
+    active: bool,
+    pending_delete: bool,
+    width: u16,
+) -> Line<'static> {
+    let (state, state_color) = background_job_state(job.state, pending_delete);
+    let label_width = if width < 72 { 12 } else { 16 };
+    let agent_width = if width < 72 { 8 } else { 12 };
+    let location_width = if width < 72 { 16 } else { 28 };
+    let marker = if active { ">" } else { " " };
+    let mut location = format!("{} | {}", job.source_tab, job.folder);
+    if let Some(worktree) = job.worktree.as_deref() {
+        location.push_str(" | ");
+        location.push_str(worktree);
+    }
+    let summary = if pending_delete {
+        "Delete again to stop this live job"
+    } else {
+        &job.summary
+    };
+    let text = format!(
+        "{marker} {:<label_width$} {:<8} {:<agent_width$} {:<location_width$} {}",
+        truncate_text(&job.label, label_width),
+        state,
+        truncate_text(&job.agent, agent_width),
+        truncate_text(&location, location_width),
+        summary,
+    );
+    let bg = active.then_some(SETTINGS_ROW_ACTIVE);
+    let fg = if active { SETTINGS_TEXT } else { state_color };
+    Line::from(Span::styled(
+        fixed_width(&text, width as usize),
+        row_style(fg, bg, active || pending_delete),
+    ))
+}
+
+fn background_job_state(state: BackgroundJobState, pending_delete: bool) -> (&'static str, Color) {
+    if pending_delete {
+        return ("stop?", Color::Red);
+    }
+    match state {
+        BackgroundJobState::Working => ("working", Color::Green),
+        BackgroundJobState::Quiet => ("quiet", Color::Cyan),
+        BackgroundJobState::Exited => ("exited", Color::Red),
+        BackgroundJobState::Offline => ("offline", Color::DarkGray),
+    }
+}
+
+fn background_jobs_command_bar(width: u16) -> Line<'static> {
+    if width < 64 {
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Enter"),
+            Span::styled(" insert  ", Style::default().fg(Color::Gray)),
+            command_key("R"),
+            Span::styled(" restart  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" close", Style::default().fg(Color::Gray)),
+        ]);
+    }
+    Line::from(vec![
+        Span::raw("  "),
+        command_key("Up/Down"),
+        Span::styled(" move  ", Style::default().fg(Color::Gray)),
+        command_key("Enter"),
+        Span::styled(" insert  ", Style::default().fg(Color::Gray)),
+        command_key("R"),
+        Span::styled(" restart  ", Style::default().fg(Color::Gray)),
+        command_key("Delete"),
+        Span::styled(" stop/remove  ", Style::default().fg(Color::Gray)),
         command_key("Esc"),
         Span::styled(" close", Style::default().fg(Color::Gray)),
     ])
@@ -4092,6 +4335,52 @@ mod tests {
                 "width {width}"
             );
         }
+    }
+
+    #[test]
+    fn background_job_rows_show_state_context_and_stop_confirmation() {
+        let job = BackgroundJobView {
+            id: 4,
+            label: "auth fix".into(),
+            agent: "Codex".into(),
+            source_tab: "Grid 2".into(),
+            folder: "gridbash".into(),
+            worktree: Some("feat/auth".into()),
+            summary: "running focused tests".into(),
+            state: BackgroundJobState::Working,
+        };
+        let normal = background_job_line(&job, true, false, 100);
+        let normal_text = normal
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(normal_text.contains("auth fix"));
+        assert!(normal_text.contains("working"));
+        assert!(normal_text.contains("Grid 2 | gridbash"));
+        assert!(normal_text.contains("feat"));
+        assert!(normal_text.contains("running focused tests"));
+
+        let pending = background_job_line(&job, true, true, 100);
+        let pending_text = pending
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(pending_text.contains("stop?"));
+        assert!(pending_text.contains("Delete again"));
+    }
+
+    #[test]
+    fn background_job_command_bar_stays_useful_when_narrow() {
+        let text = background_jobs_command_bar(40)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("Enter"));
+        assert!(text.contains("restart"));
+        assert!(text.contains("Esc"));
     }
 
     #[test]

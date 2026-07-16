@@ -97,6 +97,7 @@ agents and shells.
 | `Alt+Shift+A` | Manage auth profiles and assign one to the focused pane |
 | `Alt+f` | Zoom or restore the focused pane |
 | `Alt+b` | Search, select, and copy focused-pane scrollback |
+| `Alt+Shift+b` / `Alt+Ctrl+b` | Background selected panes / open background agents |
 | `Alt+g` / `Alt+u` | Start or stop the grid manager goal |
 | `Alt+Shift+V` | Dictate one prompt without submitting it |
 | `Alt+o` | Open settings |
