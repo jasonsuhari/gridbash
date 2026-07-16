@@ -4,9 +4,13 @@ This guide covers launch options, sessions, managed worktrees, controls, profile
 configuration, and platform-specific behavior. See the [project
 README](../README.md) for installation and a shorter introduction.
 
-## Launch grids
+## Create an agent workspace
 
-Run `gridbash` with no arguments to open the row-and-column picker. The picker launches panes in the directory where GridBash was started.
+Run `gridbash` with no arguments to open the agent-workspace setup. It detects
+installed agent and terminal profiles and lets you choose the launch profile,
+compatible Claude/Codex auth, project folder, layout, and worktree isolation.
+Agent profiles appear first. Shell profiles remain available as explicitly
+unmanaged raw-terminal grids.
 
 Common direct launches:
 
@@ -40,24 +44,35 @@ The main launch options are:
 | `--agent-api` | Enable the local agent control API. |
 | `--agent-api-port PORT` | Choose the port for the enabled API; `0` selects a free port. A nonzero value also enables the API. |
 
-Grid, count, profile, cwd, or auto-layout arguments use the direct launch path and bypass the startup picker. `gridbash --worktrees` by itself still opens the picker.
+Grid, count, profile, cwd, or auto-layout arguments use the direct launch path
+and bypass workspace setup. `gridbash --worktrees` by itself opens setup with
+worktree isolation enabled.
 
-On first launch without a CLI profile, environment override, detected invoking shell, or configured default, GridBash asks you to choose from the terminal profiles it can find. The choice is saved to `%APPDATA%\GridBash\config\config.toml` on Windows. Change it later with:
+Set the initial agent selection or direct-launch default with:
 
 ```powershell
-gridbash --set-default powershell
+gridbash --set-default codex
 ```
 
-### Startup picker
+An older configured shell default remains valid for direct launches, but bare
+interactive startup leads with the first detected agent. Select a raw terminal
+in workspace setup when that is the intended workflow.
+
+### Workspace setup controls
 
 | Input | Action |
 | --- | --- |
-| Left / Right | Switch between rows and columns. |
-| Up / Down | Increase or decrease the active dimension. |
-| `r` / `c` | Select rows or columns. |
-| `1`-`9` / `0` | Set the active dimension; `0` means 10. |
-| Enter | Launch the grid. |
+| Up / Down | Move between profile, auth, layout, worktrees, and project fields. |
+| Left / Right | Change the selected field. |
+| `w` | Toggle managed worktrees. |
+| `e` | Edit the project folder while the Project field is selected. |
+| Enter | Confirm a project edit or launch the workspace. |
 | Esc / `q` | Quit. |
+
+Managed auth is a launch boundary, not a global shell hook. GridBash sets
+`CLAUDE_CONFIG_DIR` or `CODEX_HOME` for compatible agent panes it launches. It
+does not replace the machine's normal `claude` or `codex` commands, and raw
+terminal panes retain their normal shell environment.
 
 ## Sessions and resume
 
@@ -261,7 +276,7 @@ gridbash --list-profiles
 
 The diagnostic table identifies the selected default, source, availability, resolved executable, or missing-command reason. It never prints profile environment values, auth tokens, or manager credentials. On Windows, GridBash resolves `.exe` and `.cmd` shims before extensionless npm shims.
 
-Profile selection uses this precedence:
+Direct-launch profile selection uses this precedence:
 
 1. `--profile`
 2. `GRIDBASH_PROFILE`
@@ -269,7 +284,11 @@ Profile selection uses this precedence:
 4. `[defaults].profile`
 5. The platform default
 
-The platform default is Git Bash on Windows, zsh on macOS, and bash on other Unix systems. On Windows, the npm launcher can inherit PowerShell, PowerShell 7 (`pwsh`), cmd, or Git Bash from the shell that invoked `gridbash`.
+The platform default is Git Bash on Windows, zsh on macOS, and bash on other
+Unix systems. On Windows, the npm launcher can inherit PowerShell, PowerShell 7
+(`pwsh`), cmd, or Git Bash from the shell that invoked `gridbash`. Bare
+interactive startup instead lists detected agents first and keeps terminals as
+a secondary selection.
 
 Define custom profiles under `[profiles.<name>]`:
 
@@ -303,7 +322,7 @@ Use `--config PATH` to load and save another file. A representative configuratio
 
 ```toml
 [defaults]
-profile = "powershell"
+profile = "codex"
 pane_priority = "below-normal" # or "normal"
 pane_workload = "adaptive"     # or "unrestricted"
 
