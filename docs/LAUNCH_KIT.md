@@ -1,223 +1,144 @@
 # GridBash Launch Kit
 
-This is the reusable publication kit for GridBash. Copy should be adapted to
-the conversation and community instead of posted everywhere verbatim.
+Use this kit only after the publication gate in [`OUTREACH.md`](OUTREACH.md)
+passes. Adapt the copy to the community; do not post the same announcement
+everywhere verbatim.
 
 ## Positioning
 
 ### One-line pitch
 
-GridBash is a Windows-native Rust terminal grid for running Codex, Claude,
-Gemini, and other CLI coding agents side by side.
+GridBash is an open-source local workspace for running and coordinating Codex,
+Claude, Gemini, and other CLI coding agents in parallel.
 
 ### Short pitch
 
-GridBash puts real PTY-backed agent sessions into one selectable terminal grid.
-Run agents in parallel, send a prompt to one pane or selected panes, and give
-each pane its own git worktree when the jobs need isolation.
+GridBash launches real PTY-backed agents into one managed workspace. Choose the
+agent, auth, project, layout, and worktree policy up front, then prompt one
+pane, selected panes, or the whole workspace without hiding native agent UIs.
 
 ### Proof points
 
 - One-command install: `npm install -g gridbash`
-- Real Windows ConPTY sessions rather than simulated output
-- Up to 100 panes in one process
+- Real PTY sessions rather than simulated output
+- Up to 100 panes across tabbed grids
+- Native releases for Windows x64, Linux x64/arm64, and macOS arm64/x64
+- Managed Claude/Codex auth selection and usage visibility
 - Input routing to one, selected, or all panes
 - Optional repo-local git worktree per pane
 - Built-in profiles for Codex, Claude, Gemini, Aider, OpenCode, Goose, Amp,
   Cursor, and Copilot
 - Open source under the MIT License
 
-### Honest constraint
+### Honest constraints
 
-The published v0.1.6 package is Windows x64. V1 is intentionally single-process;
-closing GridBash closes its child agents.
+- By default, closing GridBash closes its child agents. Users can opt into local
+  background pane hosts with `keep_terminals_running = true`, then reconnect to
+  the same processes from a saved session.
+- Background pane hosts allow one attached GridBash client at a time; shared
+  multi-client attachment is not supported yet.
+- macOS artifacts may show Gatekeeper warnings until signing and notarization
+  are configured.
 
-## Links and assets
+## Publication Gate
+
+Immediately before publishing:
+
+```sh
+npm view gridbash version
+```
+
+Compare that value with the latest stable GitHub release and verify the exact
+install command on the advertised platform. If npm trails GitHub because of a
+registry incident, pause broad promotion and use the matching GitHub artifact
+only for direct, clearly labeled testing outreach.
+
+## Links And Assets
 
 - Repository: https://github.com/jasonsuhari/gridbash
 - Website: https://jasonsuhari.github.io/gridbash/
 - npm: https://www.npmjs.com/package/gridbash
-- Launch teaser: https://github.com/jasonsuhari/gridbash/blob/main/docs/assets/gridbash-launch-teaser.mp4
-- Teaser poster: `docs/assets/gridbash-launch-teaser-poster.png`
-- Product walkthrough: https://github.com/jasonsuhari/gridbash/blob/main/docs/assets/gridbash-openvid-demo.mp4
+- Releases: https://github.com/jasonsuhari/gridbash/releases/latest
+- Current product walkthrough: `docs/assets/gridbash-openvid-demo.mp4`
+- Walkthrough poster: `docs/assets/gridbash-openvid-demo-poster.png`
 - Social preview: `docs/assets/gridbash-social-preview.png`
+
+The older launch teaser ends with a Windows-only card and should not be used for
+current cross-platform outreach.
+
+## Primary Workflow Demo
+
+Show one implementation/review/test loop:
+
+1. Launch three Codex panes with worktree isolation.
+2. Give one pane an implementation task.
+3. Give a second pane a review task.
+4. Give a third pane the focused test or documentation task.
+5. Show selected-pane follow-up routing.
+6. End on the resulting workflow, not a feature list.
+
+Recommended command after the publication gate passes:
+
+```sh
+npm install -g gridbash
+gridbash 1x3 --profile codex --worktrees
+```
 
 ## Show HN
 
 ### Title
 
 ```text
-Show HN: GridBash – run multiple CLI coding agents in one Windows terminal grid
+Show HN: GridBash – a local workspace for parallel CLI coding agents
 ```
 
 ### First comment
 
 ```text
-I kept ending up with six terminal windows while comparing Codex, Claude, and
-Gemini or running agents against separate tasks. I built GridBash, a Rust TUI
-that puts real PTY sessions into one terminal grid and lets me send input to
-one, several, or every pane.
+I kept ending up with six disconnected agent terminals while comparing Codex,
+Claude, and Gemini or running agents against separate tasks. I built GridBash,
+a local agent workspace that launches real PTY sessions with explicit auth,
+project, layout, and worktree choices, then lets me send input to one, several,
+or every pane.
 
-The workflow I care about most is parallel agent work without accidental
-cross-pane input. A pane can also start in its own repo-local git worktree, so
-implementation, review, tests, and docs can run in isolation while remaining
-visible together.
+The workflow I care about most is parallel work without accidental cross-pane
+input. GridBash can also start every pane in a separate repo-local git
+worktree, so implementation, review, tests, and docs stay isolated while they
+remain visible together.
 
-It is open source and Windows x64 for now:
-
-    npm install -g gridbash
-    gridbash 2x3 --profile codex --worktrees
-
-I would especially appreciate feedback on the input-routing model and what you
-would expect from detach/reattach support.
-```
-
-Submit the repository URL, remain available to answer questions, and do not ask
-people to upvote or seed comments.
-
-## Reddit
-
-Read the current rules of each subreddit before posting. Use only the version
-that matches the community and stay in the thread to answer questions.
-
-### r/rust
-
-**Title**
-
-```text
-I built a Rust TUI for running multiple coding-agent PTYs in one Windows terminal
-```
-
-**Body**
-
-```text
-I wanted one terminal surface for several CLI coding agents without hiding the
-process behind a web dashboard. GridBash uses Ratatui plus Windows ConPTY-backed
-sessions, routes input to one or selected panes, and can start every pane in a
-separate git worktree.
-
-The tricky parts were keeping redraws cheap with many live panes, containing
-mouse selection inside a pane, and making normal terminal input coexist with
-modeless routing shortcuts.
-
-The project is MIT licensed and installable with `npm install -g gridbash` on
-Windows x64. Source and a 13-second demo:
-https://github.com/jasonsuhari/gridbash
-
-I would love feedback on the terminal architecture and where the Rust side
-could be simplified.
-```
-
-### r/commandline
-
-**Title**
-
-```text
-GridBash: one selectable terminal grid for Codex, Claude, Gemini, and other CLI agents
-```
-
-**Body**
-
-```text
-I built GridBash because parallel coding-agent work kept turning into a pile of
-terminal windows. It runs real PTY sessions in one grid, lets you select exactly
-which panes receive a command, and can isolate panes in repo-local git worktrees.
-
-Quickstart on Windows x64:
+It runs on Windows, Linux, and macOS and is MIT licensed:
 
     npm install -g gridbash
-    gridbash 2x3 --profile codex --worktrees
+    gridbash 1x3 --profile codex --worktrees
 
-Demo and source: https://github.com/jasonsuhari/gridbash
+Source and demo: https://github.com/jasonsuhari/gridbash
 
-I am most interested in feedback from people already using tmux, Windows
-Terminal, or several CLI agents at once. What would make this fit your workflow?
+I would especially value feedback on the selected-pane routing model and what
+you would need before trusting it with a daily multi-agent workflow.
 ```
 
-### Agent-specific communities
+Submit the repository URL, remain available for the first several hours, and
+never ask people to upvote or seed comments.
 
-**Title template**
+## Social Posts
+
+Upload the walkthrough video natively. Each post should demonstrate one
+workflow and ask one question.
+
+### X Or Bluesky
 
 ```text
-I built a terminal grid for running multiple <AGENT> sessions in parallel worktrees
-```
+Running an implementation agent, a reviewer, and a test agent used to mean
+three terminal windows.
 
-**Body template**
+GridBash keeps their real CLI sessions in one terminal workspace, routes a
+prompt only to the panes I select, and can put every job in its own git
+worktree.
 
-```text
-I often run one <AGENT> session for implementation, another for review, and a
-third for tests or docs. GridBash keeps those real CLI sessions visible in one
-terminal grid and lets me route prompts only to the selected panes.
-
-The built-in <AGENT> profile launches a grid directly, and `--worktrees` gives
-each pane an isolated checkout:
-
-    gridbash 2x3 --profile <PROFILE> --worktrees
-
-It is MIT licensed and currently ships for Windows x64:
+Open source for Windows, Linux, and macOS:
 https://github.com/jasonsuhari/gridbash
 
-If you use multiple <AGENT> sessions, I would value feedback on the selection
-and worktree workflow.
-```
-
-## Product Hunt
-
-### Name
-
-```text
-GridBash
-```
-
-### Tagline
-
-```text
-Run every CLI coding agent in one terminal grid
-```
-
-### Description
-
-```text
-A Windows-native Rust TUI for running Codex, Claude, Gemini, Aider, and other
-CLI agents side by side. Route prompts to selected panes and isolate parallel
-jobs with repo-local git worktrees.
-```
-
-### First comment
-
-```text
-I built GridBash after parallel coding-agent work turned my desktop into a pile
-of terminals. I wanted the sessions to stay real and visible, but I also wanted
-one reliable way to decide which agents receive each prompt.
-
-GridBash runs PTY-backed sessions in a selectable grid. You can focus one pane,
-select several, broadcast when appropriate, and start each pane in its own git
-worktree. It is open source, MIT licensed, and available for Windows x64 through
-npm.
-
-I am here all day and would love blunt feedback, especially from developers who
-already run several CLI agents at once.
-```
-
-Suggested topics: Developer Tools, Open Source, Artificial Intelligence.
-
-## Social posts
-
-Attach `gridbash-launch-teaser.mp4` directly instead of relying on a link
-preview. Put the repository link in the post or first reply according to the
-platform's current link treatment.
-
-### X / Bluesky
-
-```text
-Running six coding agents used to mean six terminal windows.
-
-So I built GridBash: a Windows-native Rust TUI for running Codex, Claude,
-Gemini, Aider, and other CLI agents in one selectable terminal grid.
-
-Each pane can even get its own git worktree.
-
-Open source: https://github.com/jasonsuhari/gridbash
+Where does your multi-agent terminal workflow break down?
 ```
 
 ### LinkedIn
@@ -225,113 +146,191 @@ Open source: https://github.com/jasonsuhari/gridbash
 ```text
 I built the terminal workflow I wanted for parallel coding agents.
 
-GridBash runs Codex, Claude, Gemini, Aider, and other CLI tools in one real
-PTY-backed grid. I can route a prompt to one pane or selected panes, keep every
-session visible, and isolate parallel jobs in repo-local git worktrees.
+GridBash launches Codex, Claude, Gemini, Aider, and other CLI tools into one
+managed PTY-backed workspace. I can choose auth and worktree isolation up front,
+route a prompt to one pane or selected panes, and keep every session visible.
 
-It is a Rust TUI, MIT licensed, and currently available for Windows x64:
+It is a Rust TUI, MIT licensed, and available for Windows, Linux, and macOS:
 https://github.com/jasonsuhari/gridbash
 
-The most useful feedback now is from developers already juggling multiple agent
-sessions: where does your workflow break down?
+I am looking for developers who already run several agent sessions. Which
+setup, visibility, or safety problem should I test next?
 ```
 
-### Short Discord post
+## Agent-Specific Communities
+
+Use the terminology and exact profile for that community.
 
 ```text
-I made GridBash, an open-source Windows terminal grid for running multiple CLI
-coding agents side by side. It supports selected-pane input and optional git
-worktree isolation. Demo + source: https://github.com/jasonsuhari/gridbash
+I often run one <AGENT> session for implementation, another for review, and a
+third for tests or docs. GridBash keeps those real sessions visible in one
+terminal workspace and routes follow-ups only to the selected panes.
+
+Each pane can also start in an isolated git worktree:
+
+    gridbash 1x3 --profile <PROFILE> --worktrees
+
+It is MIT licensed and runs on Windows, Linux, and macOS:
+https://github.com/jasonsuhari/gridbash
+
+If you already run multiple <AGENT> sessions, I would value feedback on the
+selection and worktree workflow.
 ```
 
-## Technical article outline
+Read current community rules first. Prefer a native demo and useful workflow
+explanation over a bare repository link.
 
-The complete publication draft lives at
+## Rust And Terminal Communities
+
+Do not lead with a generic AI-tool announcement. Teach the implementation:
+
+```text
+I built a cross-platform Rust TUI that hosts many real PTYs in one process. The
+hard parts were containing mouse selection within a pane, keeping modeless
+input routing predictable, and redrawing many live terminals without turning
+the UI into a dashboard abstraction.
+
+The implementation uses Ratatui and portable-pty, with repo-local git
+worktrees as the isolation boundary for parallel coding-agent jobs.
+
+Architecture, demo, and source:
+https://github.com/jasonsuhari/gridbash
+
+I would value technical feedback on <ONE SPECIFIC AREA>.
+```
+
+The longer article lives at
 [`docs/articles/building-a-windows-pty-grid-in-rust.md`](articles/building-a-windows-pty-grid-in-rust.md).
+Update its title in a future editorial pass if the article is expanded from its
+Windows/ConPTY origin story into the complete cross-platform architecture.
 
-**Title:** Building a Windows PTY grid for coding agents in Rust
+## Contributor Recruitment
 
-1. Why multiple coding agents create a terminal coordination problem
-2. Why GridBash preserves real PTYs instead of wrapping agents behind an API
-3. ConPTY lifecycle and terminal emulation constraints
-4. Routing ordinary input without introducing modal friction
-5. Pane-local mouse selection and redraw performance
-6. Git worktrees as the isolation boundary for parallel agents
-7. What V1 deliberately does not solve: daemon detach/reattach
-8. Architecture diagram, performance numbers, install command, and repository
+Keep three to five issues genuinely ready before recruiting.
 
-The article should teach the terminal lessons first and mention GridBash as the
-working implementation rather than reading like an advertisement.
-
-## Response bank
-
-### “Why not tmux?”
+### This Week In Rust Project Update
 
 ```text
-tmux is excellent. GridBash is narrower: it is built around selecting agent
-panes, routing the same input safely, launching common agent profiles, and
-creating repo-local worktrees. If tmux already fits your workflow, keep it.
+GridBash is a cross-platform Rust TUI for running CLI coding agents in a
+selectable PTY grid, with optional git-worktree isolation. The current focus is
+first-run reliability, terminal compatibility, and managed multi-agent
+workflows. Source and contributor guide:
+https://github.com/jasonsuhari/gridbash
 ```
 
-### “Why Windows only?”
+### Call For Participation
 
 ```text
-The published package started with Windows because ConPTY workflows were the
-gap I personally had. Cross-platform packaging is active work, but I do not
-want to claim a platform until a release artifact is actually available.
+GridBash – <ISSUE TITLE>: <ONE-SENTENCE OUTCOME>. The issue names the relevant
+files, acceptance checks, and focused validation command. Maintainer
+orientation is available: <ISSUE URL>
 ```
 
-### “Is this really multi-agent orchestration?”
+### Direct Contributor Invitation
 
 ```text
-It is terminal-level orchestration, not an agent framework. GridBash launches
-and routes input among independent CLI agents; it does not hide their native
-interfaces or invent a shared agent protocol.
+You mentioned an interest in <RUST/TUI/TERMINAL AREA>. GridBash has a scoped
+issue in that area with the likely files and validation written down:
+<ISSUE URL>
+
+No pressure to take it, but I am happy to provide orientation if the task is a
+fit.
 ```
 
-### “Does closing it kill the agents?”
+## Product Hunt
+
+Use Product Hunt only after the project has several activated users, reliable
+installation, and at least one concrete user story.
+
+Name:
 
 ```text
-Yes in V1. GridBash is intentionally single-process today, so closing it closes
-its children. Daemon-backed detach/reattach is the major next frontier.
+GridBash
 ```
 
-## Publication sequence
+Tagline:
 
-Do not dump every post on the same day. A practical sequence:
+```text
+Run CLI coding agents in one terminal workspace
+```
 
-1. Publish Show HN and stay available for the first several hours.
-2. Post the technical Rust version the next day if it complies with current
-   subreddit rules.
-3. Post the workflow version to command-line and agent-specific communities on
-   separate days.
-4. Publish the short video to social accounts with native upload.
-5. Publish the technical article and submit it as a normal HN story, not a
-   second Show HN.
-6. Schedule Product Hunt for a day when the maker can answer comments throughout
-   the Pacific-time launch window.
+Description:
+
+```text
+A cross-platform Rust TUI for running Codex, Claude, Gemini, Aider, and other
+CLI agents side by side. Route prompts to selected panes and isolate parallel
+jobs with repo-local git worktrees.
+```
+
+Suggested topics: Developer Tools, Open Source, Artificial Intelligence.
+
+## Response Bank
+
+### Why not tmux?
+
+```text
+tmux is excellent. GridBash is not trying to replace a general-purpose terminal
+multiplexer: it owns the local agent workflow around launch, auth, usage,
+selection, coordination, and repo-local worktrees. Raw shells remain available.
+```
+
+### Is this an agent framework?
+
+```text
+It is terminal-level orchestration, not a replacement agent protocol. GridBash
+launches and routes input among independent CLI agents while preserving their
+native interfaces.
+```
+
+### Does closing it kill the agents?
+
+```text
+By default, yes. If you enable `keep_terminals_running`, each pane runs through
+a local authenticated background host and a saved session can reconnect to the
+same process later. Each host still accepts only one GridBash client at a time.
+```
+
+### Which platforms are supported?
+
+```text
+GridBash builds native artifacts for Windows x64, Linux x64/arm64, and macOS
+arm64/x64. Check the latest GitHub release and npm version badge before
+installing; the registry can temporarily trail a GitHub release.
+```
+
+## Publication Sequence
+
+Do not publish every item on the same day:
+
+1. Clear the publication gate and invite a small set of direct testers.
+2. Publish one native workflow video on the strongest existing social channel.
+3. Run Show HN and remain available to answer questions.
+4. Publish the technical Rust or terminal article.
+5. Submit one contributor task to This Week in Rust.
+6. Share a user-driven fix or outside contribution.
+7. Consider Product Hunt only after installation and retention evidence are
+   strong.
 
 ## Tracking
 
-Use source-specific links when analytics are needed:
+Use source-specific links when useful:
 
 ```text
-https://jasonsuhari.github.io/gridbash/?utm_source=hackernews&utm_medium=community&utm_campaign=launch
-https://jasonsuhari.github.io/gridbash/?utm_source=reddit&utm_medium=community&utm_campaign=launch
-https://jasonsuhari.github.io/gridbash/?utm_source=producthunt&utm_medium=launch&utm_campaign=launch
-https://jasonsuhari.github.io/gridbash/?utm_source=linkedin&utm_medium=social&utm_campaign=launch
+https://jasonsuhari.github.io/gridbash/?utm_source=hackernews&utm_medium=community&utm_campaign=workflow-launch
+https://jasonsuhari.github.io/gridbash/?utm_source=linkedin&utm_medium=social&utm_campaign=workflow-launch
+https://jasonsuhari.github.io/gridbash/?utm_source=thisweekinrust&utm_medium=community&utm_campaign=contributors
 ```
 
-GitHub stars are a lagging signal. Track qualified questions, successful
-installs, npm downloads, issue quality, returning contributors, and which
-message caused people to try the product.
+Record trials, activations, returning users, useful conversations, issues
+claimed, and merged outside pull requests in the campaign log described in
+[`OUTREACH.md`](OUTREACH.md).
 
-## Before every post
+## Before Every Post
 
-- Confirm the install command against the current published release.
-- Confirm the advertised platforms against actual downloadable artifacts.
+- Clear the publication gate.
 - Read the community's current self-promotion rules.
-- Upload the video natively when possible.
-- Use a title that states what was built, not “Please support my project.”
+- Show one workflow rather than a feature montage.
+- Upload video natively where possible.
+- State current limitations plainly.
 - Ask for product or architecture feedback, never coordinated votes.
 - Be ready to answer questions and ship small fixes while attention is active.

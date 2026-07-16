@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -10,12 +10,15 @@ use anyhow::{Context, Result, anyhow, bail};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+
 use crate::{
     auth::AgentKind,
     cli::ResumeArgs,
     layout::GridSize,
+    pane_host::{PtyHostRef, PtyPane},
     profiles::Profile,
-    pty::PtyPane,
     setup::{LaunchPlan, PaneLaunchSpec},
 };
 
@@ -34,9 +37,13 @@ pub struct SavedSession {
     pub id: String,
     pub started_at: u64,
     pub updated_at: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
     pub grid: SavedGrid,
     #[serde(default)]
     pub panes: Vec<SavedPane>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tabs: Vec<SavedTab>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -60,6 +67,16 @@ pub struct SavedPane {
     pub auth_kind: Option<AgentKind>,
     #[serde(default)]
     pub history: SavedPaneHistory,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<PtyHostRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedTab {
+    pub title: String,
+    pub grid: SavedGrid,
+    #[serde(default)]
+    pub panes: Vec<SavedPane>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -83,106 +100,167 @@ impl SessionRecord {
 
 impl SavedSession {
     pub fn launch_plan(&self) -> Result<LaunchPlan> {
-        let grid = GridSize::new(self.grid.rows, self.grid.columns).ok_or_else(|| {
-            anyhow!(
-                "saved session {} has invalid grid {}x{}",
-                self.id,
-                self.grid.rows,
-                self.grid.columns
-            )
-        })?;
-
-        let panes = self
-            .panes
-            .iter()
-            .map(|pane| PaneLaunchSpec {
-                profile_name: pane.profile_name.clone(),
-                command: pane.command.clone(),
-                env: BTreeMap::new(),
-                cwd: pane.cwd.clone(),
-                folder_name: pane.folder_name.clone(),
-                worktree_name: pane.worktree_name.clone(),
-                auth_name: pane.auth_name.clone(),
-                auth_kind: pane.auth_kind,
-                auth_dir: None,
-            })
-            .collect::<Vec<_>>();
-
-        if panes.is_empty() {
-            bail!("saved session {} has no panes", self.id);
-        }
-
-        Ok(LaunchPlan { panes, grid })
+        launch_plan_from_saved(&self.id, self.grid, &self.panes)
     }
 
     pub fn pane_histories(&self) -> Vec<SavedPaneHistory> {
         self.panes.iter().map(|pane| pane.history.clone()).collect()
     }
 
-    fn new(id: String, plan: &LaunchPlan) -> Self {
+    pub fn pane_hosts(&self) -> Vec<Option<PtyHostRef>> {
+        self.panes.iter().map(|pane| pane.host.clone()).collect()
+    }
+
+    fn new(id: String, title: &str, plan: &LaunchPlan) -> Self {
         let now = now_seconds();
         Self {
             version: SESSION_VERSION,
             id,
             started_at: now,
             updated_at: now,
+            title: title.to_string(),
             grid: plan.grid.into(),
             panes: plan
                 .panes
                 .iter()
                 .enumerate()
-                .map(|(index, spec)| SavedPane::from_spec(index, spec, SavedPaneHistory::default()))
+                .map(|(index, spec)| {
+                    SavedPane::from_spec(index, spec, SavedPaneHistory::default(), None)
+                })
                 .collect(),
+            tabs: Vec::new(),
         }
     }
 
-    fn update_from_live(&mut self, plan: &LaunchPlan, panes: &[PtyPane]) {
+    fn update_from_live(
+        &mut self,
+        title: &str,
+        plan: &LaunchPlan,
+        panes: &[PtyPane],
+        tabs: Vec<SavedTab>,
+    ) {
         self.version = SESSION_VERSION;
         self.updated_at = now_seconds();
+        self.title = title.to_string();
         self.grid = plan.grid.into();
-        self.panes = plan
-            .panes
-            .iter()
-            .enumerate()
-            .map(|(index, spec)| {
-                let history = panes
-                    .get(index)
-                    .map(SavedPaneHistory::from_pane)
-                    .unwrap_or_default();
-                SavedPane::from_spec(index, spec, history)
-            })
-            .collect();
+        self.panes = saved_panes_from_live(plan, panes);
+        self.tabs = tabs;
     }
 
     fn summary(&self) -> String {
+        let panes = self
+            .panes
+            .iter()
+            .chain(self.tabs.iter().flat_map(|tab| tab.panes.iter()))
+            .collect::<Vec<_>>();
         let folders = compact_labels(
-            self.panes
+            panes
                 .iter()
                 .map(|pane| pane.folder_name.as_str())
                 .filter(|name| !name.is_empty()),
         );
         let profiles = compact_labels(
-            self.panes
+            panes
                 .iter()
                 .map(|pane| pane.profile_name.as_str())
                 .filter(|name| !name.is_empty()),
         );
+        let pane_count = panes.len();
+        let tab_suffix = (!self.tabs.is_empty()).then(|| {
+            let tab_count = self.tabs.len() + 1;
+            format!(" / {tab_count} tabs")
+        });
 
         format!(
-            "{} | {}x{} | {} pane{} | {} | {}",
+            "{} | {}x{} | {} pane{}{} | {} | {}",
             age_label(self.updated_at),
             self.grid.rows,
             self.grid.columns,
-            self.panes.len(),
-            if self.panes.len() == 1 { "" } else { "s" },
+            pane_count,
+            if pane_count == 1 { "" } else { "s" },
+            tab_suffix.unwrap_or_default(),
             folders.unwrap_or_else(|| "unknown folders".into()),
             profiles.unwrap_or_else(|| "unknown profiles".into())
         )
     }
 }
 
+impl SavedTab {
+    pub fn from_live(title: &str, plan: &LaunchPlan, panes: &[PtyPane]) -> Self {
+        Self {
+            title: title.to_string(),
+            grid: plan.grid.into(),
+            panes: saved_panes_from_live(plan, panes),
+        }
+    }
+
+    pub fn launch_plan(&self) -> Result<LaunchPlan> {
+        launch_plan_from_saved(&self.title, self.grid, &self.panes)
+    }
+
+    pub fn pane_histories(&self) -> Vec<SavedPaneHistory> {
+        self.panes.iter().map(|pane| pane.history.clone()).collect()
+    }
+
+    pub fn pane_hosts(&self) -> Vec<Option<PtyHostRef>> {
+        self.panes.iter().map(|pane| pane.host.clone()).collect()
+    }
+}
+
+fn launch_plan_from_saved(
+    id: &str,
+    saved_grid: SavedGrid,
+    panes: &[SavedPane],
+) -> Result<LaunchPlan> {
+    let grid = GridSize::new(saved_grid.rows, saved_grid.columns).ok_or_else(|| {
+        anyhow!(
+            "saved session {id} has invalid grid {}x{}",
+            saved_grid.rows,
+            saved_grid.columns
+        )
+    })?;
+    let panes = panes
+        .iter()
+        .map(|pane| PaneLaunchSpec {
+            profile_name: pane.profile_name.clone(),
+            command: pane.command.clone(),
+            env: BTreeMap::new(),
+            cwd: pane.cwd.clone(),
+            folder_name: pane.folder_name.clone(),
+            worktree_name: pane.worktree_name.clone(),
+            auth_name: pane.auth_name.clone(),
+            auth_kind: pane.auth_kind,
+            auth_dir: None,
+        })
+        .collect::<Vec<_>>();
+    if panes.is_empty() {
+        bail!("saved session {id} has no panes");
+    }
+    Ok(LaunchPlan { panes, grid })
+}
+
+fn saved_panes_from_live(plan: &LaunchPlan, panes: &[PtyPane]) -> Vec<SavedPane> {
+    plan.panes
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            let history = panes
+                .get(index)
+                .map(SavedPaneHistory::from_pane)
+                .unwrap_or_default();
+            let host = panes.get(index).map(PtyPane::host_ref);
+            SavedPane::from_spec(index, spec, history, host)
+        })
+        .collect()
+}
+
 impl SavedPane {
-    fn from_spec(index: usize, spec: &PaneLaunchSpec, history: SavedPaneHistory) -> Self {
+    fn from_spec(
+        index: usize,
+        spec: &PaneLaunchSpec,
+        history: SavedPaneHistory,
+        host: Option<PtyHostRef>,
+    ) -> Self {
         Self {
             index,
             profile_name: spec.profile_name.clone(),
@@ -193,6 +271,7 @@ impl SavedPane {
             auth_name: spec.auth_name.clone(),
             auth_kind: spec.auth_kind,
             history,
+            host,
         }
     }
 }
@@ -216,12 +295,12 @@ impl From<GridSize> for SavedGrid {
 }
 
 impl SessionRecorder {
-    pub fn start_new(plan: &LaunchPlan) -> Result<Self> {
+    pub fn start_new(title: &str, plan: &LaunchPlan) -> Result<Self> {
         let id = new_session_id();
         let path = session_file_path(&id)?;
         let recorder = Self {
             path,
-            session: SavedSession::new(id, plan),
+            session: SavedSession::new(id, title, plan),
         };
         recorder.save()?;
         prune_old_sessions()?;
@@ -235,19 +314,25 @@ impl SessionRecorder {
         }
     }
 
-    pub fn update(&mut self, plan: &LaunchPlan, panes: &[PtyPane]) {
-        self.session.update_from_live(plan, panes);
+    pub fn update(
+        &mut self,
+        title: &str,
+        plan: &LaunchPlan,
+        panes: &[PtyPane],
+        tabs: Vec<SavedTab>,
+    ) {
+        self.session.update_from_live(title, plan, panes, tabs);
     }
 
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
+            create_private_dir_all(parent).with_context(|| {
                 format!("failed to create session directory {}", parent.display())
             })?;
         }
 
         let raw = toml::to_string_pretty(&self.session).context("failed to serialize session")?;
-        fs::write(&self.path, raw)
+        write_private_file(&self.path, raw.as_bytes())
             .with_context(|| format!("failed to write session {}", self.path.display()))
     }
 }
@@ -392,6 +477,30 @@ fn sessions_dir() -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("failed to resolve GridBash session directory"))
 }
 
+fn create_private_dir_all(path: &std::path::Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(path)?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    #[cfg(unix)]
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
 fn session_file_path(id: &str) -> Result<PathBuf> {
     Ok(sessions_dir()?.join(format!("{id}.toml")))
 }
@@ -474,7 +583,7 @@ mod tests {
         plan.panes[0].auth_name = Some("codex-2".into());
         plan.panes[0].auth_kind = Some(AgentKind::Codex);
 
-        let session = SavedSession::new("test".into(), &plan);
+        let session = SavedSession::new("test".into(), "Grid 1", &plan);
         let restored = session.launch_plan().expect("launch plan");
 
         assert_eq!(restored.grid, grid);
@@ -492,6 +601,7 @@ mod tests {
             id: "test".into(),
             started_at: now_seconds(),
             updated_at: now_seconds(),
+            title: "Grid 1".into(),
             grid: SavedGrid {
                 rows: 2,
                 columns: 2,
@@ -501,6 +611,7 @@ mod tests {
                 pane("two", "codex"),
                 pane("one", "claude"),
             ],
+            tabs: Vec::new(),
         };
 
         let summary = session.summary();
@@ -509,6 +620,50 @@ mod tests {
         assert!(summary.contains("3 panes"));
         assert!(summary.contains("one, two"));
         assert!(summary.contains("claude, codex"));
+    }
+
+    #[test]
+    fn saved_session_round_trips_background_tabs() {
+        let mut background_pane = pane("background", "cmd");
+        background_pane.host = Some(PtyHostRef {
+            endpoint: "127.0.0.1:32123".into(),
+            token: "secret".into(),
+        });
+        let mut session = SavedSession {
+            version: SESSION_VERSION,
+            id: "test".into(),
+            started_at: now_seconds(),
+            updated_at: now_seconds(),
+            title: "Grid 1".into(),
+            grid: SavedGrid {
+                rows: 1,
+                columns: 1,
+            },
+            panes: vec![pane("active", "cmd")],
+            tabs: vec![SavedTab {
+                title: "Long build".into(),
+                grid: SavedGrid {
+                    rows: 1,
+                    columns: 1,
+                },
+                panes: vec![background_pane],
+            }],
+        };
+
+        let raw = toml::to_string(&session).expect("serialize session");
+        session = toml::from_str(&raw).expect("parse session");
+
+        assert_eq!(session.tabs.len(), 1);
+        assert_eq!(session.tabs[0].title, "Long build");
+        assert!(session.tabs[0].panes[0].host.is_some());
+        assert_eq!(
+            session.tabs[0]
+                .launch_plan()
+                .expect("tab launch plan")
+                .panes
+                .len(),
+            1
+        );
     }
 
     fn pane(folder_name: &str, profile_name: &str) -> SavedPane {
@@ -527,6 +682,7 @@ mod tests {
             auth_name: None,
             auth_kind: None,
             history: SavedPaneHistory::default(),
+            host: None,
         }
     }
 }

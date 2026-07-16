@@ -3,29 +3,29 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>GridBash | Every Coding Agent. One Terminal.</title>
-    <meta name="description" content="GridBash is the open source terminal grid for running Codex, Claude, Gemini, and other CLI agents side by side on Windows, macOS, and Linux.">
-    <meta name="keywords" content="GridBash, Jason Suhari, CLI agent terminal grid, AI coding agent multiplexer, Codex terminal grid, Claude Code terminal grid, multi-agent terminal, Rust TUI">
+    <title>GridBash | Your Local Agent Workspace</title>
+    <meta name="description" content="GridBash is the open source local workspace for launching, authenticating, isolating, monitoring, and coordinating CLI coding agents in parallel.">
+    <meta name="keywords" content="GridBash, Jason Suhari, local agent workspace, coding agent workspace, Codex workspace, Claude Code workspace, multi-agent orchestration, Rust TUI">
     <meta name="author" content="Jason Suhari">
     <meta name="theme-color" content="#10110e">
     <meta name="robots" content="index, follow, max-image-preview:large">
     <link rel="canonical" href="https://jasonsuhari.github.io/gridbash/">
     <link rel="me" href="https://github.com/jasonsuhari">
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231a1c16'/%3E%3Crect x='6' y='6' width='8' height='8' rx='2' fill='%239bd66f'/%3E%3Crect x='18' y='6' width='8' height='8' rx='2' fill='%23577542'/%3E%3Crect x='6' y='18' width='8' height='8' rx='2' fill='%23577542'/%3E%3Crect x='18' y='18' width='8' height='8' rx='2' fill='%239bd66f'/%3E%3C/svg%3E">
-    <link rel="preload" as="image" href="assets/gridbash-launch-teaser-poster.png">
+    <link rel="preload" as="image" href="assets/gridbash-openvid-demo-poster.png">
 
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="GridBash">
-    <meta property="og:title" content="GridBash | Every Coding Agent. One Terminal.">
-    <meta property="og:description" content="Run Codex, Claude, Gemini, and the rest of your CLI agent stack side by side in one fast terminal grid.">
+    <meta property="og:title" content="GridBash | Your Local Agent Workspace">
+    <meta property="og:description" content="Launch, authenticate, isolate, monitor, and coordinate your CLI coding agents in one local workspace.">
     <meta property="og:url" content="https://jasonsuhari.github.io/gridbash/">
     <meta property="og:image" content="https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-social-preview.png">
     <meta property="og:image:width" content="1280">
     <meta property="og:image:height" content="640">
 
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="GridBash | Every Coding Agent. One Terminal.">
-    <meta name="twitter:description" content="The open source terminal grid for agent-heavy development.">
+    <meta name="twitter:title" content="GridBash | Your Local Agent Workspace">
+    <meta name="twitter:description" content="The open source local workspace for parallel coding agents.">
     <meta name="twitter:image" content="https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-social-preview.png">
     <script>document.documentElement.classList.add("js");</script>
 
@@ -35,13 +35,13 @@
         "@type": "SoftwareApplication",
         "name": "GridBash",
         "alternateName": "GridBash by Jason Suhari",
-        "description": "GridBash is a cross-platform terminal grid for running CLI coding agents side by side.",
+        "description": "GridBash is a local workspace for running and coordinating CLI coding agents in parallel.",
         "url": "https://jasonsuhari.github.io/gridbash/",
         "codeRepository": "https://github.com/jasonsuhari/gridbash",
         "downloadUrl": "https://www.npmjs.com/package/gridbash",
         "image": "https://raw.githubusercontent.com/jasonsuhari/gridbash/main/docs/assets/gridbash-social-preview.png",
         "applicationCategory": "DeveloperApplication",
-        "applicationSubCategory": "Terminal multiplexer",
+        "applicationSubCategory": "Agent workspace",
         "operatingSystem": "Windows, Linux, macOS",
         "softwareVersion": "0.1.6",
         "programmingLanguage": "Rust",
@@ -72,7 +72,7 @@
             "name": "What is GridBash?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "GridBash is a cross-platform terminal grid for running CLI coding agents and shells side by side."
+              "text": "GridBash is a local workspace for launching, authenticating, isolating, monitoring, and coordinating CLI coding agents in parallel."
             }
           },
           {
@@ -88,7 +88,7 @@
             "name": "How do I install GridBash?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Install the stable Windows x64 package with npm install -g gridbash, or download the v0.2 cross-platform preview from GitHub Releases."
+              "text": "Install the currently published package with npm install -g gridbash, or download the matching Windows, Linux, or macOS artifact from the latest GitHub release."
             }
           }
         ]
@@ -1328,8 +1328,8 @@
         <nav class="nav-links" aria-label="Primary navigation">
           <a href="#why">Why GridBash</a>
           <a href="#features">Features</a>
-          <a href="https://www.npmjs.com/package/gridbash">npm stable</a>
-          <a class="nav-cta" href="https://github.com/jasonsuhari/gridbash"><span class="nav-cta__long">Star on GitHub</span><span class="nav-cta__short">GitHub</span></a>
+          <a href="https://www.npmjs.com/package/gridbash">npm package</a>
+          <a class="nav-cta" href="https://github.com/jasonsuhari/gridbash"><span class="nav-cta__long">View on GitHub</span><span class="nav-cta__short">GitHub</span></a>
         </nav>
       </div>
     </header>
@@ -1337,14 +1337,14 @@
     <main>
       <section class="page hero" aria-labelledby="hero-title">
         <div class="hero-copy">
-          <p class="hero-kicker mono">Open source terminal orchestration</p>
-          <h1 id="hero-title">Every agent.<br><span class="hero-accent">One terminal.</span></h1>
-          <p class="hero-lead">Run your entire CLI agent stack side by side. Prompt one pane, selected panes, or all of them at once.</p>
+          <p class="hero-kicker mono">Open source local agent workspace</p>
+          <h1 id="hero-title">Every agent.<br><span class="hero-accent">One workspace.</span></h1>
+          <p class="hero-lead">Launch, authenticate, isolate, monitor, and coordinate your entire CLI agent stack while every session stays a real terminal.</p>
           <div class="hero-actions">
-            <a class="button button--primary" href="https://www.npmjs.com/package/gridbash">Install stable (Windows) <span class="button__arrow" aria-hidden="true">→</span></a>
-            <a class="button" href="https://github.com/jasonsuhari/gridbash">Star on GitHub</a>
+            <a class="button button--primary" href="https://github.com/jasonsuhari/gridbash/releases/latest">View latest release <span class="button__arrow" aria-hidden="true">→</span></a>
+            <a class="button" href="https://github.com/jasonsuhari/gridbash">View on GitHub</a>
           </div>
-          <button class="install-command" type="button" data-copy="npm install -g gridbash" aria-label="Copy npm command for the Windows stable package">
+          <button class="install-command" type="button" data-copy="npm install -g gridbash" aria-label="Copy the GridBash npm install command">
             <code>npm install -g gridbash</code>
             <span class="install-command__status">Copy</span>
           </button>
@@ -1356,8 +1356,8 @@
               <span>gridbash 2x3 --profile codex</span>
               <span class="terminal-bar__keys">ALT + M</span>
             </div>
-            <video autoplay muted loop playsinline poster="assets/gridbash-launch-teaser-poster.png" aria-label="GridBash running six CLI coding agents in one terminal grid">
-              <source src="assets/gridbash-launch-teaser.mp4" type="video/mp4">
+            <video autoplay muted loop playsinline poster="assets/gridbash-openvid-demo-poster.png" aria-label="GridBash running six CLI coding agents in one terminal grid">
+              <source src="assets/gridbash-openvid-demo.mp4" type="video/mp4">
             </video>
           </div>
           <div class="visual-note">
@@ -1466,8 +1466,8 @@
               <span class="step__index">01</span>
               <div>
                 <h3>Choose your channel</h3>
-                <p>Windows stable is on npm. The cross-platform preview is on <a href="https://github.com/jasonsuhari/gridbash/releases/tag/v0.2.0-macos.1">GitHub Releases</a>.</p>
-                <code>stable 0.1.6 | preview 0.2.0-macos.1</code>
+                <p>The npm registry can temporarily trail a GitHub release. Check the current package version, or use the matching Windows, Linux, or macOS artifact from <a href="https://github.com/jasonsuhari/gridbash/releases/latest">GitHub Releases</a>.</p>
+                <code>npm version badge | latest release artifacts</code>
               </div>
             </article>
             <article class="step reveal">
@@ -1510,10 +1510,10 @@
         <div class="page final-cta__inner reveal">
           <p class="section-kicker">Your agent command center</p>
           <h2 id="final-title">Stop tab juggling.</h2>
-          <p>Install the Windows stable build, or grab the cross-platform preview from GitHub Releases.</p>
+          <p>Install the current npm package, or download the matching native artifact from the latest GitHub release if registry publication is still catching up.</p>
           <div class="final-actions">
-            <button class="button button--primary install-copy" type="button" data-copy="npm install -g gridbash">Copy npm install (Windows)</button>
-            <a class="button" href="https://github.com/jasonsuhari/gridbash">Star on GitHub <span class="button__arrow" aria-hidden="true">→</span></a>
+            <button class="button button--primary install-copy" type="button" data-copy="npm install -g gridbash">Copy npm install</button>
+            <a class="button" href="https://github.com/jasonsuhari/gridbash/blob/main/CONTRIBUTING.md">Contribute on GitHub <span class="button__arrow" aria-hidden="true">→</span></a>
           </div>
         </div>
       </section>
@@ -1522,7 +1522,9 @@
     <footer class="footer">
       <div class="page footer__inner">
         <span>GridBash by Jason Suhari. MIT licensed.</span>
-        <a href="https://www.npmjs.com/package/gridbash">npm stable v0.1.6</a>
+        <a href="https://www.npmjs.com/package/gridbash">npm package</a>
+        <a href="https://github.com/jasonsuhari/gridbash/discussions">Discussions</a>
+        <a href="https://github.com/jasonsuhari/gridbash/blob/main/CONTRIBUTING.md">Contribute</a>
         <a href="https://github.com/jasonsuhari/gridbash">GitHub</a>
       </div>
     </footer>

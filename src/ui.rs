@@ -10,12 +10,14 @@ use vt100::Cell;
 
 use crate::{
     app::{
-        App, ExitedPaneRecoveryView, FollowUpDialog, GoalEditorView, GridPalette, PaneSelection,
-        PaneSettingsTarget, PaneSettingsView, PreviousPaneView, PreviousPanesView, RenamePaneView,
-        RenameTabView, SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
+        App, AssistantMessageRole, CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog,
+        GoalEditorView, GridPalette, PaneSelection, PaneSettingsTarget, PaneSettingsView,
+        PreviousPaneView, PreviousPanesView, RenamePaneView, RenameTabView, SettingsGroup,
+        SettingsRow, SettingsTab, SettingsValueKind, TabLabel, WorkspaceAssistantView,
     },
     auth::{AgentKind, AuthProfile},
     composer::GridPickerMode,
+    copy_mode::{CopyCellKind, CopyModeView, TextPoint},
     image_preview::ImagePreview,
 };
 
@@ -37,6 +39,7 @@ pub struct DrawState {
     pub pane_settings_rename_button: Option<Rect>,
     pub pane_settings_reload_button: Option<Rect>,
     pub pane_settings_sleep_button: Option<Rect>,
+    pub pane_settings_deactivate_button: Option<Rect>,
     pub pane_settings_goal_button: Option<Rect>,
     pub pane_settings_stop_goal_button: Option<Rect>,
 }
@@ -86,11 +89,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let follow_up_dialog = app.follow_up_dialog();
     let goal_editor_view = app.goal_editor_view();
     let pane_settings_view = app.pane_settings_view();
+    let command_palette_view = app.command_palette_view();
     let pane_settings_open = pane_settings_view.is_some();
     let grid_resizer = app.grid_resizer();
     let image_overlay = app.image_overlay_view();
+    let assistant_view = app.workspace_assistant_view();
     let help_open = app.help_open();
-    let exited_recovery = if help_open
+    let copy_mode_open = app.copy_mode_open();
+    let exited_recovery = if command_palette_view.is_some()
+        || help_open
+        || copy_mode_open
         || app.settings_open()
         || previous_panes_view.is_some()
         || pane_settings_open
@@ -100,12 +108,15 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || grid_resizer.is_some()
         || goal_editor_view.is_some()
         || image_overlay.is_some()
+        || assistant_view.is_some()
     {
         None
     } else {
         app.exited_recovery_view()
     };
-    let modal_open = help_open
+    let modal_open = command_palette_view.is_some()
+        || help_open
+        || copy_mode_open
         || app.settings_open()
         || previous_panes_view.is_some()
         || pane_settings_open
@@ -115,10 +126,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || grid_resizer.is_some()
         || goal_editor_view.is_some()
         || image_overlay.is_some()
+        || assistant_view.is_some()
         || exited_recovery.is_some();
     let mut pane_settings_rename_button = None;
     let mut pane_settings_reload_button = None;
     let mut pane_settings_sleep_button = None;
+    let mut pane_settings_deactivate_button = None;
     let mut pane_settings_goal_button = None;
     let mut pane_settings_stop_goal_button = None;
     render_tabs(frame, tab_area, &app.tab_labels(), palette);
@@ -135,6 +148,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         let selected = app.selected().contains(&index);
         let sleeping = app.pane_sleeping(index);
         let quiet = app.activity_badges_enabled() && pane.output_quiet();
+        let logging = app.pane_logging(index);
         let chrome = pane_chrome(
             selected,
             focused,
@@ -144,6 +158,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             quiet,
             palette,
         );
+        let badge = if logging {
+            format!("{} logging", chrome.badge)
+        } else {
+            chrome.badge.to_string()
+        };
 
         let header_summary = app.pane_header_summary(index, rect.width as usize);
         let usage = app.pane_usage_label(index);
@@ -152,7 +171,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             chrome.quiet_marker,
             &header_summary,
             usage.as_deref(),
-            chrome.badge,
+            &badge,
             app.compact_titles_enabled(),
             rect.width.saturating_sub(2),
         );
@@ -164,7 +183,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
 
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
-        if sleeping {
+        if let Some(copy_mode) = app.copy_mode_view(index, inner.width, inner.height) {
+            render_copy_mode(frame, inner, &copy_mode, palette);
+        } else if sleeping {
             render_sleeping_screen(frame, inner);
         } else {
             let selection = app.selection_for_pane(index);
@@ -234,9 +255,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(
-            " | Alt+h help | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c CLI | Alt+Shift+V voice | Alt+p summary | Alt+Shift+p panes | Alt+x swap | Alt+z sleep | Alt+q quit",
-        ),
+        Span::raw(" | F1 help | Alt+q quit fallback"),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
@@ -250,6 +269,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         pane_settings_rename_button = buttons.rename;
         pane_settings_reload_button = buttons.reload;
         pane_settings_sleep_button = buttons.sleep;
+        pane_settings_deactivate_button = buttons.deactivate;
         pane_settings_goal_button = buttons.goal;
         pane_settings_stop_goal_button = buttons.stop_goal;
     } else if let Some(dialog) = follow_up_dialog.as_ref() {
@@ -279,7 +299,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         picker.draw(frame, GridPickerMode::Resize, None);
     }
     if help_open {
-        render_help(frame, area, palette);
+        render_help(frame, area, app, palette);
+    }
+    if let Some(assistant) = assistant_view.as_ref() {
+        render_workspace_assistant(frame, area, assistant, palette);
+    }
+    if let Some(view) = command_palette_view.as_ref() {
+        render_command_palette(frame, area, view, palette);
     }
 
     DrawState {
@@ -291,6 +317,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         pane_settings_rename_button,
         pane_settings_reload_button,
         pane_settings_sleep_button,
+        pane_settings_deactivate_button,
         pane_settings_goal_button,
         pane_settings_stop_goal_button,
     }
@@ -712,6 +739,11 @@ fn render_pane_settings(
         rename: pane_settings_rename_rect(inner, view.auth_kind.is_some()),
         reload: pane_settings_reload_rect(inner, view.auth_kind.is_some()),
         sleep: pane_settings_sleep_rect(inner, view.auth_kind.is_some(), view.goal.is_some()),
+        deactivate: pane_settings_deactivate_rect(
+            inner,
+            view.auth_kind.is_some(),
+            view.goal.is_some(),
+        ),
         goal: pane_settings_goal_rect(inner, view.auth_kind.is_some(), view.goal.is_some()),
         stop_goal: pane_settings_stop_goal_rect(
             inner,
@@ -726,6 +758,7 @@ struct PaneSettingsButtons {
     rename: Option<Rect>,
     reload: Option<Rect>,
     sleep: Option<Rect>,
+    deactivate: Option<Rect>,
     goal: Option<Rect>,
     stop_goal: Option<Rect>,
 }
@@ -813,6 +846,11 @@ fn pane_settings_lines(
             view.sleeping,
             palette,
             view.selected_target == PaneSettingsTarget::Sleep,
+        ));
+        lines.push(pane_settings_deactivate_line(
+            width,
+            palette,
+            view.selected_target == PaneSettingsTarget::Deactivate,
         ));
         lines.push(pane_settings_goal_line(
             width,
@@ -907,7 +945,9 @@ fn pane_settings_lines(
     }
     lines.push(settings_section(
         "RECENT ACTIVITY",
-        "latest meaningful terminal output",
+        view.history_notice
+            .as_deref()
+            .unwrap_or("latest AI activity summary"),
         width,
     ));
     lines.push(Line::from(vec![
@@ -957,6 +997,11 @@ fn pane_settings_lines(
         view.sleeping,
         palette,
         view.selected_target == PaneSettingsTarget::Sleep,
+    ));
+    lines.push(pane_settings_deactivate_line(
+        width,
+        palette,
+        view.selected_target == PaneSettingsTarget::Deactivate,
     ));
     lines.push(pane_settings_goal_line(
         width,
@@ -1032,6 +1077,294 @@ fn render_goal_editor(frame: &mut Frame<'_>, area: Rect, editor: &GoalEditorView
     );
 }
 
+fn render_workspace_assistant(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &WorkspaceAssistantView,
+    palette: &GridPalette,
+) {
+    let dock = workspace_assistant_rect(area);
+    if dock.width == 0 || dock.height == 0 {
+        return;
+    }
+
+    frame.render_widget(Clear, dock);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.accent())
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(" BashBot [>_] ")
+        .title_bottom(" Alt+D or Esc closes ");
+    let inner = block.inner(dock);
+    frame.render_widget(
+        block.style(Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)),
+        dock,
+    );
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    if inner.height < 6 {
+        frame.render_widget(
+            Paragraph::new(" [>_] BashBot · enlarge the terminal to chat")
+                .style(Style::default().fg(palette.focus()).bg(SETTINGS_BG)),
+            inner,
+        );
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    let state = if view.busy {
+        "thinking..."
+    } else if view.configured {
+        "ready"
+    } else {
+        "setup needed"
+    };
+    let header = vec![
+        Line::from(vec![
+            Span::styled(" .----.  ", Style::default().fg(palette.focus())),
+            Span::styled(
+                format!("BashBot · {state}"),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("| [] []| ", Style::default().fg(palette.focus())),
+            Span::styled(
+                format!("{} grids · {} panes", view.grid_count, view.pane_count),
+                Style::default().fg(SETTINGS_MUTED),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("|  >_  | ", Style::default().fg(palette.focus())),
+            Span::styled(
+                "brief · prompt · delegate",
+                Style::default().fg(SETTINGS_MUTED),
+            ),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(header).style(Style::default().bg(SETTINGS_BG)),
+        chunks[0],
+    );
+
+    let transcript = assistant_transcript_lines(
+        view,
+        chunks[1].width as usize,
+        chunks[1].height as usize,
+        palette,
+    );
+    frame.render_widget(
+        Paragraph::new(transcript).style(Style::default().bg(SETTINGS_BG)),
+        chunks[1],
+    );
+
+    let prefix = "you › ";
+    let input_width = chunks[2]
+        .width
+        .saturating_sub(prefix.chars().count() as u16) as usize;
+    let (visible, cursor_offset) = visible_input(&view.input, view.cursor_chars, input_width);
+    let input = if view.input.is_empty() {
+        "Ask about the workspace...".to_string()
+    } else {
+        visible
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                prefix,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                truncate_text(&input, input_width),
+                Style::default().fg(if view.input.is_empty() {
+                    SETTINGS_MUTED
+                } else {
+                    SETTINGS_TEXT
+                }),
+            ),
+        ]))
+        .style(Style::default().bg(SETTINGS_SURFACE)),
+        chunks[2],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            command_key("Enter"),
+            Span::styled(" send  ", Style::default().fg(SETTINGS_MUTED)),
+            command_key("Ctrl+U"),
+            Span::styled(" clear", Style::default().fg(SETTINGS_MUTED)),
+        ]))
+        .style(Style::default().bg(SETTINGS_BG)),
+        chunks[3],
+    );
+
+    if input_width > 0 {
+        let cursor_x = chunks[2]
+            .x
+            .saturating_add(prefix.chars().count() as u16)
+            .saturating_add(cursor_offset.min(input_width.saturating_sub(1)) as u16);
+        frame.set_cursor_position((cursor_x, chunks[2].y));
+    }
+}
+
+fn workspace_assistant_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(2).min(64).max(area.width.min(1));
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(17)
+        .max(area.height.min(1));
+    Rect {
+        x: area.x
+            + area
+                .width
+                .saturating_sub(width)
+                .saturating_sub(u16::from(area.width > width)),
+        y: area.y
+            + area
+                .height
+                .saturating_sub(height)
+                .saturating_sub(u16::from(area.height > height)),
+        width,
+        height,
+    }
+}
+
+fn assistant_transcript_lines(
+    view: &WorkspaceAssistantView,
+    width: usize,
+    height: usize,
+    palette: &GridPalette,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    if view.messages.is_empty() {
+        let welcome = if view.configured {
+            "Ask me to brief all panes, sharpen a prompt, or delegate a task."
+        } else {
+            "Set the Manager endpoint, model, and API key in Alt+O to start chatting."
+        };
+        push_assistant_message_lines(
+            &mut lines,
+            "bot › ",
+            welcome,
+            width,
+            Style::default().fg(palette.accent()),
+        );
+    } else {
+        for message in &view.messages {
+            let (prefix, style) = match message.role {
+                AssistantMessageRole::User => (
+                    "you › ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                AssistantMessageRole::BashBot => (
+                    "bot › ",
+                    Style::default()
+                        .fg(palette.accent())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            };
+            push_assistant_message_lines(&mut lines, prefix, &message.text, width, style);
+        }
+    }
+    if view.busy {
+        push_assistant_message_lines(
+            &mut lines,
+            "bot › ",
+            "looking across every grid...",
+            width,
+            Style::default().fg(palette.accent()),
+        );
+    }
+
+    let skip = lines.len().saturating_sub(height);
+    lines.into_iter().skip(skip).collect()
+}
+
+fn push_assistant_message_lines(
+    lines: &mut Vec<Line<'static>>,
+    prefix: &'static str,
+    text: &str,
+    width: usize,
+    prefix_style: Style,
+) {
+    let prefix_width = prefix.chars().count();
+    let content_width = width.saturating_sub(prefix_width).max(1);
+    for (index, wrapped) in wrap_text(text, content_width).into_iter().enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                if index == 0 {
+                    prefix.to_string()
+                } else {
+                    " ".repeat(prefix_width)
+                },
+                prefix_style,
+            ),
+            Span::styled(wrapped, Style::default().fg(SETTINGS_TEXT)),
+        ]));
+    }
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let word_width = word.chars().count();
+        let next_width = current.chars().count() + usize::from(!current.is_empty()) + word_width;
+        if next_width <= width {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        } else {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            if word_width <= width {
+                current.push_str(word);
+            } else {
+                let chars = word.chars().collect::<Vec<_>>();
+                for chunk in chars.chunks(width) {
+                    lines.push(chunk.iter().collect());
+                }
+            }
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 fn pane_settings_sleep_line(
     width: u16,
     sleeping: bool,
@@ -1048,6 +1381,14 @@ fn pane_settings_sleep_line(
         palette.quiet(),
         selected,
     )
+}
+
+fn pane_settings_deactivate_line(
+    width: u16,
+    palette: &GridPalette,
+    selected: bool,
+) -> Line<'static> {
+    pane_settings_action_line("[ Deactivate pane ]", width, palette.exited(), selected)
 }
 
 fn pane_settings_goal_line(
@@ -1176,7 +1517,7 @@ fn pane_settings_sleep_rect(area: Rect, has_auth: bool, has_goal: bool) -> Optio
     pane_settings_action_rect(area, row)
 }
 
-fn pane_settings_goal_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
+fn pane_settings_deactivate_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
     let row = if area.width < 36 {
         if has_auth { 6 } else { 5 }
     } else if has_goal {
@@ -1187,14 +1528,25 @@ fn pane_settings_goal_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option
     pane_settings_action_rect(area, row)
 }
 
+fn pane_settings_goal_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
+    let row = if area.width < 36 {
+        if has_auth { 7 } else { 6 }
+    } else if has_goal {
+        12
+    } else {
+        11
+    };
+    pane_settings_action_rect(area, row)
+}
+
 fn pane_settings_stop_goal_rect(area: Rect, has_auth: bool, has_goal: bool) -> Option<Rect> {
     if !has_goal {
         return None;
     }
     let row = if area.width < 36 {
-        if has_auth { 7 } else { 6 }
+        if has_auth { 8 } else { 7 }
     } else {
-        12
+        13
     };
     pane_settings_action_rect(area, row)
 }
@@ -2172,13 +2524,13 @@ fn manager_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         Line::from(""),
         settings_section(
             "GRID MANAGER API",
-            "one goal manager orchestrates all awake panes in the current grid",
+            "powers grid goals and optional AI activity summaries",
             width,
         ),
         Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                "Uses an OpenAI-compatible chat-completions endpoint. The key is masked here and saved only in your local config.",
+                "AI summaries are opt-in. When enabled, bounded active-tab output is sent to this endpoint. The key stays in your local config.",
                 Style::default().fg(SETTINGS_MUTED),
             ),
         ]),
@@ -2193,7 +2545,7 @@ fn manager_settings_lines(app: &App, width: u16) -> Vec<Line<'static>> {
         command_key("Up/Down"),
         Span::styled(" move  ", Style::default().fg(Color::Gray)),
         command_key("Enter"),
-        Span::styled(" edit/save  ", Style::default().fg(Color::Gray)),
+        Span::styled(" toggle/edit/save  ", Style::default().fg(Color::Gray)),
         command_key("Esc"),
         Span::styled(" cancel/close", Style::default().fg(Color::Gray)),
     ]));
@@ -2347,7 +2699,7 @@ fn push_settings_group(
     }
 }
 
-fn settings_section(title: &'static str, helper: &'static str, width: u16) -> Line<'static> {
+fn settings_section(title: &str, helper: &str, width: u16) -> Line<'static> {
     let used = 2 + title.len() + 2;
     let helper = width
         .checked_sub(used as u16)
@@ -2356,7 +2708,7 @@ fn settings_section(title: &'static str, helper: &'static str, width: u16) -> Li
     let mut spans = vec![
         Span::raw("  "),
         Span::styled(
-            title,
+            title.to_string(),
             Style::default()
                 .fg(SETTINGS_BORDER)
                 .add_modifier(Modifier::BOLD),
@@ -2588,32 +2940,8 @@ fn settings_panel_style() -> Style {
     Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
-    const CONTROLS: &[(&str, &str)] = &[
-        ("Alt+arrows", "move pane focus"),
-        ("Alt+s", "toggle pane selection"),
-        ("Alt+a", "select or clear all panes"),
-        ("type/paste", "send to focused or selected panes"),
-        ("right-click", "toggle one selected pane"),
-        ("Alt+n", "open a new tab"),
-        ("Alt+t", "switch to next tab"),
-        ("Alt+Shift+r", "rename current tab"),
-        ("Alt+c", "expand or close the command line"),
-        ("Alt+p", "show focused-pane activity summary"),
-        ("Alt+Shift+p", "show previous panes"),
-        ("Alt+f", "zoom or restore focused pane"),
-        ("Alt+l", "resize the grid"),
-        ("Alt+Shift+A", "manage and assign auth profiles"),
-        ("Alt+r", "rename focused pane"),
-        ("Alt+Shift+t", "restart exited panes"),
-        ("Alt+z", "sleep or wake panes"),
-        ("Alt+g / Alt+u", "start or stop grid goal"),
-        ("Alt+o", "open global settings"),
-        ("Alt+Shift+V", "dictate without submitting"),
-        ("Alt+q", "quit GridBash"),
-        ("Alt+h / F1", "close this help"),
-    ];
-
+fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &GridPalette) {
+    let controls = app.shortcut_help_entries();
     let modal = help_modal_rect(area);
     frame.render_widget(Clear, modal);
     let inner_width = modal.width.saturating_sub(4) as usize;
@@ -2629,22 +2957,22 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
     ];
 
     if inner_width >= 62 {
-        let rows = CONTROLS.len().div_ceil(2);
+        let rows = controls.len().div_ceil(2);
         let column_width = inner_width.saturating_sub(3) / 2;
-        for (row, control) in CONTROLS.iter().take(rows).enumerate() {
-            let left = help_control(*control, column_width);
-            let right = CONTROLS
+        for (row, control) in controls.iter().take(rows).enumerate() {
+            let left = help_control(&control.0, control.1, column_width);
+            let right = controls
                 .get(row + rows)
-                .map(|control| help_control(*control, column_width))
+                .map(|control| help_control(&control.0, control.1, column_width))
                 .unwrap_or_default();
             lines.push(Line::from(format!("{left:<column_width$}   {right}")));
         }
     } else {
         let available = modal.height.saturating_sub(7) as usize;
-        for control in CONTROLS.iter().take(available) {
-            lines.push(Line::from(help_control(*control, inner_width)));
+        for control in controls.iter().take(available) {
+            lines.push(Line::from(help_control(&control.0, control.1, inner_width)));
         }
-        if available < CONTROLS.len() {
+        if available < controls.len() {
             lines.push(Line::from(
                 "More controls: enlarge the terminal or see README.md",
             ));
@@ -2664,7 +2992,93 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
     );
 }
 
-fn help_control((key, action): (&str, &str), width: usize) -> String {
+fn render_command_palette(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &CommandPaletteView,
+    palette: &GridPalette,
+) {
+    let width = area.width.saturating_sub(2).min(86).max(area.width.min(1));
+    let desired_height = (view.items.len() as u16).saturating_add(4).clamp(6, 18);
+    let height = desired_height
+        .min(area.height.saturating_sub(2))
+        .max(area.height.min(1));
+    let modal = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 3,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(palette.accent()))
+        .title(" GridBash Commands ")
+        .title_bottom(" Enter runs | Up/Down selects | Esc closes ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let input_width = inner.width.saturating_sub(3) as usize;
+    let (query, cursor_offset) = visible_input(&view.query, view.cursor_chars, input_width);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "> ",
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(query, Style::default().fg(SETTINGS_TEXT)),
+    ])];
+
+    let item_count = inner.height.saturating_sub(1) as usize;
+    if view.items.is_empty() && item_count > 0 {
+        lines.push(Line::from(Span::styled(
+            "  No matching commands",
+            Style::default().fg(SETTINGS_MUTED),
+        )));
+    } else {
+        let start = view.selected.saturating_sub(item_count.saturating_sub(1));
+        for (index, item) in view.items.iter().enumerate().skip(start).take(item_count) {
+            let marker = if index == view.selected { ">" } else { " " };
+            let shortcut_width = item.shortcut.chars().count().min(18);
+            let label_width = inner
+                .width
+                .saturating_sub(shortcut_width as u16)
+                .saturating_sub(4) as usize;
+            let label = truncate_text(item.label, label_width);
+            let padding = " ".repeat(label_width.saturating_sub(label.chars().count()));
+            let style = if index == view.selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(palette.focus())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)
+            };
+            lines.push(
+                Line::from(format!(
+                    "{marker} {label}{padding}  {}",
+                    truncate_text(&item.shortcut, shortcut_width)
+                ))
+                .style(style),
+            );
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines).style(settings_panel_style()), inner);
+    let cursor_x = inner
+        .x
+        .saturating_add(2)
+        .saturating_add(cursor_offset.min(input_width) as u16)
+        .min(inner.x.saturating_add(inner.width.saturating_sub(1)));
+    frame.set_cursor_position((cursor_x, inner.y));
+}
+
+fn help_control(key: &str, action: &str, width: usize) -> String {
     truncate_text(&format!("{key:<13} {action}"), width)
 }
 
@@ -2673,7 +3087,7 @@ fn help_modal_rect(area: Rect) -> Rect {
     let height = area
         .height
         .saturating_sub(2)
-        .min(18)
+        .min(22)
         .max(area.height.min(1));
     Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
@@ -2878,6 +3292,108 @@ pub fn render_cached_screen(
 
     refresh_screen_cache(cache, revision, screen, area.width, area.height, selection);
     blit_buffer(&cache.buffer, frame.buffer_mut(), area);
+}
+
+fn render_copy_mode(frame: &mut Frame<'_>, area: Rect, view: &CopyModeView, palette: &GridPalette) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let footer_height = u16::from(area.height > 1);
+    let body = Rect {
+        height: area.height.saturating_sub(footer_height),
+        ..area
+    };
+    let footer = Rect {
+        y: area.y + body.height,
+        height: footer_height,
+        ..area
+    };
+    let lines = view
+        .rows
+        .iter()
+        .map(|row| {
+            let spans = row
+                .text
+                .chars()
+                .enumerate()
+                .map(|(offset, ch)| {
+                    let point = TextPoint {
+                        line: row.line,
+                        column: view.left_column + offset,
+                    };
+                    let style = match view.cell_kind(point) {
+                        CopyCellKind::Normal => {
+                            Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)
+                        }
+                        CopyCellKind::Match => Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::DarkGray)
+                            .add_modifier(Modifier::BOLD),
+                        CopyCellKind::ActiveMatch => Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                        CopyCellKind::Selection => Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::LightCyan)
+                            .add_modifier(Modifier::BOLD),
+                        CopyCellKind::Cursor => Style::default()
+                            .fg(Color::Black)
+                            .bg(palette.focus())
+                            .add_modifier(Modifier::BOLD),
+                    };
+                    Span::styled(ch.to_string(), style)
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().fg(Color::White).bg(APP_BG)),
+        body,
+    );
+
+    if footer.height > 0 {
+        let search = if view.searching {
+            format!(
+                " /{}▌ {}/{}",
+                view.query,
+                view.active_match.map_or(0, |i| i + 1),
+                view.match_count
+            )
+        } else if view.query.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " /{} {}/{}",
+                view.query,
+                view.active_match.map_or(0, |i| i + 1),
+                view.match_count
+            )
+        };
+        let selection = view
+            .selection_label
+            .map(|kind| format!(" {kind}"))
+            .unwrap_or_default();
+        let label = format!(
+            " COPY {}:{}/{}{}{} | / search n/N next Space/V select y copy Esc close ",
+            view.pane + 1,
+            view.cursor.line + 1,
+            view.total_lines,
+            search,
+            selection
+        );
+        frame.render_widget(
+            Paragraph::new(truncate_text(&label, footer.width as usize)).style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(palette.focus())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            footer,
+        );
+    }
 }
 
 fn refresh_screen_cache(
@@ -3104,6 +3620,39 @@ fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn command_palette_renders_at_narrow_sizes_and_handles_no_matches() {
+        let backend = TestBackend::new(24, 8);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let view = CommandPaletteView {
+            query: "missing 東京".into(),
+            cursor_chars: 10,
+            selected: 0,
+            items: Vec::new(),
+        };
+
+        terminal
+            .draw(|frame| {
+                render_command_palette(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render palette");
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("GridBash Commands"));
+        assert!(rendered.contains("No matching"));
+    }
 
     #[test]
     #[ignore = "manual performance benchmark"]
@@ -3145,6 +3694,101 @@ mod tests {
             elapsed / ITERATIONS as u32
         );
         black_box(buffer);
+    }
+
+    #[test]
+    fn copy_mode_renders_at_one_cell_without_overflow() {
+        let backend = ratatui::backend::TestBackend::new(1, 1);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        let mode = crate::copy_mode::CopyMode::new(0, vec!["\u{6771}".into()], 1, 1);
+        let view = mode.view(1, 1);
+
+        terminal
+            .draw(|frame| {
+                render_copy_mode(frame, Rect::new(0, 0, 1, 1), &view, &GridPalette::default());
+            })
+            .expect("render copy mode");
+    }
+
+    #[test]
+    fn workspace_assistant_dock_anchors_to_bottom_right() {
+        let area = Rect::new(10, 20, 100, 40);
+        let dock = workspace_assistant_rect(area);
+        assert_eq!(dock, Rect::new(45, 42, 64, 17));
+        assert_eq!(dock.right() + 1, area.right());
+        assert_eq!(dock.bottom() + 1, area.bottom());
+    }
+
+    #[test]
+    fn workspace_assistant_renders_avatar_status_and_input() {
+        let view = WorkspaceAssistantView {
+            input: "brief me".into(),
+            cursor_chars: 8,
+            messages: Vec::new(),
+            busy: false,
+            configured: true,
+            grid_count: 2,
+            pane_count: 8,
+        };
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_workspace_assistant(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render assistant");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("BashBot"));
+        assert!(rendered.contains("| [] []|"));
+        assert!(rendered.contains("2 grids · 8 panes"));
+        assert!(rendered.contains("you › brief me"));
+    }
+
+    #[test]
+    fn assistant_transcript_keeps_latest_wrapped_lines() {
+        let view = WorkspaceAssistantView {
+            input: String::new(),
+            cursor_chars: 0,
+            messages: vec![
+                crate::app::AssistantMessageView {
+                    role: AssistantMessageRole::User,
+                    text: "brief every grid please".into(),
+                },
+                crate::app::AssistantMessageView {
+                    role: AssistantMessageRole::BashBot,
+                    text: "Frontend tests pass and backend is waiting for review.".into(),
+                },
+            ],
+            busy: false,
+            configured: true,
+            grid_count: 2,
+            pane_count: 8,
+        };
+        let lines = assistant_transcript_lines(&view, 24, 3, &GridPalette::default());
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(lines.len(), 3);
+        assert!(text.contains("backend"));
+        assert!(text.contains("is waiting"));
+        assert!(text.contains("for"));
+        assert!(text.contains("review."));
+    }
+
+    #[test]
+    fn assistant_text_wraps_unicode_without_byte_slicing() {
+        assert_eq!(
+            wrap_text("東京東京 ready", 3),
+            vec!["東京東", "京", "rea", "dy"]
+        );
     }
 
     #[test]
@@ -3270,6 +3914,7 @@ mod tests {
             folder: "gridbash".into(),
             worktree: Some("feat/activity-summary".into()),
             history_summary: "all focused tests passed".into(),
+            history_notice: None,
             focused: true,
             selected: false,
             sleeping: false,
@@ -3295,6 +3940,7 @@ mod tests {
             .join("\n");
         assert!(wide.contains("RECENT ACTIVITY"));
         assert!(wide.contains("summary  all focused tests passed"));
+        assert!(wide.contains("Deactivate pane"));
         assert!(!wide.contains("run the focused tests"));
 
         let narrow = pane_settings_lines(&view, 30, &GridPalette::default())
@@ -3303,6 +3949,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(narrow.contains("latest: all focused tests"));
+        assert!(narrow.contains("Deactivate pane"));
     }
 
     #[test]
@@ -3336,12 +3983,16 @@ mod tests {
             Some(Rect::new(5, 19, 40, 1))
         );
         assert_eq!(
+            pane_settings_deactivate_rect(Rect::new(5, 10, 40, 14), false, false),
+            Some(Rect::new(5, 20, 40, 1))
+        );
+        assert_eq!(
             pane_settings_goal_rect(Rect::new(5, 10, 40, 14), false, true),
-            Some(Rect::new(5, 21, 40, 1))
+            Some(Rect::new(5, 22, 40, 1))
         );
         assert_eq!(
             pane_settings_stop_goal_rect(Rect::new(5, 10, 40, 14), false, true),
-            Some(Rect::new(5, 22, 40, 1))
+            Some(Rect::new(5, 23, 40, 1))
         );
         assert_eq!(
             pane_settings_stop_goal_rect(Rect::new(5, 10, 40, 14), false, false),
@@ -3414,6 +4065,7 @@ mod tests {
             folder: "gridbash".into(),
             worktree: None,
             history_summary: "Assistant: ready".into(),
+            history_notice: None,
             focused: true,
             selected: false,
             sleeping: false,
