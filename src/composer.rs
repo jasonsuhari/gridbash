@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -117,16 +117,18 @@ enum StartupField {
     Columns,
     Worktrees,
     Project,
+    Launch,
 }
 
 impl StartupField {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Profile,
         Self::Auth,
         Self::Rows,
         Self::Columns,
         Self::Worktrees,
         Self::Project,
+        Self::Launch,
     ];
 }
 
@@ -229,13 +231,17 @@ impl Composer {
 
     fn handle_key(&mut self, key: KeyEvent, config: &Config) -> ComposerEvent {
         if self.editing_project {
+            if is_enter_key(key) {
+                self.commit_project_input();
+                return ComposerEvent::Continue;
+            }
+
             match key.code {
                 KeyCode::Esc => {
                     self.editing_project = false;
                     self.project_input = display_path(&self.current_dir);
                     self.project_error = None;
                 }
-                KeyCode::Enter => self.commit_project_input(),
                 KeyCode::Backspace => {
                     self.project_input.pop();
                     self.project_error = None;
@@ -247,6 +253,16 @@ impl Composer {
                 _ => {}
             }
             return ComposerEvent::Continue;
+        }
+
+        if is_enter_key(key) {
+            return match self.launch_plan(config) {
+                Ok(plan) => ComposerEvent::Launch(plan),
+                Err(error) => {
+                    self.project_error = Some(format!("{error:#}"));
+                    ComposerEvent::Continue
+                }
+            };
         }
 
         match key.code {
@@ -276,13 +292,6 @@ impl Composer {
                 self.project_error = None;
                 ComposerEvent::Continue
             }
-            KeyCode::Enter => match self.launch_plan(config) {
-                Ok(plan) => ComposerEvent::Launch(plan),
-                Err(error) => {
-                    self.project_error = Some(format!("{error:#}"));
-                    ComposerEvent::Continue
-                }
-            },
             _ => ComposerEvent::Continue,
         }
     }
@@ -358,7 +367,7 @@ impl Composer {
                 self.picker.adjust_active(delta);
             }
             StartupField::Worktrees => self.worktrees_enabled = !self.worktrees_enabled,
-            StartupField::Project => {}
+            StartupField::Project | StartupField::Launch => {}
         }
     }
 
@@ -500,6 +509,12 @@ impl Composer {
                 project_value,
                 project_hint,
             ),
+            workspace_row(
+                self.active_field == StartupField::Launch,
+                "Launch",
+                "Start workspace",
+                "Enter",
+            ),
         ];
         frame.render_widget(Paragraph::new(lines).style(panel_style()), area);
     }
@@ -574,6 +589,14 @@ impl Composer {
             ),
         }
     }
+}
+
+fn is_enter_key(key: KeyEvent) -> bool {
+    matches!(
+        key.code,
+        KeyCode::Enter | KeyCode::Char('\r') | KeyCode::Char('\n')
+    ) || (key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M')))
 }
 
 fn workspace_row(
@@ -1033,6 +1056,58 @@ mod tests {
                 .iter()
                 .all(|pane| { pane.profile_name == profile && pane.cwd == expected_dir })
         );
+    }
+
+    #[test]
+    fn enter_launches_from_every_workspace_field() {
+        if env::var_os("GRIDBASH_PROFILE").is_some() {
+            return;
+        }
+
+        let mut config = Config::default();
+        let profile = "managed-enter-test";
+        config.profiles.insert(
+            profile.into(),
+            Profile {
+                command: env::current_exe()
+                    .expect("test executable")
+                    .display()
+                    .to_string(),
+                args: Vec::new(),
+                title: Some("Managed Enter test agent".into()),
+                agent_kind: Some(AgentKind::Codex),
+            },
+        );
+        config.set_default_profile(profile);
+        config.auth.home = Some(env::temp_dir().join("gridbash-composer-enter-no-auth-profiles"));
+        let mut composer =
+            Composer::new(env::current_dir().expect("cwd"), None, &config).expect("composer");
+
+        for field in StartupField::ALL {
+            composer.active_field = field;
+            let event =
+                composer.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &config);
+            assert!(
+                matches!(event, ComposerEvent::Launch(_)),
+                "Enter did not launch from {field:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn return_key_aliases_are_treated_as_enter() {
+        assert!(is_enter_key(KeyEvent::new(
+            KeyCode::Char('\r'),
+            KeyModifiers::NONE,
+        )));
+        assert!(is_enter_key(KeyEvent::new(
+            KeyCode::Char('m'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(!is_enter_key(KeyEvent::new(
+            KeyCode::Char('m'),
+            KeyModifiers::NONE,
+        )));
     }
 
     #[test]
