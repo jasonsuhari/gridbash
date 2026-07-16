@@ -83,6 +83,7 @@ agents and shells.
 | --- | --- |
 | Drag mouse | Select and copy text inside one pane |
 | Right-click pane | Add or remove the pane from the selected set |
+| `Alt+k` | Search and run GridBash commands |
 | `Alt` + arrow keys | Move focus between panes |
 | `Alt+s` / `Alt+a` | Toggle the focused pane / select or clear all panes |
 | `Alt+c` | Open or close the command line |

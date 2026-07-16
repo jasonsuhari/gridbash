@@ -452,11 +452,7 @@ fn truncate_error(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        io::{Read as _, Write as _},
-        net::TcpListener,
-        thread,
-    };
+    use std::{io::Write as _, net::TcpListener, thread};
 
     #[test]
     fn request_describes_grid_orchestration_contract() {

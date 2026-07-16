@@ -21,6 +21,7 @@ pub enum Action {
     SwapPanes,
     ZoomPane,
     CommandLine,
+    CommandPalette,
     BashBot,
     CaptureOutput,
     ToggleOutputLogging,
@@ -47,6 +48,7 @@ const ACTIONS: &[Action] = &[
     Action::NextTab,
     Action::RenameTab,
     Action::CommandLine,
+    Action::CommandPalette,
     Action::BashBot,
     Action::CaptureOutput,
     Action::ToggleOutputLogging,
@@ -69,6 +71,10 @@ const ACTIONS: &[Action] = &[
 ];
 
 impl Action {
+    pub fn all() -> &'static [Self] {
+        ACTIONS
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Self::Quit => "quit",
@@ -87,6 +93,7 @@ impl Action {
             Self::SwapPanes => "swap-panes",
             Self::ZoomPane => "zoom-pane",
             Self::CommandLine => "command-line",
+            Self::CommandPalette => "command-palette",
             Self::BashBot => "bashbot",
             Self::CaptureOutput => "capture-output",
             Self::ToggleOutputLogging => "toggle-output-logging",
@@ -121,6 +128,7 @@ impl Action {
             Self::SwapPanes => "swap selected panes",
             Self::ZoomPane => "zoom or restore focused pane",
             Self::CommandLine => "expand or close command line",
+            Self::CommandPalette => "open searchable command palette",
             Self::BashBot => "open or close BashBot workspace assistant",
             Self::CaptureOutput => "capture target pane output",
             Self::ToggleOutputLogging => "start or stop target pane logging",
@@ -159,6 +167,7 @@ impl Action {
             Self::SwapPanes => "alt+x",
             Self::ZoomPane => "alt+f",
             Self::CommandLine => "alt+c",
+            Self::CommandPalette => "alt+k",
             Self::BashBot => "alt+d",
             Self::CaptureOutput => "alt+shift+c",
             Self::ToggleOutputLogging => "alt+shift+l",
@@ -380,6 +389,10 @@ impl KeyBindings {
                 (label, action.description())
             })
             .collect()
+    }
+
+    pub fn label_for(&self, action: Action) -> String {
+        self.bindings[&action].label()
     }
 }
 

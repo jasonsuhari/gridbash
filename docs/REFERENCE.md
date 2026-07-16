@@ -170,6 +170,7 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Drag mouse | Select terminal text inside the pane where the drag began and copy it on release. |
 | Right-click pane | Add or remove that pane from the selected set. |
 | Mouse wheel | Scroll only the pane under the pointer; selected panes use GridBash scrollback. |
+| Alt+k | Open the searchable command palette. Type to filter, use Up/Down to select, and press Enter to run an action. |
 | Alt+Left / Alt+Right | Focus the previous or next pane in the row, wrapping at the edge. |
 | Alt+Up / Alt+Down | Focus the pane above or below, wrapping at the edge. |
 | Alt+l | Resize the current grid. |
@@ -224,6 +225,8 @@ When multiple panes are selected, typing is broadcast to them. With zero or one 
 
 Alt+D opens BashBot in a compact dock at the bottom-right. BashBot uses bounded, labeled recent output from every pane in every open grid to provide workspace briefs and prompt coaching. Ask it explicitly to send, tell, delegate, or prompt when you want it to submit a targeted follow-up; ordinary briefing and prompt-writing requests never dispatch input. Responses remain bound to stable pane identities, and a target is skipped if it sleeps, exits, disappears, or changes while the request is being reviewed. Enter sends a chat message, Ctrl+U clears the input, and Esc or Alt+D closes the dock.
 
+The command palette lists the available pane, tab, grid, manager, settings, help, and quit actions together with their configured shortcuts. Its query supports tolerant subsequence matching, pasted Unicode text, and cursor editing. Palette input is never sent to a child terminal; press Esc or the configured command-palette shortcut to close it without running anything.
+
 Pane Activity provides auth, rename, refresh, sleep/wake, deactivate, and manager-goal controls. Navigate with Up/Down and activate with Enter or Space. Direct keys inside the view are `n` to rename, `r` to refresh, `z` to sleep or wake, `d` to deactivate, `g` to edit the grid goal, and `u` to stop it. Close it with Esc, `q`, or Alt+p; Alt+Shift+A opens Auth Profiles and Alt+o switches to overall settings.
 
 Deactivating a pane ends its terminal process, compacts the remaining panes, and shrinks the grid whenever a smaller dimension can still hold them. Columns are removed before rows, so deactivating two panes from a `2x3` grid compacts it to `2x2`. The final pane cannot be deactivated.
@@ -245,7 +248,7 @@ settings = "f8"
 Supported actions are `quit`, `help`, `focus-left`, `focus-right`, `focus-up`,
 `focus-down`, `toggle-selection`, `select-all`, `sleep-panes`, `restart-panes`,
 `next-tab`, `new-tab`, `resize-grid`, `swap-panes`, `zoom-pane`, `command-line`,
-`voice-input`, `edit-goal`, `stop-goal`, `settings`, `previous-panes`,
+`command-palette`, `bashbot`, `voice-input`, `edit-goal`, `stop-goal`, `settings`, `previous-panes`,
 `pane-activity`, `copy-mode`, `auth-profiles`, `capture-output`,
 `toggle-output-logging`, `rename-tab`, and `rename-pane`. Unlisted actions retain their
 defaults. Duplicate chords and unmodified terminal keys are rejected. F1 and
