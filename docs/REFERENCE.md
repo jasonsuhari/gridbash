@@ -157,6 +157,7 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+a | Select all panes, or clear the set when all are selected. |
 | Alt+c | Open or close the expanded command line. |
 | Alt+f | Zoom the focused pane to the full grid area, or restore the grid. |
+| Alt+b | Open keyboard scrollback search and copy mode for the focused pane. |
 | Alt+Shift+V | Dictate one utterance, or cancel active listening. |
 | Alt+h / F1 | Open or close help. |
 | Alt+p | Open the focused-pane activity summary. |
@@ -173,6 +174,15 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+q | Quit. |
 
 Drag selection is contained to its source pane and copies through the standard OSC 52 clipboard sequence. Use `--no-mouse` if the host terminal, serial link, or multiplexer cannot forward mouse reporting.
+
+Keyboard copy mode snapshots the focused pane's bounded terminal history while
+live PTY output continues in the background. Navigate with arrows, Home/End,
+Ctrl+Home/Ctrl+End, and PageUp/PageDown. Press `/` to edit an incremental search,
+Enter to finish the query, and `n` or `N` for the next or previous match. Space
+starts character selection, `V` starts whole-line selection, and `y` copies the
+selection through the same clipboard path as mouse selection. With no active
+selection, `y` copies the current line. Escape, `q`, or Alt+B closes the viewer
+and restores ordinary terminal input.
 
 When multiple panes are selected, typing is broadcast to them. With zero or one selected pane, input goes only to the focused pane. The Alt+c command line captures its output and runs Enter-submitted commands in the cwd shown in its prompt.
 

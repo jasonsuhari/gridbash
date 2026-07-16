@@ -36,6 +36,7 @@ use crate::{
     composer::{Composer, GridPicker, GridPickerAction},
     config::{Config, PaletteColor, PaneWorkloadPolicy, UiConfig, UiPalette},
     control::{self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse},
+    copy_mode::{CopyMode, CopyModeView},
     image_preview::{self, ImagePreview},
     layout::{GridLayout, GridSize, PaneId, pane_at},
     manager::{self, ActivitySummary, ManagerCommand, ManagerDecision},
@@ -98,6 +99,7 @@ pub struct App {
     selected: BTreeSet<usize>,
     pane_names: Vec<Option<String>>,
     text_selection: Option<MouseSelection>,
+    copy_mode: Option<CopyMode>,
     sleeping: BTreeSet<usize>,
     manager_goal: Option<ManagerGoal>,
     goal_editor: Option<GoalEditorState>,
@@ -2040,6 +2042,7 @@ impl App {
             selected: BTreeSet::new(),
             pane_names: Vec::new(),
             text_selection: None,
+            copy_mode: None,
             sleeping: BTreeSet::new(),
             manager_goal: None,
             goal_editor: None,
@@ -2155,6 +2158,7 @@ impl App {
         self.panes.clear();
         self.pane_names = vec![None; plan.panes.len()];
         self.text_selection = None;
+        self.copy_mode = None;
         self.sleeping.clear();
         self.manager_goal = None;
         self.goal_editor = None;
@@ -2230,6 +2234,7 @@ impl App {
         self.follow_up = None;
         self.goal_editor = None;
         self.text_selection = None;
+        self.copy_mode = None;
         self.command_line.focused = false;
         self.grid_resizer = None;
     }
@@ -2246,6 +2251,7 @@ impl App {
         self.selected.clear();
         self.pane_names = vec![None; plan.panes.len()];
         self.text_selection = None;
+        self.copy_mode = None;
         self.sleeping.clear();
         self.manager_goal = None;
         self.goal_editor = None;
@@ -3553,6 +3559,10 @@ impl App {
             self.status = "quit canceled".into();
         }
 
+        if self.copy_mode.is_some() {
+            return self.handle_copy_mode_key(terminal, key);
+        }
+
         if self.help_open {
             return Ok(self.handle_help_key(key));
         }
@@ -3690,6 +3700,205 @@ impl App {
         }
     }
 
+    fn open_copy_mode(&mut self) {
+        self.close_tab_modals();
+        self.settings.open = false;
+        self.image_overlay = None;
+        self.help_open = false;
+
+        let pane_index = self.focus;
+        let (width, height) = self.copy_mode_dimensions(pane_index);
+        let Some(pane) = self.panes.get_mut(pane_index) else {
+            self.status = "no focused pane available for copy mode".into();
+            return;
+        };
+        let lines = pane.history_lines();
+        let mode = CopyMode::new(pane_index, lines, width, height);
+        let line_count = mode.line_count();
+        self.copy_mode = Some(mode);
+        self.status = format!(
+            "copy mode: {line_count} lines | / search | Space/V select | y copy | Esc close"
+        );
+    }
+
+    fn close_copy_mode(&mut self) {
+        let pane_index = self.copy_mode.take().map(|mode| mode.pane());
+        if let Some(pane) = pane_index.and_then(|index| self.panes.get_mut(index)) {
+            pane.reset_view();
+        }
+        self.status = "copy mode closed; terminal input restored".into();
+    }
+
+    fn handle_copy_mode_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<KeyOutcome> {
+        let alt_b = key.modifiers.contains(KeyModifiers::ALT)
+            && matches!(key.code, KeyCode::Char('b') | KeyCode::Char('B'));
+        if matches!(key.code, KeyCode::Esc) || alt_b {
+            self.close_copy_mode();
+            return Ok(KeyOutcome::Render);
+        }
+
+        let pane_index = self.copy_mode.as_ref().map_or(self.focus, CopyMode::pane);
+        let (width, height) = self.copy_mode_dimensions(pane_index);
+        let searching = self.copy_mode.as_ref().is_some_and(CopyMode::searching);
+
+        if searching {
+            let mode = self.copy_mode.as_mut().expect("copy mode checked above");
+            match key.code {
+                KeyCode::Enter => mode.finish_search(),
+                KeyCode::Backspace => mode.backspace_search(width, height),
+                KeyCode::Char('u')
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    mode.clear_search(width, height);
+                }
+                KeyCode::Char(ch)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    mode.insert_search_char(ch, width, height);
+                }
+                _ => return Ok(KeyOutcome::Continue),
+            }
+            self.status = mode.status_label();
+            return Ok(KeyOutcome::Render);
+        }
+
+        if matches!(key.code, KeyCode::Char('q'))
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            self.close_copy_mode();
+            return Ok(KeyOutcome::Render);
+        }
+
+        if matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y'))
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            let (pane, text) = self
+                .copy_mode
+                .as_ref()
+                .map(|mode| (mode.pane(), mode.copy_text()))
+                .expect("copy mode checked above");
+            if text.is_empty() {
+                self.status = "copy selection is empty".into();
+                return Ok(KeyOutcome::Render);
+            }
+            copy_to_clipboard(terminal, &text)?;
+            self.copy_mode = None;
+            if let Some(pane) = self.panes.get_mut(pane) {
+                pane.reset_view();
+            }
+            self.status = format!(
+                "copied {} characters from pane {}",
+                text.chars().count(),
+                pane + 1
+            );
+            return Ok(KeyOutcome::Render);
+        }
+
+        let Some(mode) = self.copy_mode.as_mut() else {
+            return Ok(KeyOutcome::Continue);
+        };
+        let handled = match key.code {
+            KeyCode::Char('/')
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                mode.begin_search(width, height);
+                true
+            }
+            KeyCode::Char('n') if key.modifiers.is_empty() => {
+                mode.next_match(true, width, height);
+                true
+            }
+            KeyCode::Char(ch)
+                if ch.eq_ignore_ascii_case(&'n')
+                    && (ch == 'N' || key.modifiers.contains(KeyModifiers::SHIFT))
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                mode.next_match(false, width, height);
+                true
+            }
+            KeyCode::Up => {
+                mode.move_vertical(-1, width, height);
+                true
+            }
+            KeyCode::Down => {
+                mode.move_vertical(1, width, height);
+                true
+            }
+            KeyCode::Left => {
+                mode.move_horizontal(-1, width, height);
+                true
+            }
+            KeyCode::Right => {
+                mode.move_horizontal(1, width, height);
+                true
+            }
+            KeyCode::PageUp => {
+                mode.move_page(-1, width, height);
+                true
+            }
+            KeyCode::PageDown => {
+                mode.move_page(1, width, height);
+                true
+            }
+            KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                mode.move_document_boundary(false, width, height);
+                true
+            }
+            KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                mode.move_document_boundary(true, width, height);
+                true
+            }
+            KeyCode::Home => {
+                mode.move_line_boundary(false, width, height);
+                true
+            }
+            KeyCode::End => {
+                mode.move_line_boundary(true, width, height);
+                true
+            }
+            KeyCode::Char(' ') if key.modifiers.is_empty() => {
+                mode.toggle_character_selection();
+                true
+            }
+            KeyCode::Char(ch)
+                if ch.eq_ignore_ascii_case(&'v')
+                    && (ch == 'V' || key.modifiers.contains(KeyModifiers::SHIFT))
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                mode.toggle_line_selection();
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            self.status = mode.status_label();
+            Ok(KeyOutcome::Render)
+        } else {
+            Ok(KeyOutcome::Continue)
+        }
+    }
+
+    fn copy_mode_dimensions(&self, pane: usize) -> (usize, usize) {
+        self.rects.get(pane).map_or((80, 20), |rect| {
+            (
+                usize::from(rect.width.saturating_sub(2)).max(1),
+                usize::from(rect.height.saturating_sub(3)).max(1),
+            )
+        })
+    }
+
     fn handle_app_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<Option<bool>> {
         match key.code {
             KeyCode::Char(ch) => self.handle_alt_char(terminal, ch, key.modifiers),
@@ -3726,6 +3935,10 @@ impl App {
         let lower = ch.to_ascii_lowercase();
         match lower {
             'q' => Ok(Some(true)),
+            'b' => {
+                self.open_copy_mode();
+                Ok(Some(false))
+            }
             's' => {
                 if self.command_line.focused {
                     self.status = "command line focused".into();
@@ -5009,6 +5222,10 @@ impl App {
                 | MouseEventKind::ScrollRight
                 | MouseEventKind::ScrollUp
         ) {
+            return Ok(false);
+        }
+
+        if self.copy_mode.is_some() {
             return Ok(false);
         }
 
@@ -6317,6 +6534,19 @@ impl App {
             pane.screen(),
             selection,
         );
+    }
+
+    pub fn copy_mode_view(&self, index: usize, width: u16, height: u16) -> Option<CopyModeView> {
+        let mode = self
+            .copy_mode
+            .as_ref()
+            .filter(|mode| mode.pane() == index)?;
+        let body_height = height.saturating_sub(1);
+        Some(mode.view(usize::from(width), usize::from(body_height)))
+    }
+
+    pub fn copy_mode_open(&self) -> bool {
+        self.copy_mode.is_some()
     }
 
     pub fn focused_pane(&self) -> Option<usize> {
