@@ -20,6 +20,31 @@ package and all five native packages on npmjs.com to trust this repository's
 names must be bootstrapped once with a short-lived npm token before npm can
 attach their trusted publisher settings.
 
+After creating a package or receiving one from npm Support, confirm that
+`jasonmatthewsuhari` is an owner and configure the trusted publisher before the
+first GridBash release:
+
+```sh
+npm owner ls gridbash-win32-x64
+npm trust github gridbash-win32-x64 \
+  --repo jasonsuhari/gridbash \
+  --file release.yml \
+  --allow-publish
+npm trust list gridbash-win32-x64
+```
+
+Repeat the trust setup for `gridbash` and every package under `npm/platforms/`.
+The trust command requires an interactively authenticated npm account with 2FA.
+Use only the workflow filename (`release.yml`), not its full repository path.
+
+The release workflow runs `node npm/scripts/release-preflight.js` before the
+native build matrix. It fails early when a package is absent, is not owned by
+`jasonmatthewsuhari`, or advertises a different source repository. A package
+that npm transferred from its `0.0.1-security` holder is allowed once ownership
+is correct; its first GridBash publish replaces the placeholder repository
+metadata. The public preflight cannot inspect trusted-publisher settings, so
+`npm trust list` remains the authenticated setup check for each new package.
+
 As a fallback, add an npm automation token as a GitHub repository secret:
 
 ```text

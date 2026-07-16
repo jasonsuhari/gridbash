@@ -153,10 +153,42 @@ jobs:
             echo "- Publish: $publish"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  build-native:
+  npm-registry-preflight:
     needs: [prepare, nightly-meta]
     if: >-
       always() &&
+      (
+        github.event_name == 'push' ||
+        (github.event_name == 'workflow_dispatch' && inputs.channel == 'release' && needs.prepare.result == 'success') ||
+        (
+          (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.channel == 'nightly')) &&
+          needs.nightly-meta.result == 'success' &&
+          needs.nightly-meta.outputs.publish == 'true'
+        )
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Use the release npm CLI
+        run: npm install --global npm@11
+
+      - name: Verify npm package ownership and repository metadata
+        run: node npm/scripts/release-preflight.js
+
+  build-native:
+    needs: [prepare, nightly-meta, npm-registry-preflight]
+    if: >-
+      always() &&
+      needs.npm-registry-preflight.result == 'success' &&
       (
         github.event_name == 'push' ||
         (github.event_name == 'workflow_dispatch' && inputs.channel == 'release' && needs.prepare.result == 'success') ||
