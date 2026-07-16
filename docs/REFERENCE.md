@@ -129,6 +129,34 @@ The MCP server exposes:
 
 The API binds only to localhost, authenticates with a per-session token, and is disabled by default.
 
+### Scriptable control CLI
+
+Enabled GridBash processes publish owner-local discovery records containing a
+runtime session ID, localhost endpoint, PID, and start time. Bearer tokens are
+never written to discovery. Stale records are pruned when `ctl` cannot complete
+the server's tokenless liveness ping.
+
+```powershell
+gridbash ctl list
+gridbash ctl list --json
+gridbash ctl panes --session <id-or-unique-prefix>
+gridbash ctl panes --session <id> --json
+gridbash ctl send --session <id> --pane 2 "cargo test"
+gridbash ctl send --session <id> --pane pane-4-gen-2 --no-submit "review this"
+gridbash ctl capture --session <id> --pane 2 --directory C:\captures
+gridbash ctl status --session <id> "integration running"
+gridbash ctl focus --session <id> pane-4-gen-2
+```
+
+`ctl list` and `ctl panes` do not require a token. Mutating commands require
+`--token TOKEN` or `GRIDBASH_CONTROL_TOKEN`; when invoked inside a GridBash pane,
+`GRIDBASH_CONTROL_SESSION` also selects that grid automatically. If more than
+one session is running and no environment selection exists, `--session` must be
+an exact ID or unambiguous prefix. Pane numbers refer to the inspected current
+tab. Stable IDs have the form `pane-<id>-gen-<generation>` and are rejected if a
+pane has restarted since inspection. Add `--json` to any command for structured
+output.
+
 ## Controls
 
 GridBash is modeless: ordinary terminal input continues to the active target, while application commands use Alt shortcuts.

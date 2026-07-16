@@ -35,7 +35,10 @@ use crate::{
     codex_sqlite::{CodexSqlitePool, PaneCodexSqlite},
     composer::{Composer, GridPicker, GridPickerAction},
     config::{Config, PaletteColor, PaneWorkloadPolicy, UiConfig, UiPalette},
-    control::{self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse},
+    control::{
+        self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse, PaneIdentity,
+        PaneTarget,
+    },
     image_preview::{self, ImagePreview},
     layout::{GridLayout, GridSize, PaneId, pane_at},
     manager::{self, ManagerCommand, ManagerDecision},
@@ -2263,6 +2266,10 @@ impl App {
                     control.token().to_string().into(),
                 ),
                 (
+                    "GRIDBASH_CONTROL_SESSION".into(),
+                    control.id().to_string().into(),
+                ),
+                (
                     "GRIDBASH_PANE_INDEX".into(),
                     (pane_index + 1).to_string().into(),
                 ),
@@ -2978,6 +2985,8 @@ impl App {
 
     fn handle_control_command(&mut self, command: ControlCommand) -> ControlResponse {
         match command {
+            ControlCommand::Ping => ControlResponse::ok("GridBash control session is live"),
+            ControlCommand::Describe => self.describe_control_session(),
             ControlCommand::SetStatus { message } => self.set_control_status(message),
             ControlCommand::SendCommand {
                 panes,
@@ -2992,7 +3001,70 @@ impl App {
                 self.start_control_logging(&panes, directory.as_deref())
             }
             ControlCommand::StopLogging { panes } => self.stop_control_logging(&panes),
+            ControlCommand::Focus { pane } => self.focus_control_pane(&pane),
         }
+    }
+
+    fn describe_control_session(&self) -> ControlResponse {
+        let Some(control) = self.control_handle.as_ref() else {
+            return ControlResponse::error("GridBash control API is not enabled");
+        };
+        let panes = self
+            .panes
+            .iter()
+            .enumerate()
+            .map(|(index, pane)| {
+                serde_json::json!({
+                    "number": index + 1,
+                    "id": PaneTarget::stable_label(pane.id(), pane.generation()),
+                    "pane_id": pane.id().0,
+                    "generation": pane.generation(),
+                    "label": self.pane_label(index),
+                    "cwd": pane.cwd().display().to_string(),
+                    "focused": self.focus == index && !self.command_line.focused,
+                    "selected": self.selected.contains(&index),
+                    "sleeping": self.sleeping.contains(&index),
+                    "logging": self.pane_logging(index),
+                    "exited": pane.exited
+                })
+            })
+            .collect::<Vec<_>>();
+        let grid = self.layout.size();
+        ControlResponse::with_data(
+            format!("{} running pane(s)", panes.len()),
+            serde_json::json!({
+                "id": control.id(),
+                "endpoint": control.endpoint(),
+                "pid": std::process::id(),
+                "active_tab": self.active_tab + 1,
+                "tab_title": self.tab_title,
+                "grid": { "rows": grid.rows, "columns": grid.columns },
+                "status": self.status,
+                "panes": panes
+            }),
+        )
+    }
+
+    fn focus_control_pane(&mut self, pane: &PaneTarget) -> ControlResponse {
+        let targets = match self.control_pane_indices(std::slice::from_ref(pane)) {
+            Ok(targets) => targets,
+            Err(error) => return ControlResponse::error(format!("{error:#}")),
+        };
+        let index = targets[0];
+        self.command_line.focused = false;
+        self.focus = index;
+        self.mark_pane_touched(index);
+        self.status = format!("focused pane {}", index + 1);
+        ControlResponse::with_data(
+            self.status.clone(),
+            serde_json::json!({
+                "number": index + 1,
+                "id": PaneTarget::stable_label(
+                    self.panes[index].id(),
+                    self.panes[index].generation()
+                )
+            }),
+        )
     }
 
     fn set_control_status(&mut self, message: String) -> ControlResponse {
@@ -3007,7 +3079,7 @@ impl App {
 
     fn send_control_command(
         &mut self,
-        pane_numbers: &[usize],
+        pane_numbers: &[PaneTarget],
         command: &str,
         submit: bool,
     ) -> ControlResponse {
@@ -3078,7 +3150,7 @@ impl App {
 
     fn capture_control_output(
         &mut self,
-        pane_numbers: &[usize],
+        pane_numbers: &[PaneTarget],
         directory: Option<&Path>,
     ) -> ControlResponse {
         let targets = match self.control_pane_indices(pane_numbers) {
@@ -3143,7 +3215,7 @@ impl App {
 
     fn start_control_logging(
         &mut self,
-        pane_numbers: &[usize],
+        pane_numbers: &[PaneTarget],
         directory: Option<&Path>,
     ) -> ControlResponse {
         let targets = match self.control_pane_indices(pane_numbers) {
@@ -3209,7 +3281,7 @@ impl App {
         )
     }
 
-    fn stop_control_logging(&mut self, pane_numbers: &[usize]) -> ControlResponse {
+    fn stop_control_logging(&mut self, pane_numbers: &[PaneTarget]) -> ControlResponse {
         let targets = match self.control_pane_indices(pane_numbers) {
             Ok(targets) => targets,
             Err(error) => return ControlResponse::error(format!("{error:#}")),
@@ -3257,27 +3329,28 @@ impl App {
         )
     }
 
-    fn control_pane_indices(&self, pane_numbers: &[usize]) -> Result<Vec<usize>> {
-        if pane_numbers.is_empty() {
-            return Err(anyhow!("at least one target pane is required"));
-        }
-
-        let mut targets = BTreeSet::new();
-        for pane_number in pane_numbers {
-            if *pane_number == 0 || *pane_number > self.panes.len() {
-                return Err(anyhow!("pane {pane_number} is not available"));
-            }
-            let index = pane_number - 1;
-            if self.sleeping.contains(&index) {
+    fn control_pane_indices(&self, pane_targets: &[PaneTarget]) -> Result<Vec<usize>> {
+        let identities = self
+            .panes
+            .iter()
+            .enumerate()
+            .map(|(index, pane)| PaneIdentity {
+                index,
+                pane: pane.id(),
+                generation: pane.generation(),
+            })
+            .collect::<Vec<_>>();
+        let targets = control::resolve_pane_targets(pane_targets, &identities)?;
+        for index in &targets {
+            let pane_number = *index + 1;
+            if self.sleeping.contains(index) {
                 return Err(anyhow!("pane {pane_number} is asleep"));
             }
-            if self.panes.get(index).is_some_and(|pane| pane.exited) {
+            if self.panes.get(*index).is_some_and(|pane| pane.exited) {
                 return Err(anyhow!("pane {pane_number} has exited"));
             }
-            targets.insert(index);
         }
-
-        Ok(targets.into_iter().collect())
+        Ok(targets)
     }
 
     fn decay_activity(&mut self) -> bool {

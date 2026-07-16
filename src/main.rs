@@ -5,6 +5,7 @@ mod codex_sqlite;
 mod composer;
 mod config;
 mod control;
+mod control_discovery;
 mod image_preview;
 mod layout;
 mod manager;
@@ -39,6 +40,10 @@ fn main() -> Result<()> {
 
     if cli.mcp {
         return control::run_mcp_server();
+    }
+
+    if let Some(Command::Ctl(args)) = &cli.command {
+        return control::run_ctl(args);
     }
 
     let mut config = Config::load(cli.config.as_deref())?;
