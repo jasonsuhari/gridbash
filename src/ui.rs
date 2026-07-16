@@ -10,9 +10,10 @@ use vt100::Cell;
 
 use crate::{
     app::{
-        App, ExitedPaneRecoveryView, FollowUpDialog, GoalEditorView, GridPalette, PaneSelection,
-        PaneSettingsTarget, PaneSettingsView, PreviousPaneView, PreviousPanesView, RenamePaneView,
-        RenameTabView, SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
+        App, AssistantMessageRole, ExitedPaneRecoveryView, FollowUpDialog, GoalEditorView,
+        GridPalette, PaneSelection, PaneSettingsTarget, PaneSettingsView, PreviousPaneView,
+        PreviousPanesView, RenamePaneView, RenameTabView, SettingsGroup, SettingsRow, SettingsTab,
+        SettingsValueKind, TabLabel, WorkspaceAssistantView,
     },
     auth::{AgentKind, AuthProfile},
     composer::GridPickerMode,
@@ -91,6 +92,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let pane_settings_open = pane_settings_view.is_some();
     let grid_resizer = app.grid_resizer();
     let image_overlay = app.image_overlay_view();
+    let assistant_view = app.workspace_assistant_view();
     let help_open = app.help_open();
     let copy_mode_open = app.copy_mode_open();
     let exited_recovery = if help_open
@@ -104,6 +106,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || grid_resizer.is_some()
         || goal_editor_view.is_some()
         || image_overlay.is_some()
+        || assistant_view.is_some()
     {
         None
     } else {
@@ -120,6 +123,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || grid_resizer.is_some()
         || goal_editor_view.is_some()
         || image_overlay.is_some()
+        || assistant_view.is_some()
         || exited_recovery.is_some();
     let mut pane_settings_rename_button = None;
     let mut pane_settings_reload_button = None;
@@ -293,6 +297,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
     if help_open {
         render_help(frame, area, app, palette);
+    }
+    if let Some(assistant) = assistant_view.as_ref() {
+        render_workspace_assistant(frame, area, assistant, palette);
     }
 
     DrawState {
@@ -1062,6 +1069,294 @@ fn render_goal_editor(frame: &mut Frame<'_>, area: Rect, editor: &GoalEditorView
             .style(Style::default().fg(SETTINGS_TEXT).bg(APP_BG)),
         prompt_area,
     );
+}
+
+fn render_workspace_assistant(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &WorkspaceAssistantView,
+    palette: &GridPalette,
+) {
+    let dock = workspace_assistant_rect(area);
+    if dock.width == 0 || dock.height == 0 {
+        return;
+    }
+
+    frame.render_widget(Clear, dock);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.accent())
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(" BashBot [>_] ")
+        .title_bottom(" Alt+D or Esc closes ");
+    let inner = block.inner(dock);
+    frame.render_widget(
+        block.style(Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)),
+        dock,
+    );
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    if inner.height < 6 {
+        frame.render_widget(
+            Paragraph::new(" [>_] BashBot · enlarge the terminal to chat")
+                .style(Style::default().fg(palette.focus()).bg(SETTINGS_BG)),
+            inner,
+        );
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    let state = if view.busy {
+        "thinking..."
+    } else if view.configured {
+        "ready"
+    } else {
+        "setup needed"
+    };
+    let header = vec![
+        Line::from(vec![
+            Span::styled(" .----.  ", Style::default().fg(palette.focus())),
+            Span::styled(
+                format!("BashBot · {state}"),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("| [] []| ", Style::default().fg(palette.focus())),
+            Span::styled(
+                format!("{} grids · {} panes", view.grid_count, view.pane_count),
+                Style::default().fg(SETTINGS_MUTED),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("|  >_  | ", Style::default().fg(palette.focus())),
+            Span::styled(
+                "brief · prompt · delegate",
+                Style::default().fg(SETTINGS_MUTED),
+            ),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(header).style(Style::default().bg(SETTINGS_BG)),
+        chunks[0],
+    );
+
+    let transcript = assistant_transcript_lines(
+        view,
+        chunks[1].width as usize,
+        chunks[1].height as usize,
+        palette,
+    );
+    frame.render_widget(
+        Paragraph::new(transcript).style(Style::default().bg(SETTINGS_BG)),
+        chunks[1],
+    );
+
+    let prefix = "you › ";
+    let input_width = chunks[2]
+        .width
+        .saturating_sub(prefix.chars().count() as u16) as usize;
+    let (visible, cursor_offset) = visible_input(&view.input, view.cursor_chars, input_width);
+    let input = if view.input.is_empty() {
+        "Ask about the workspace...".to_string()
+    } else {
+        visible
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                prefix,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                truncate_text(&input, input_width),
+                Style::default().fg(if view.input.is_empty() {
+                    SETTINGS_MUTED
+                } else {
+                    SETTINGS_TEXT
+                }),
+            ),
+        ]))
+        .style(Style::default().bg(SETTINGS_SURFACE)),
+        chunks[2],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            command_key("Enter"),
+            Span::styled(" send  ", Style::default().fg(SETTINGS_MUTED)),
+            command_key("Ctrl+U"),
+            Span::styled(" clear", Style::default().fg(SETTINGS_MUTED)),
+        ]))
+        .style(Style::default().bg(SETTINGS_BG)),
+        chunks[3],
+    );
+
+    if input_width > 0 {
+        let cursor_x = chunks[2]
+            .x
+            .saturating_add(prefix.chars().count() as u16)
+            .saturating_add(cursor_offset.min(input_width.saturating_sub(1)) as u16);
+        frame.set_cursor_position((cursor_x, chunks[2].y));
+    }
+}
+
+fn workspace_assistant_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(2).min(64).max(area.width.min(1));
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(17)
+        .max(area.height.min(1));
+    Rect {
+        x: area.x
+            + area
+                .width
+                .saturating_sub(width)
+                .saturating_sub(u16::from(area.width > width)),
+        y: area.y
+            + area
+                .height
+                .saturating_sub(height)
+                .saturating_sub(u16::from(area.height > height)),
+        width,
+        height,
+    }
+}
+
+fn assistant_transcript_lines(
+    view: &WorkspaceAssistantView,
+    width: usize,
+    height: usize,
+    palette: &GridPalette,
+) -> Vec<Line<'static>> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+    if view.messages.is_empty() {
+        let welcome = if view.configured {
+            "Ask me to brief all panes, sharpen a prompt, or delegate a task."
+        } else {
+            "Set the Manager endpoint, model, and API key in Alt+O to start chatting."
+        };
+        push_assistant_message_lines(
+            &mut lines,
+            "bot › ",
+            welcome,
+            width,
+            Style::default().fg(palette.accent()),
+        );
+    } else {
+        for message in &view.messages {
+            let (prefix, style) = match message.role {
+                AssistantMessageRole::User => (
+                    "you › ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                AssistantMessageRole::BashBot => (
+                    "bot › ",
+                    Style::default()
+                        .fg(palette.accent())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            };
+            push_assistant_message_lines(&mut lines, prefix, &message.text, width, style);
+        }
+    }
+    if view.busy {
+        push_assistant_message_lines(
+            &mut lines,
+            "bot › ",
+            "looking across every grid...",
+            width,
+            Style::default().fg(palette.accent()),
+        );
+    }
+
+    let skip = lines.len().saturating_sub(height);
+    lines.into_iter().skip(skip).collect()
+}
+
+fn push_assistant_message_lines(
+    lines: &mut Vec<Line<'static>>,
+    prefix: &'static str,
+    text: &str,
+    width: usize,
+    prefix_style: Style,
+) {
+    let prefix_width = prefix.chars().count();
+    let content_width = width.saturating_sub(prefix_width).max(1);
+    for (index, wrapped) in wrap_text(text, content_width).into_iter().enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                if index == 0 {
+                    prefix.to_string()
+                } else {
+                    " ".repeat(prefix_width)
+                },
+                prefix_style,
+            ),
+            Span::styled(wrapped, Style::default().fg(SETTINGS_TEXT)),
+        ]));
+    }
+}
+
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let word_width = word.chars().count();
+        let next_width = current.chars().count() + usize::from(!current.is_empty()) + word_width;
+        if next_width <= width {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        } else {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            if word_width <= width {
+                current.push_str(word);
+            } else {
+                let chars = word.chars().collect::<Vec<_>>();
+                for chunk in chars.chunks(width) {
+                    lines.push(chunk.iter().collect());
+                }
+            }
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn pane_settings_sleep_line(
@@ -3288,6 +3583,87 @@ mod tests {
                 render_copy_mode(frame, Rect::new(0, 0, 1, 1), &view, &GridPalette::default());
             })
             .expect("render copy mode");
+    }
+
+    #[test]
+    fn workspace_assistant_dock_anchors_to_bottom_right() {
+        let area = Rect::new(10, 20, 100, 40);
+        let dock = workspace_assistant_rect(area);
+        assert_eq!(dock, Rect::new(45, 42, 64, 17));
+        assert_eq!(dock.right() + 1, area.right());
+        assert_eq!(dock.bottom() + 1, area.bottom());
+    }
+
+    #[test]
+    fn workspace_assistant_renders_avatar_status_and_input() {
+        let view = WorkspaceAssistantView {
+            input: "brief me".into(),
+            cursor_chars: 8,
+            messages: Vec::new(),
+            busy: false,
+            configured: true,
+            grid_count: 2,
+            pane_count: 8,
+        };
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_workspace_assistant(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render assistant");
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("BashBot"));
+        assert!(rendered.contains("| [] []|"));
+        assert!(rendered.contains("2 grids · 8 panes"));
+        assert!(rendered.contains("you › brief me"));
+    }
+
+    #[test]
+    fn assistant_transcript_keeps_latest_wrapped_lines() {
+        let view = WorkspaceAssistantView {
+            input: String::new(),
+            cursor_chars: 0,
+            messages: vec![
+                crate::app::AssistantMessageView {
+                    role: AssistantMessageRole::User,
+                    text: "brief every grid please".into(),
+                },
+                crate::app::AssistantMessageView {
+                    role: AssistantMessageRole::BashBot,
+                    text: "Frontend tests pass and backend is waiting for review.".into(),
+                },
+            ],
+            busy: false,
+            configured: true,
+            grid_count: 2,
+            pane_count: 8,
+        };
+        let lines = assistant_transcript_lines(&view, 24, 3, &GridPalette::default());
+        let text = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(lines.len(), 3);
+        assert!(text.contains("backend"));
+        assert!(text.contains("is waiting"));
+        assert!(text.contains("for"));
+        assert!(text.contains("review."));
+    }
+
+    #[test]
+    fn assistant_text_wraps_unicode_without_byte_slicing() {
+        assert_eq!(
+            wrap_text("東京東京 ready", 3),
+            vec!["東京東", "京", "rea", "dy"]
+        );
     }
 
     #[test]

@@ -52,7 +52,8 @@ use that release's matching native artifact until npm publication catches up.
   Amp, Cursor, Copilot, shells, or custom commands.
 - **Built-in workflow tools.** Resize grids, restore sessions, dictate prompts,
   inspect stable pane activity, optionally generate concise AI work summaries,
-  and let a manager route targeted follow-ups.
+  ask BashBot to brief or coordinate the workspace, and let a manager route
+  targeted follow-ups.
 - **Optional background terminals.** Close the UI without stopping live panes,
   then reconnect to the same processes from a saved session.
 
@@ -87,6 +88,7 @@ agents and shells.
 | `Alt+c` | Open or close the command line |
 | `Alt+Shift+C` | Save bounded recent output from the target panes |
 | `Alt+Shift+L` | Start or stop continuous target-pane logging |
+| `Alt+d` | Chat with BashBot across all open grids and panes |
 | `Alt+n` / `Alt+t` | Open a new tab / switch tabs |
 | `Alt+p` | Open focused-pane activity |
 | `Alt+Shift+A` | Manage auth profiles and assign one to the focused pane |

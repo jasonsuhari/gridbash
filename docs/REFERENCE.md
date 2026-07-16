@@ -183,6 +183,7 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+Shift+L | Start or stop continuous output logs for the focused or selected panes. |
 | Alt+f | Zoom the focused pane to the full grid area, or restore the grid. |
 | Alt+b | Open keyboard scrollback search and copy mode for the focused pane. |
+| Alt+d | Open or close the BashBot workspace assistant. |
 | Alt+Shift+V | Dictate one utterance, or cancel active listening. |
 | Alt+h / F1 | Open or close help. |
 | Alt+p | Open the focused-pane activity summary. |
@@ -220,6 +221,8 @@ start-log calls may provide an explicit output directory. A write failure stops
 only the affected log and is reported in the status bar.
 
 When multiple panes are selected, typing is broadcast to them. With zero or one selected pane, input goes only to the focused pane. The Alt+c command line captures its output and runs Enter-submitted commands in the cwd shown in its prompt.
+
+Alt+D opens BashBot in a compact dock at the bottom-right. BashBot uses bounded, labeled recent output from every pane in every open grid to provide workspace briefs and prompt coaching. Ask it explicitly to send, tell, delegate, or prompt when you want it to submit a targeted follow-up; ordinary briefing and prompt-writing requests never dispatch input. Responses remain bound to stable pane identities, and a target is skipped if it sleeps, exits, disappears, or changes while the request is being reviewed. Enter sends a chat message, Ctrl+U clears the input, and Esc or Alt+D closes the dock.
 
 Pane Activity provides auth, rename, refresh, sleep/wake, deactivate, and manager-goal controls. Navigate with Up/Down and activate with Enter or Space. Direct keys inside the view are `n` to rename, `r` to refresh, `z` to sleep or wake, `d` to deactivate, `g` to edit the grid goal, and `u` to stop it. Close it with Esc, `q`, or Alt+p; Alt+Shift+A opens Auth Profiles and Alt+o switches to overall settings.
 
@@ -382,7 +385,7 @@ Settings persist compact titles, activity badges, quit confirmation, background-
 
 ### Grid manager
 
-The manager uses the OpenAI-compatible chat-completions endpoint, model, and API key under `[manager]`. These values can also be edited in Settings > Manager. The UI masks the API key, but the key is stored in the local TOML file.
+The grid manager and BashBot use the OpenAI-compatible chat-completions endpoint, model, and API key under `[manager]`. These values can also be edited in Settings > Manager. The UI masks the API key, but the key is stored in the local TOML file.
 
 AI activity summaries are disabled by default. Enable them separately in Settings > Manager only when you want bounded recent output from eligible panes in the active tab sent to the configured endpoint. GridBash batches panes after roughly three seconds of quiet output, rate-limits automatic refreshes, pauses them while a manager goal is present, and preserves the last successful headline across temporary API failures. The Pane Activity refresh control requests an immediate update; pending input is never used as a displayed summary.
 

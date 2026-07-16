@@ -39,7 +39,7 @@ use crate::{
     image_preview::{self, ImagePreview},
     keybindings::{Action, KeyBindings, is_help_recovery, is_quit_recovery},
     layout::{GridLayout, GridSize, PaneId, pane_at},
-    manager::{self, ActivitySummary, ManagerCommand, ManagerDecision},
+    manager::{self, ActivitySummary, AssistantReply, ManagerCommand, ManagerDecision},
     output_capture::{self, OutputLogs, PaneLogKey},
     pane_host::{PaneHostBusy, PaneHostIncompatible, PaneHostRejected, PtyHostRef, PtyPane},
     process_priority::PaneWorkloadClass,
@@ -70,6 +70,10 @@ const ACTIVITY_SUMMARY_OUTPUT_MAX_BYTES: usize = 12_000;
 const ACTIVITY_SUMMARY_QUIET_AFTER: Duration = Duration::from_secs(3);
 const ACTIVITY_SUMMARY_COOLDOWN: Duration = Duration::from_secs(30);
 const ACTIVITY_SUMMARY_MAX_RETRY_DELAY: Duration = Duration::from_secs(5 * 60);
+const ASSISTANT_CONTEXT_MAX_BYTES: usize = 24_000;
+const ASSISTANT_HISTORY_MAX_BYTES: usize = 8_000;
+const ASSISTANT_INPUT_MAX_CHARS: usize = 2_000;
+const ASSISTANT_MAX_MESSAGES: usize = 24;
 const MAX_MANAGER_SETTING_CHARS: usize = 2048;
 const MAX_PANE_NAME_CHARS: usize = 32;
 const MAX_TAB_TITLE_CHARS: usize = 40;
@@ -105,6 +109,9 @@ pub struct App {
     sleeping: BTreeSet<usize>,
     manager_goal: Option<ManagerGoal>,
     goal_editor: Option<GoalEditorState>,
+    assistant: WorkspaceAssistantState,
+    assistant_tx: std_mpsc::Sender<AssistantEvent>,
+    assistant_rx: std_mpsc::Receiver<AssistantEvent>,
     next_goal_id: u64,
     goal_tx: std_mpsc::Sender<GoalReviewEvent>,
     goal_rx: std_mpsc::Receiver<GoalReviewEvent>,
@@ -379,6 +386,164 @@ struct GoalDispatchRetry {
 #[derive(Debug, Clone)]
 struct GoalEditorState {
     input: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssistantRole {
+    User,
+    BashBot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AssistantMessage {
+    role: AssistantRole,
+    text: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WorkspaceAssistantState {
+    open: bool,
+    input: String,
+    cursor: usize,
+    messages: Vec<AssistantMessage>,
+    busy: bool,
+    request_id: u64,
+}
+
+impl WorkspaceAssistantState {
+    fn insert_text(&mut self, text: &str) {
+        for ch in text.chars() {
+            if matches!(ch, '\r' | '\n') {
+                self.insert_char(' ');
+            } else if !ch.is_control() {
+                self.insert_char(ch);
+            }
+        }
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        if self.input.chars().count() >= ASSISTANT_INPUT_MAX_CHARS {
+            return;
+        }
+        self.input.insert(self.cursor, ch);
+        self.cursor += ch.len_utf8();
+    }
+
+    fn backspace(&mut self) -> bool {
+        let Some(previous) = previous_char_boundary(&self.input, self.cursor) else {
+            return false;
+        };
+        self.input.replace_range(previous..self.cursor, "");
+        self.cursor = previous;
+        true
+    }
+
+    fn delete(&mut self) -> bool {
+        if self.cursor >= self.input.len() {
+            return false;
+        }
+        let next = next_char_boundary(&self.input, self.cursor);
+        self.input.replace_range(self.cursor..next, "");
+        true
+    }
+
+    fn move_left(&mut self) -> bool {
+        let Some(previous) = previous_char_boundary(&self.input, self.cursor) else {
+            return false;
+        };
+        self.cursor = previous;
+        true
+    }
+
+    fn move_right(&mut self) -> bool {
+        if self.cursor >= self.input.len() {
+            return false;
+        }
+        self.cursor = next_char_boundary(&self.input, self.cursor);
+        true
+    }
+
+    fn clear_input(&mut self) -> bool {
+        if self.input.is_empty() {
+            return false;
+        }
+        self.input.clear();
+        self.cursor = 0;
+        true
+    }
+
+    fn take_submission(&mut self) -> Option<String> {
+        let message = self.input.trim().to_string();
+        self.input.clear();
+        self.cursor = 0;
+        (!message.is_empty()).then_some(message)
+    }
+
+    fn push_message(&mut self, role: AssistantRole, text: impl Into<String>) {
+        self.messages.push(AssistantMessage {
+            role,
+            text: text.into(),
+        });
+        if self.messages.len() > ASSISTANT_MAX_MESSAGES {
+            let excess = self.messages.len() - ASSISTANT_MAX_MESSAGES;
+            self.messages.drain(0..excess);
+        }
+    }
+
+    fn cursor_chars(&self) -> usize {
+        self.input[..self.cursor].chars().count()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AssistantTarget {
+    target_number: usize,
+    pane_id: PaneId,
+    pane_generation: u64,
+    screen_revision: u64,
+    input_revision: u64,
+    available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AssistantPaneContext {
+    target_number: usize,
+    grid_number: usize,
+    grid_title: String,
+    pane_number: usize,
+    state: &'static str,
+    metadata: String,
+    output: String,
+}
+
+#[derive(Debug)]
+struct AssistantEvent {
+    request_id: u64,
+    targets: Vec<AssistantTarget>,
+    result: Result<AssistantReply, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantMessageRole {
+    User,
+    BashBot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantMessageView {
+    pub role: AssistantMessageRole,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceAssistantView {
+    pub input: String,
+    pub cursor_chars: usize,
+    pub messages: Vec<AssistantMessageView>,
+    pub busy: bool,
+    pub configured: bool,
+    pub grid_count: usize,
+    pub pane_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1947,10 +2112,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     } else {
-        "Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     }
 }
@@ -2066,8 +2231,8 @@ impl App {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (goal_tx, goal_rx) = std_mpsc::channel();
         let (activity_summary_tx, activity_summary_rx) = std_mpsc::channel();
-
         let keybindings = KeyBindings::from_overrides(&init.config.keys)?;
+        let (assistant_tx, assistant_rx) = std_mpsc::channel();
 
         Ok(Self {
             config: init.config,
@@ -2091,6 +2256,9 @@ impl App {
             sleeping: BTreeSet::new(),
             manager_goal: None,
             goal_editor: None,
+            assistant: WorkspaceAssistantState::default(),
+            assistant_tx,
+            assistant_rx,
             next_goal_id: 1,
             goal_tx,
             goal_rx,
@@ -2545,6 +2713,7 @@ impl App {
             immediate_render |= self.drain_command_events();
             immediate_render |= self.drain_goal_reviews();
             immediate_render |= self.drain_activity_summary_events();
+            immediate_render |= self.drain_assistant_events();
             immediate_render |= self.drain_voice_events()?;
             immediate_render |= self.drain_control_events();
             immediate_render |= self.decay_activity();
@@ -2615,6 +2784,10 @@ impl App {
                 self.terminal_focused = false;
                 *needs_render = true;
             }
+            Event::Paste(text) if self.assistant.open => {
+                self.assistant.insert_text(&text);
+                *needs_render = true;
+            }
             Event::Paste(text) if self.tab_rename.open => {
                 self.tab_rename.insert_text(&text);
                 *needs_render = true;
@@ -2644,7 +2817,8 @@ impl App {
                     && !self.pane_settings.open
                     && self.image_overlay.is_none()
                     && self.follow_up.is_none()
-                    && self.goal_editor.is_none() =>
+                    && self.goal_editor.is_none()
+                    && !self.assistant.open =>
             {
                 if self.command_line.focused {
                     self.command_line.insert_text(&text);
@@ -2658,7 +2832,8 @@ impl App {
                     && !self.settings.open
                     && self.grid_resizer.is_none()
                     && self.follow_up.is_none()
-                    && self.goal_editor.is_none() =>
+                    && self.goal_editor.is_none()
+                    && !self.assistant.open =>
             {
                 *needs_render |= self.handle_mouse(mouse, terminal)?;
             }
@@ -3004,6 +3179,234 @@ impl App {
 
     fn capture_goal_output(&mut self, pane_index: usize, output: &str) {
         capture_goal_text(&mut self.manager_goal, &self.sleeping, pane_index, output);
+    }
+
+    fn submit_assistant_message(&mut self) {
+        if self.assistant.busy {
+            self.status = "BashBot is still thinking".into();
+            return;
+        }
+
+        let Some(message) = self.assistant.take_submission() else {
+            self.status = "type a message for BashBot".into();
+            return;
+        };
+        self.assistant.push_message(AssistantRole::User, message);
+
+        if !self.config.manager.is_configured() {
+            self.assistant.push_message(
+                AssistantRole::BashBot,
+                "I need Manager API settings before I can read the workspace. Open Alt+O, choose Manager, and set the endpoint, model, and API key.",
+            );
+            self.status = "configure Manager API settings for BashBot".into();
+            return;
+        }
+
+        let (targets, workspace_context) = self.assistant_workspace_snapshot();
+        let conversation = format_assistant_conversation(&self.assistant.messages);
+        self.assistant.request_id = self.assistant.request_id.wrapping_add(1).max(1);
+        let request_id = self.assistant.request_id;
+        self.assistant.busy = true;
+        self.status = format!(
+            "BashBot is reviewing {} grid(s) and {} pane(s)",
+            self.tabs.len(),
+            targets.len()
+        );
+
+        let config = self.config.manager.clone();
+        let tx = self.assistant_tx.clone();
+        thread::spawn(move || {
+            let result = manager::assist(&config, &conversation, &workspace_context)
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(AssistantEvent {
+                request_id,
+                targets,
+                result,
+            });
+        });
+    }
+
+    fn assistant_workspace_snapshot(&self) -> (Vec<AssistantTarget>, String) {
+        let pane_count = self.panes.len()
+            + self
+                .tabs
+                .iter()
+                .filter_map(Option::as_ref)
+                .map(|tab| tab.panes.len())
+                .sum::<usize>();
+        let output_budget = ASSISTANT_CONTEXT_MAX_BYTES
+            .checked_div(pane_count.max(1))
+            .unwrap_or_default()
+            .saturating_sub(192);
+        let mut targets = Vec::with_capacity(pane_count);
+        let mut contexts = Vec::with_capacity(pane_count);
+        let mut next_target = 1;
+
+        for grid in 0..self.tabs.len() {
+            if grid == self.active_tab {
+                collect_assistant_tab_context(
+                    &mut targets,
+                    &mut contexts,
+                    &mut next_target,
+                    grid,
+                    &self.tab_title,
+                    true,
+                    &self.panes,
+                    &self.pane_names,
+                    self.launch_plan.as_ref(),
+                    &self.sleeping,
+                    output_budget,
+                );
+            } else if let Some(tab) = self.tabs.get(grid).and_then(Option::as_ref) {
+                collect_assistant_tab_context(
+                    &mut targets,
+                    &mut contexts,
+                    &mut next_target,
+                    grid,
+                    &tab.title,
+                    false,
+                    &tab.panes,
+                    &tab.pane_names,
+                    tab.launch_plan.as_ref(),
+                    &tab.sleeping,
+                    output_budget,
+                );
+            }
+        }
+
+        let context = format_assistant_workspace_context(self.tabs.len(), &contexts);
+        (targets, context)
+    }
+
+    fn drain_assistant_events(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(event) = self.assistant_rx.try_recv() {
+            if event.request_id != self.assistant.request_id {
+                continue;
+            }
+            self.assistant.busy = false;
+            match event.result {
+                Ok(reply) => {
+                    let command_count = reply.commands.len();
+                    let (sent, failures) =
+                        self.dispatch_assistant_commands(&event.targets, &reply.commands);
+                    let mut message = reply.message;
+                    if command_count > 0 {
+                        if sent > 0 {
+                            message.push_str(&format!(" Sent {sent} targeted prompt(s)."));
+                        }
+                        if !failures.is_empty() {
+                            message.push_str(&format!(
+                                " I skipped {}: {}.",
+                                failures.len(),
+                                failures.join("; ")
+                            ));
+                        }
+                    }
+                    self.assistant.push_message(AssistantRole::BashBot, message);
+                    self.status = if command_count == 0 {
+                        "BashBot replied".into()
+                    } else if failures.is_empty() {
+                        format!("BashBot sent {sent} targeted prompt(s)")
+                    } else {
+                        format!(
+                            "BashBot sent {sent}; skipped {} stale or unavailable target(s)",
+                            failures.len()
+                        )
+                    };
+                }
+                Err(error) => {
+                    self.assistant.push_message(
+                        AssistantRole::BashBot,
+                        format!("I couldn't review the workspace: {error}"),
+                    );
+                    self.status = format!("BashBot error: {error}");
+                }
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    fn dispatch_assistant_commands(
+        &mut self,
+        targets: &[AssistantTarget],
+        commands: &[ManagerCommand],
+    ) -> (usize, Vec<String>) {
+        let routes = self.pane_routes();
+        let mut sent = 0;
+        let mut failures = Vec::new();
+
+        for command in commands {
+            let Some(target) = targets
+                .iter()
+                .find(|target| target.target_number == command.pane)
+            else {
+                failures.push(format!("target {} was not in the snapshot", command.pane));
+                continue;
+            };
+            if !target.available {
+                failures.push(format!("target {} was unavailable", command.pane));
+                continue;
+            }
+            let Some(route) = routes
+                .get(&(target.pane_id, target.pane_generation))
+                .copied()
+            else {
+                failures.push(format!("target {} no longer exists", command.pane));
+                continue;
+            };
+            let bytes = paste_and_enter_bytes(&command.command);
+            let result = match route {
+                PaneRoute::Visible(index) => {
+                    let unavailable = self.sleeping.contains(&index)
+                        || self.panes.get(index).is_none_or(|pane| pane.exited);
+                    if unavailable {
+                        Err("is no longer available".to_string())
+                    } else {
+                        let pane = &mut self.panes[index];
+                        if pane.screen_revision() != target.screen_revision
+                            || pane.input_revision() != target.input_revision
+                        {
+                            Err("changed while BashBot was reviewing it".to_string())
+                        } else {
+                            pane.write(&bytes)
+                                .map_err(|error| format!("could not accept input: {error:#}"))
+                                .map(|_| pane.record_input(&bytes))
+                        }
+                    }
+                }
+                PaneRoute::Inactive { tab, pane } => {
+                    let Some(snapshot) = self.tabs.get_mut(tab).and_then(Option::as_mut) else {
+                        failures.push(format!("target {} changed grids", command.pane));
+                        continue;
+                    };
+                    let unavailable = snapshot.sleeping.contains(&pane)
+                        || snapshot.panes.get(pane).is_none_or(|pane| pane.exited);
+                    if unavailable {
+                        Err("is no longer available".to_string())
+                    } else {
+                        let target_pane = &mut snapshot.panes[pane];
+                        if target_pane.screen_revision() != target.screen_revision
+                            || target_pane.input_revision() != target.input_revision
+                        {
+                            Err("changed while BashBot was reviewing it".to_string())
+                        } else {
+                            target_pane
+                                .write(&bytes)
+                                .map_err(|error| format!("could not accept input: {error:#}"))
+                                .map(|_| target_pane.record_input(&bytes))
+                        }
+                    }
+                }
+            };
+            match result {
+                Ok(()) => sent += 1,
+                Err(error) => failures.push(format!("target {} {error}", command.pane)),
+            }
+        }
+
+        (sent, failures)
     }
 
     fn schedule_goal_reviews(&mut self) -> bool {
@@ -3932,6 +4335,15 @@ impl App {
             return self.handle_copy_mode_key(terminal, key);
         }
 
+        if action == Some(Action::BashBot) {
+            self.toggle_assistant();
+            return Ok(KeyOutcome::Render);
+        }
+
+        if self.assistant.open {
+            return Ok(self.handle_assistant_key(key));
+        }
+
         if self.help_open {
             return Ok(self.handle_help_key(key));
         }
@@ -4060,6 +4472,66 @@ impl App {
         self.image_overlay = None;
         self.help_open = true;
         self.status = "help open".into();
+    }
+
+    fn toggle_assistant(&mut self) {
+        if self.assistant.open {
+            self.assistant.open = false;
+            self.status = "BashBot closed".into();
+            return;
+        }
+
+        self.close_tab_modals();
+        self.settings.open = false;
+        self.image_overlay = None;
+        self.help_open = false;
+        self.assistant.open = true;
+        self.status = "BashBot ready across all grids and panes".into();
+    }
+
+    fn handle_assistant_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        let changed = match key.code {
+            KeyCode::Esc => {
+                self.assistant.open = false;
+                self.status = "BashBot closed".into();
+                true
+            }
+            KeyCode::Enter => {
+                self.submit_assistant_message();
+                true
+            }
+            KeyCode::Backspace => self.assistant.backspace(),
+            KeyCode::Delete => self.assistant.delete(),
+            KeyCode::Left => self.assistant.move_left(),
+            KeyCode::Right => self.assistant.move_right(),
+            KeyCode::Home => {
+                let changed = self.assistant.cursor != 0;
+                self.assistant.cursor = 0;
+                changed
+            }
+            KeyCode::End => {
+                let changed = self.assistant.cursor != self.assistant.input.len();
+                self.assistant.cursor = self.assistant.input.len();
+                changed
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.assistant.clear_input()
+            }
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.assistant.insert_char(ch);
+                true
+            }
+            _ => false,
+        };
+
+        if changed {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        }
     }
 
     fn handle_help_key(&mut self, key: KeyEvent) -> KeyOutcome {
@@ -7278,6 +7750,35 @@ impl App {
         })
     }
 
+    pub fn workspace_assistant_view(&self) -> Option<WorkspaceAssistantView> {
+        self.assistant.open.then(|| WorkspaceAssistantView {
+            input: self.assistant.input.clone(),
+            cursor_chars: self.assistant.cursor_chars(),
+            messages: self
+                .assistant
+                .messages
+                .iter()
+                .map(|message| AssistantMessageView {
+                    role: match message.role {
+                        AssistantRole::User => AssistantMessageRole::User,
+                        AssistantRole::BashBot => AssistantMessageRole::BashBot,
+                    },
+                    text: message.text.clone(),
+                })
+                .collect(),
+            busy: self.assistant.busy,
+            configured: self.config.manager.is_configured(),
+            grid_count: self.tabs.len(),
+            pane_count: self.panes.len()
+                + self
+                    .tabs
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .map(|tab| tab.panes.len())
+                    .sum::<usize>(),
+        })
+    }
+
     pub fn command_focused(&self) -> bool {
         self.command_line.focused
     }
@@ -8051,6 +8552,103 @@ fn manager_goal_pane_metadata(
             bounded_prefix(&parts.join("; "), 64)
         })
         .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_assistant_tab_context(
+    targets: &mut Vec<AssistantTarget>,
+    contexts: &mut Vec<AssistantPaneContext>,
+    next_target: &mut usize,
+    grid_index: usize,
+    grid_title: &str,
+    active_grid: bool,
+    panes: &[PtyPane],
+    pane_names: &[Option<String>],
+    launch_plan: Option<&LaunchPlan>,
+    sleeping: &BTreeSet<usize>,
+    output_budget: usize,
+) {
+    let metadata = manager_goal_pane_metadata(panes, pane_names, launch_plan);
+    for (pane_index, pane) in panes.iter().enumerate() {
+        let available = !sleeping.contains(&pane_index) && !pane.exited;
+        let state = if pane.exited {
+            "exited; do not target"
+        } else if sleeping.contains(&pane_index) {
+            "sleeping; do not target"
+        } else {
+            "available"
+        };
+        let target_number = *next_target;
+        *next_target += 1;
+        targets.push(AssistantTarget {
+            target_number,
+            pane_id: pane.id(),
+            pane_generation: pane.generation(),
+            screen_revision: pane.screen_revision(),
+            input_revision: pane.input_revision(),
+            available,
+        });
+        let mut pane_metadata = metadata.get(pane_index).cloned().unwrap_or_default();
+        if active_grid {
+            pane_metadata = if pane_metadata.is_empty() {
+                "active-grid=true".into()
+            } else {
+                format!("active-grid=true; {pane_metadata}")
+            };
+        }
+        let output = tail_text(pane.output_tail(), output_budget)
+            .filter(|output| !output.trim().is_empty())
+            .unwrap_or_else(|| "(no recent output)".into());
+        contexts.push(AssistantPaneContext {
+            target_number,
+            grid_number: grid_index + 1,
+            grid_title: grid_title.to_string(),
+            pane_number: pane_index + 1,
+            state,
+            metadata: pane_metadata,
+            output,
+        });
+    }
+}
+
+fn format_assistant_workspace_context(grid_count: usize, panes: &[AssistantPaneContext]) -> String {
+    if panes.is_empty() {
+        return format!("{grid_count} grid(s) are open, with no panes available yet.");
+    }
+
+    let mut context = format!(
+        "{} grid(s), {} pane target(s). Target IDs are global only for this request.\n",
+        grid_count,
+        panes.len()
+    );
+    for pane in panes {
+        context.push_str(&format!(
+            "\n--- TARGET {} [{}] ---\ngrid={} title={}; pane={}; {}\n{}\n",
+            pane.target_number,
+            pane.state,
+            pane.grid_number,
+            pane.grid_title,
+            pane.pane_number,
+            pane.metadata,
+            pane.output
+        ));
+    }
+    context
+}
+
+fn format_assistant_conversation(messages: &[AssistantMessage]) -> String {
+    let conversation = messages
+        .iter()
+        .map(|message| {
+            let role = match message.role {
+                AssistantRole::User => "USER",
+                AssistantRole::BashBot => "BASHBOT",
+            };
+            format!("{role}: {}", message.text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    tail_text(&conversation, ASSISTANT_HISTORY_MAX_BYTES).unwrap_or_default()
 }
 
 fn manager_goal_context(
@@ -9465,6 +10063,84 @@ mod tests {
     }
 
     #[test]
+    fn assistant_input_supports_cursor_editing_and_unicode() {
+        let mut assistant = WorkspaceAssistantState::default();
+        assistant.insert_text("brief panes");
+        assert_eq!(assistant.cursor_chars(), 11);
+        assert!(assistant.move_left());
+        assert!(assistant.backspace());
+        assistant.insert_text("é");
+        assert_eq!(assistant.input, "brief panés");
+        assert_eq!(assistant.take_submission().as_deref(), Some("brief panés"));
+        assert!(assistant.input.is_empty());
+        assert_eq!(assistant.cursor, 0);
+    }
+
+    #[test]
+    fn assistant_workspace_context_keeps_global_targets_and_unavailable_states() {
+        let context = format_assistant_workspace_context(
+            2,
+            &[
+                AssistantPaneContext {
+                    target_number: 1,
+                    grid_number: 1,
+                    grid_title: "Frontend".into(),
+                    pane_number: 1,
+                    state: "available",
+                    metadata: "active-grid=true; role=codex".into(),
+                    output: "tests passed".into(),
+                },
+                AssistantPaneContext {
+                    target_number: 2,
+                    grid_number: 2,
+                    grid_title: "Backend".into(),
+                    pane_number: 1,
+                    state: "sleeping; do not target",
+                    metadata: "role=claude".into(),
+                    output: "waiting".into(),
+                },
+            ],
+        );
+
+        assert!(context.contains("2 grid(s), 2 pane target(s)"));
+        assert!(context.contains("TARGET 1 [available]"));
+        assert!(context.contains("grid=1 title=Frontend; pane=1"));
+        assert!(context.contains("TARGET 2 [sleeping; do not target]"));
+        assert!(context.contains("grid=2 title=Backend; pane=1"));
+    }
+
+    #[test]
+    fn assistant_conversation_labels_trusted_user_turns() {
+        let conversation = format_assistant_conversation(&[
+            AssistantMessage {
+                role: AssistantRole::User,
+                text: "brief me".into(),
+            },
+            AssistantMessage {
+                role: AssistantRole::BashBot,
+                text: "Tests are green.".into(),
+            },
+        ]);
+        assert_eq!(conversation, "USER: brief me\nBASHBOT: Tests are green.");
+    }
+
+    #[test]
+    fn alt_d_is_reserved_for_the_workspace_assistant() {
+        assert!(is_assistant_shortcut(&KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::ALT
+        )));
+        assert!(is_assistant_shortcut(&KeyEvent::new(
+            KeyCode::Char('D'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT
+        )));
+        assert!(!is_assistant_shortcut(&KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::NONE
+        )));
+    }
+
+    #[test]
     fn invoking_profile_precedes_saved_fallback() {
         let cli = Cli::parse_from(["gridbash"]);
         let mut config = Config::default();
@@ -10266,6 +10942,17 @@ mod tests {
         settings.move_target(-1, false, false);
         assert_eq!(settings.selected_target, PaneSettingsTarget::Deactivate);
     }
+}
+
+fn conversation_summary(screen: &Screen) -> Option<String> {
+    let (_, cols) = screen.size();
+    let mut lines = screen.rows(0, cols).collect::<Vec<_>>();
+    lines.reverse();
+
+    lines
+        .into_iter()
+        .filter_map(|line| normalize_conversation_line(&line))
+        .next()
 }
 
 fn pane_activity_summary(pane: &PtyPane) -> Option<String> {
