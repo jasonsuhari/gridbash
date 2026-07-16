@@ -429,6 +429,10 @@ impl PtyPane {
         self.input_revision
     }
 
+    pub fn has_pending_input(&self) -> bool {
+        !self.pending_input.is_empty()
+    }
+
     pub fn input_history(&self) -> &[String] {
         &self.input_history
     }
