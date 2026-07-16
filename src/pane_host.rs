@@ -627,6 +627,14 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
                     }
                 } else {
                     stream.set_nonblocking(false).ok();
+                    stream
+                        .set_read_timeout(Some(Duration::from_millis(250)))
+                        .ok();
+                    if let Ok(reader_stream) = stream.try_clone() {
+                        let mut reader = BufReader::new(reader_stream);
+                        let mut hello = String::new();
+                        let _ = reader.read_line(&mut hello);
+                    }
                     let _ = send_json(&mut stream, &HostEvent::Busy);
                     let _ = stream.shutdown(Shutdown::Both);
                 }
@@ -1205,7 +1213,10 @@ mod tests {
             Ok(_) => panic!("second simultaneous client should be rejected"),
             Err(error) => error,
         };
-        assert!(busy.is::<PaneHostBusy>());
+        assert!(
+            busy.is::<PaneHostBusy>(),
+            "unexpected simultaneous-client error: {busy:#}"
+        );
         drop(first);
 
         thread::sleep(Duration::from_millis(100));

@@ -10390,12 +10390,9 @@ mod tests {
         assert_eq!(assistant.cursor_chars(), 11);
         assert!(assistant.move_left());
         assert!(assistant.backspace());
-        assistant.insert_text("ÃƒÂ©");
-        assert_eq!(assistant.input, "brief panÃƒÂ©s");
-        assert_eq!(
-            assistant.take_submission().as_deref(),
-            Some("brief panÃƒÂ©s")
-        );
+        assistant.insert_text("é");
+        assert_eq!(assistant.input, "brief panés");
+        assert_eq!(assistant.take_submission().as_deref(), Some("brief panés"));
         assert!(assistant.input.is_empty());
         assert_eq!(assistant.cursor, 0);
     }
@@ -11064,13 +11061,13 @@ mod tests {
     fn command_palette_edits_unicode_at_character_boundaries() {
         let mut palette = CommandPaletteState::default();
         palette.open();
-        palette.insert_text("pane æ±äº¬");
+        palette.insert_text("pane 東京");
         assert!(palette.move_cursor(-1));
         assert!(palette.delete());
-        palette.insert_text("äº¬");
+        palette.insert_text("京");
 
-        assert_eq!(palette.input, "pane æ±äº¬");
-        assert_eq!(palette.cursor, "pane æ±äº¬".len());
+        assert_eq!(palette.input, "pane 東京");
+        assert_eq!(palette.cursor, "pane 東京".len());
     }
 
     #[test]
@@ -11742,7 +11739,7 @@ mod selection_tests {
 
     #[test]
     fn tail_text_keeps_utf8_boundary() {
-        assert_eq!(tail_text("one Ã¢ËœÆ’ two", 5).as_deref(), Some(" two"));
+        assert_eq!(tail_text("one ☃ two", 5).as_deref(), Some(" two"));
     }
 
     #[test]

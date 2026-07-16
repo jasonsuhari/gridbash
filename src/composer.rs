@@ -1022,6 +1022,7 @@ mod tests {
         let current_dir = env::current_dir().expect("current dir");
 
         let composer = Composer::new(current_dir.clone(), None, &config).expect("composer");
+        let expected_dir = composer.current_dir.clone();
         let plan = composer.launch_plan(&config).expect("launch plan");
 
         assert_eq!(plan.grid.rows, DEFAULT_ROWS);
@@ -1030,7 +1031,7 @@ mod tests {
         assert!(
             plan.panes
                 .iter()
-                .all(|pane| { pane.profile_name == profile && pane.cwd == current_dir })
+                .all(|pane| { pane.profile_name == profile && pane.cwd == expected_dir })
         );
     }
 
