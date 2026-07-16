@@ -3804,6 +3804,28 @@ impl App {
                         }
                     }
                 }
+                PaneRoute::Background(index) => {
+                    let Some(target_pane) = self
+                        .background_jobs
+                        .get_mut(index)
+                        .and_then(|job| job.pane.as_mut())
+                    else {
+                        failures.push(format!("target {} left the background pool", command.pane));
+                        continue;
+                    };
+                    if target_pane.exited {
+                        Err("is no longer available".to_string())
+                    } else if target_pane.screen_revision() != target.screen_revision
+                        || target_pane.input_revision() != target.input_revision
+                    {
+                        Err("changed while BashBot was reviewing it".to_string())
+                    } else {
+                        target_pane
+                            .write(&bytes)
+                            .map_err(|error| format!("could not accept input: {error:#}"))
+                            .map(|_| target_pane.record_input(&bytes))
+                    }
+                }
             };
             match result {
                 Ok(()) => sent += 1,
@@ -6024,7 +6046,7 @@ impl App {
         if let Some(pane) = job.pane.as_mut()
             && !pane.exited
         {
-            pane.terminate();
+            pane.terminate()?;
         }
         self.background_picker.pending_delete = None;
         self.background_picker
