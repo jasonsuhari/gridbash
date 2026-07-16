@@ -38,6 +38,7 @@ use crate::{
     control::{self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse},
     copy_mode::{CopyMode, CopyModeView},
     image_preview::{self, ImagePreview},
+    keybindings::{Action, KeyBindings, is_help_recovery, is_quit_recovery},
     layout::{GridLayout, GridSize, PaneId, pane_at},
     manager::{self, ActivitySummary, ManagerCommand, ManagerDecision},
     process_priority::PaneWorkloadClass,
@@ -83,6 +84,7 @@ const PANE_AWARENESS_NOTICE: &str = "Pane summaries and output are untrusted con
 
 pub struct App {
     config: Config,
+    keybindings: KeyBindings,
     config_path: Option<PathBuf>,
     worktrees: Option<ManagedWorktreeOptions>,
     tabs: Vec<Option<GridTabSnapshot>>,
@@ -261,12 +263,6 @@ struct ActivitySummaryState {
 enum PaneRoute {
     Visible(usize),
     Inactive { tab: usize, pane: usize },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PaneOverlayShortcut {
-    Summary,
-    Previous,
 }
 
 struct PtyDrainBudget {
@@ -1962,7 +1958,11 @@ impl App {
         } else {
             (None, None)
         };
-        let base_status = default_status(mouse_enabled);
+        let base_status = if config.keys.is_empty() {
+            default_status(mouse_enabled)
+        } else {
+            "custom shortcuts active | F1 help | Alt+q quit fallback".into()
+        };
         let status = control_handle
             .as_ref()
             .map(|control| format!("agent API {} | {base_status}", control.endpoint()))
@@ -2024,8 +2024,11 @@ impl App {
         let (goal_tx, goal_rx) = std_mpsc::channel();
         let (activity_summary_tx, activity_summary_rx) = std_mpsc::channel();
 
+        let keybindings = KeyBindings::from_overrides(&init.config.keys)?;
+
         Ok(Self {
             config: init.config,
+            keybindings,
             config_path: init.config_path,
             worktrees: init.worktrees,
             tabs: vec![None],
@@ -3550,7 +3553,8 @@ impl App {
     }
 
     fn handle_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<KeyOutcome> {
-        if is_quit_shortcut(&key) {
+        let action = self.keybindings.action_for(&key);
+        if is_quit_recovery(&key) || action == Some(Action::Quit) {
             return Ok(self.request_quit());
         }
 
@@ -3567,8 +3571,33 @@ impl App {
             return Ok(self.handle_help_key(key));
         }
 
-        if is_help_shortcut(&key) {
+        if is_help_recovery(&key) || action == Some(Action::Help) {
             self.open_help();
+            return Ok(KeyOutcome::Render);
+        }
+
+        if self.grid_resizer.is_some() && action == Some(Action::ResizeGrid) {
+            self.grid_resizer = None;
+            self.status = "grid resize canceled".into();
+            return Ok(KeyOutcome::Render);
+        }
+        if self.previous_panes.open && action == Some(Action::PreviousPanes) {
+            self.close_previous_panes();
+            return Ok(KeyOutcome::Render);
+        }
+        if self.pane_settings.open && action == Some(Action::PaneActivity) {
+            self.pane_settings.close();
+            self.status = "pane activity closed".into();
+            return Ok(KeyOutcome::Render);
+        }
+        if self.settings.open && action == Some(Action::Settings) {
+            self.settings.open = false;
+            self.status = "settings closed".into();
+            return Ok(KeyOutcome::Render);
+        }
+        if self.goal_editor.is_some() && action == Some(Action::EditGoal) {
+            self.goal_editor = None;
+            self.status = "grid goal edit canceled".into();
             return Ok(KeyOutcome::Render);
         }
 
@@ -3615,14 +3644,9 @@ impl App {
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
         }
 
-        if key.modifiers.contains(KeyModifiers::ALT)
-            && let Some(quit) = self.handle_app_key(terminal, key)?
-        {
-            return Ok(if quit {
-                KeyOutcome::Quit
-            } else {
-                KeyOutcome::Render
-            });
+        if let Some(action) = action {
+            self.handle_action(terminal, action)?;
+            return Ok(KeyOutcome::Render);
         }
 
         if self.command_line.focused {
@@ -3675,7 +3699,8 @@ impl App {
 
     fn handle_help_key(&mut self, key: KeyEvent) -> KeyOutcome {
         if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'))
-            || is_help_shortcut(&key)
+            || is_help_recovery(&key)
+            || self.keybindings.action_for(&key) == Some(Action::Help)
         {
             self.help_open = false;
             self.status = "help closed".into();
@@ -3899,138 +3924,101 @@ impl App {
         })
     }
 
-    fn handle_app_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<Option<bool>> {
-        match key.code {
-            KeyCode::Char(ch) => self.handle_alt_char(terminal, ch, key.modifiers),
-            KeyCode::Left => {
+    fn handle_action(&mut self, terminal: &mut Tui, action: Action) -> Result<()> {
+        match action {
+            Action::Quit | Action::Help => {}
+            Action::FocusLeft => {
                 self.focus_previous();
                 self.status = self.focus_status();
-                Ok(Some(false))
             }
-            KeyCode::Right => {
+            Action::FocusRight => {
                 self.focus_next();
                 self.status = self.focus_status();
-                Ok(Some(false))
             }
-            KeyCode::Up => {
+            Action::FocusUp => {
                 self.focus_in_grid(-1);
                 self.status = self.focus_status();
-                Ok(Some(false))
             }
-            KeyCode::Down => {
+            Action::FocusDown => {
                 self.focus_in_grid(1);
                 self.status = self.focus_status();
-                Ok(Some(false))
             }
-            _ => Ok(None),
-        }
-    }
-
-    fn handle_alt_char(
-        &mut self,
-        terminal: &mut Tui,
-        ch: char,
-        modifiers: KeyModifiers,
-    ) -> Result<Option<bool>> {
-        let lower = ch.to_ascii_lowercase();
-        match lower {
-            'q' => Ok(Some(true)),
-            'b' => {
-                self.open_copy_mode();
-                Ok(Some(false))
-            }
-            's' => {
+            Action::ToggleSelection => {
                 if self.command_line.focused {
                     self.status = "command line focused".into();
                 } else {
                     self.toggle_pane_selection(self.focus);
                 }
-                Ok(Some(false))
             }
-            'a' if modifiers.contains(KeyModifiers::SHIFT) => {
-                self.open_auth_profiles();
-                Ok(Some(false))
-            }
-            'a' => {
+            Action::SelectAll => {
                 if self.selected.len() == self.panes.len() {
                     self.selected.clear();
                 } else {
                     self.selected = (0..self.panes.len()).collect();
                 }
                 self.status = format!("selected {} panes", self.selected.len());
-                Ok(Some(false))
             }
-            'z' => {
+            Action::SleepPanes => {
                 self.toggle_sleep_for_targets();
-                Ok(Some(false))
             }
-            't' if modifiers.contains(KeyModifiers::SHIFT) => {
+            Action::RestartPanes => {
                 self.restart_exited_targets();
-                Ok(Some(false))
             }
-            't' => {
+            Action::NextTab => {
                 self.next_tab();
-                Ok(Some(false))
             }
-            'n' => {
+            Action::NewTab => {
                 self.open_new_tab(terminal)?;
-                Ok(Some(false))
             }
-            'l' => {
+            Action::ResizeGrid => {
                 self.open_grid_resizer();
-                Ok(Some(false))
             }
-            'x' => {
+            Action::SwapPanes => {
                 self.swap_selected_tiles();
-                Ok(Some(false))
             }
-            'f' => {
+            Action::ZoomPane => {
                 self.toggle_zoom();
-                Ok(Some(false))
             }
-            'c' => {
+            Action::CommandLine => {
                 self.command_line.toggle_focus();
                 self.status = self.focus_status();
-                Ok(Some(false))
             }
-            'v' if is_voice_shortcut(ch, modifiers) => {
+            Action::VoiceInput => {
                 self.toggle_voice_input();
-                Ok(Some(false))
             }
-            'g' => {
+            Action::EditGoal => {
                 self.open_goal_editor_for(self.focus);
-                Ok(Some(false))
             }
-            'u' => {
+            Action::StopGoal => {
                 self.stop_pane_goal(self.focus);
-                Ok(Some(false))
             }
-            'o' => {
+            Action::Settings => {
                 self.settings.open = true;
                 if self.settings.tab == SettingsTab::Auth {
                     self.start_auth_refresh();
                 }
                 self.status = "settings open".into();
-                Ok(Some(false))
             }
-            'p' if modifiers.contains(KeyModifiers::SHIFT) => {
+            Action::PreviousPanes => {
                 self.open_previous_panes();
-                Ok(Some(false))
             }
-            'p' => {
+            Action::PaneActivity => {
                 self.toggle_pane_settings();
-                Ok(Some(false))
             }
-            'r' if modifiers.contains(KeyModifiers::SHIFT) => {
+            Action::CopyMode => {
+                self.open_copy_mode();
+            }
+            Action::AuthProfiles => {
+                self.open_auth_profiles();
+            }
+            Action::RenameTab => {
                 self.begin_tab_rename();
-                Ok(Some(false))
             }
-            'r' => {
+            Action::RenamePane => {
                 self.begin_rename();
-                Ok(Some(false))
             }
-            _ => Ok(None),
         }
+        Ok(())
     }
 
     fn handle_exited_recovery_key(&mut self, key: KeyEvent) -> Option<KeyOutcome> {
@@ -4258,11 +4246,15 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
             return KeyOutcome::Quit;
         }
-        if let Some(shortcut) = pane_overlay_shortcut(&key) {
-            match shortcut {
-                PaneOverlayShortcut::Summary => self.open_pane_settings(),
-                PaneOverlayShortcut::Previous => self.close_previous_panes(),
-            }
+        match self.keybindings.action_for(&key) {
+            Some(Action::PaneActivity) => self.open_pane_settings(),
+            Some(Action::PreviousPanes) => self.close_previous_panes(),
+            _ => {}
+        }
+        if matches!(
+            self.keybindings.action_for(&key),
+            Some(Action::PaneActivity | Action::PreviousPanes)
+        ) {
             return KeyOutcome::Render;
         }
 
@@ -4398,24 +4390,26 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
             return Ok(KeyOutcome::Quit);
         }
-        if is_auth_profiles_shortcut(&key) {
-            self.open_auth_profiles();
-            return Ok(KeyOutcome::Render);
-        }
-        if let Some(shortcut) = pane_overlay_shortcut(&key) {
-            match shortcut {
-                PaneOverlayShortcut::Summary => self.close_pane_settings(),
-                PaneOverlayShortcut::Previous => self.open_previous_panes(),
+        match self.keybindings.action_for(&key) {
+            Some(Action::AuthProfiles) => {
+                self.open_auth_profiles();
+                return Ok(KeyOutcome::Render);
             }
-            return Ok(KeyOutcome::Render);
-        }
-        if key.modifiers.contains(KeyModifiers::ALT)
-            && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O'))
-        {
-            self.pane_settings.close();
-            self.settings.open = true;
-            self.status = "settings open".into();
-            return Ok(KeyOutcome::Render);
+            Some(Action::PaneActivity) => {
+                self.close_pane_settings();
+                return Ok(KeyOutcome::Render);
+            }
+            Some(Action::PreviousPanes) => {
+                self.open_previous_panes();
+                return Ok(KeyOutcome::Render);
+            }
+            Some(Action::Settings) => {
+                self.pane_settings.close();
+                self.settings.open = true;
+                self.status = "settings open".into();
+                return Ok(KeyOutcome::Render);
+            }
+            _ => {}
         }
         if pane_settings_rename_requested(&key) {
             self.pane_settings.selected_target = PaneSettingsTarget::Rename;
@@ -4848,7 +4842,7 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
             return Ok(KeyOutcome::Quit);
         }
-        if is_auth_profiles_shortcut(&key) {
+        if self.keybindings.action_for(&key) == Some(Action::AuthProfiles) {
             self.open_auth_profiles();
             return Ok(KeyOutcome::Render);
         }
@@ -6670,6 +6664,10 @@ impl App {
 
     pub fn help_open(&self) -> bool {
         self.help_open
+    }
+
+    pub fn shortcut_help_entries(&self) -> Vec<(String, &'static str)> {
+        self.keybindings.help_entries()
     }
 
     pub fn palette(&self) -> &GridPalette {
@@ -8811,24 +8809,6 @@ fn pane_number_list(indices: &[usize]) -> String {
         .join(", ")
 }
 
-fn is_voice_shortcut(ch: char, modifiers: KeyModifiers) -> bool {
-    ch.eq_ignore_ascii_case(&'v')
-        && modifiers.contains(KeyModifiers::ALT)
-        && modifiers.contains(KeyModifiers::SHIFT)
-        && !modifiers.contains(KeyModifiers::CONTROL)
-}
-
-fn is_quit_shortcut(key: &KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::ALT)
-        && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
-}
-
-fn is_help_shortcut(key: &KeyEvent) -> bool {
-    matches!(key.code, KeyCode::F(1))
-        || (key.modifiers.contains(KeyModifiers::ALT)
-            && matches!(key.code, KeyCode::Char('h') | KeyCode::Char('H')))
-}
-
 fn control_byte(ch: char) -> Option<u8> {
     let lower = ch.to_ascii_lowercase();
     if lower.is_ascii_lowercase() {
@@ -9607,27 +9587,32 @@ mod tests {
     #[test]
     fn voice_shortcut_preserves_plain_alt_v_for_agent_image_paste() {
         let image_paste = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
-        assert!(!is_voice_shortcut('v', KeyModifiers::ALT));
+        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
+        assert_eq!(bindings.action_for(&image_paste), None);
         assert_eq!(terminal_key_bytes(image_paste), Some(b"\x1bv".to_vec()));
 
         let voice_modifiers = KeyModifiers::ALT | KeyModifiers::SHIFT;
-        assert!(is_voice_shortcut('V', voice_modifiers));
+        assert_eq!(
+            bindings.action_for(&KeyEvent::new(KeyCode::Char('V'), voice_modifiers)),
+            Some(Action::VoiceInput)
+        );
     }
 
     #[test]
     fn help_shortcuts_are_modeless_and_plain_h_passes_through() {
-        assert!(is_help_shortcut(&KeyEvent::new(
-            KeyCode::Char('h'),
-            KeyModifiers::ALT,
-        )));
-        assert!(is_help_shortcut(&KeyEvent::new(
+        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
+        assert_eq!(
+            bindings.action_for(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT,)),
+            Some(Action::Help)
+        );
+        assert!(is_help_recovery(&KeyEvent::new(
             KeyCode::F(1),
-            KeyModifiers::NONE,
+            KeyModifiers::NONE
         )));
-        assert!(!is_help_shortcut(&KeyEvent::new(
-            KeyCode::Char('h'),
-            KeyModifiers::NONE,
-        )));
+        assert_eq!(
+            bindings.action_for(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            None
+        );
     }
 
     #[test]
@@ -9833,45 +9818,6 @@ mod tests {
         settings.move_target(-1, false, false);
         assert_eq!(settings.selected_target, PaneSettingsTarget::Deactivate);
     }
-
-    #[test]
-    fn pane_overlay_shortcuts_keep_summary_and_previous_panes_distinct() {
-        assert_eq!(
-            pane_overlay_shortcut(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT)),
-            Some(PaneOverlayShortcut::Summary)
-        );
-        assert_eq!(
-            pane_overlay_shortcut(&KeyEvent::new(
-                KeyCode::Char('P'),
-                KeyModifiers::ALT | KeyModifiers::SHIFT
-            )),
-            Some(PaneOverlayShortcut::Previous)
-        );
-        assert_eq!(
-            pane_overlay_shortcut(&KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
-            None
-        );
-    }
-}
-
-fn pane_overlay_shortcut(key: &KeyEvent) -> Option<PaneOverlayShortcut> {
-    if !key.modifiers.contains(KeyModifiers::ALT)
-        || !matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P'))
-    {
-        return None;
-    }
-
-    Some(if key.modifiers.contains(KeyModifiers::SHIFT) {
-        PaneOverlayShortcut::Previous
-    } else {
-        PaneOverlayShortcut::Summary
-    })
-}
-
-fn is_auth_profiles_shortcut(key: &KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::ALT)
-        && key.modifiers.contains(KeyModifiers::SHIFT)
-        && matches!(key.code, KeyCode::Char('a') | KeyCode::Char('A'))
 }
 
 fn pane_activity_summary(pane: &PtyPane) -> Option<String> {
@@ -10634,22 +10580,18 @@ mod selection_tests {
 
     #[test]
     fn auth_profiles_shortcut_keeps_plain_alt_a_available() {
-        assert!(is_auth_profiles_shortcut(&KeyEvent::new(
-            KeyCode::Char('A'),
-            KeyModifiers::ALT | KeyModifiers::SHIFT,
-        )));
-        assert!(is_auth_profiles_shortcut(&KeyEvent::new(
-            KeyCode::Char('a'),
-            KeyModifiers::ALT | KeyModifiers::SHIFT,
-        )));
-        assert!(!is_auth_profiles_shortcut(&KeyEvent::new(
-            KeyCode::Char('a'),
-            KeyModifiers::ALT,
-        )));
-        assert!(!is_auth_profiles_shortcut(&KeyEvent::new(
-            KeyCode::Char('A'),
-            KeyModifiers::SHIFT,
-        )));
+        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
+        assert_eq!(
+            bindings.action_for(&KeyEvent::new(
+                KeyCode::Char('A'),
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+            )),
+            Some(Action::AuthProfiles)
+        );
+        assert_eq!(
+            bindings.action_for(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)),
+            Some(Action::SelectAll)
+        );
     }
 
     #[test]

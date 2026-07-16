@@ -20,6 +20,11 @@ selected = "cyan"
 quiet = "dark-gray"
 exited = "red"
 
+# Override any supported application action. Unlisted actions keep their defaults.
+[keys]
+zoom-pane = "alt+f"
+settings = "alt+o"
+
 [manager]
 activity_summaries = false # opt in: sends bounded active-tab output to this API
 endpoint = "https://api.openai.com/v1/chat/completions"

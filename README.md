@@ -113,6 +113,10 @@ profiles, UI settings, auth defaults, manager credentials, and workload policy.
 The [configuration reference](docs/REFERENCE.md#configuration) covers file
 locations and precedence.
 
+Application shortcuts can also be remapped in `[keys]`, for example
+`zoom-pane = "ctrl+shift+k"`. Unlisted actions keep their defaults, while F1
+and `Alt+q` remain reliable help and quit fallbacks.
+
 ## Agent control API
 
 Enable GridBash's local, opt-in control API for agents inside its panes:

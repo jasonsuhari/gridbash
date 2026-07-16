@@ -242,9 +242,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(format!("{} selected", app.selected().len())),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
-        Span::raw(
-            " | Alt+h help | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new | Alt+t tab | Alt+Shift+t restart | Alt+c CLI | Alt+Shift+V voice | Alt+p summary | Alt+Shift+p panes | Alt+x swap | Alt+z sleep | Alt+q quit",
-        ),
+        Span::raw(" | F1 help | Alt+q quit fallback"),
     ]);
     frame.render_widget(
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
@@ -288,7 +286,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         picker.draw(frame, GridPickerMode::Resize, None);
     }
     if help_open {
-        render_help(frame, area, palette);
+        render_help(frame, area, app, palette);
     }
 
     DrawState {
@@ -2635,33 +2633,8 @@ fn settings_panel_style() -> Style {
     Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
-    const CONTROLS: &[(&str, &str)] = &[
-        ("Alt+arrows", "move pane focus"),
-        ("Alt+s", "toggle pane selection"),
-        ("Alt+a", "select or clear all panes"),
-        ("type/paste", "send to focused or selected panes"),
-        ("right-click", "toggle one selected pane"),
-        ("Alt+n", "open a new tab"),
-        ("Alt+t", "switch to next tab"),
-        ("Alt+Shift+r", "rename current tab"),
-        ("Alt+c", "expand or close the command line"),
-        ("Alt+p", "show focused-pane activity summary"),
-        ("Alt+Shift+p", "show previous panes"),
-        ("Alt+f", "zoom or restore focused pane"),
-        ("Alt+b", "search and copy pane scrollback"),
-        ("Alt+l", "resize the grid"),
-        ("Alt+Shift+A", "manage and assign auth profiles"),
-        ("Alt+r", "rename focused pane"),
-        ("Alt+Shift+t", "restart exited panes"),
-        ("Alt+z", "sleep or wake panes"),
-        ("Alt+g / Alt+u", "start or stop grid goal"),
-        ("Alt+o", "open global settings"),
-        ("Alt+Shift+V", "dictate without submitting"),
-        ("Alt+q", "quit GridBash"),
-        ("Alt+h / F1", "close this help"),
-    ];
-
+fn render_help(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &GridPalette) {
+    let controls = app.shortcut_help_entries();
     let modal = help_modal_rect(area);
     frame.render_widget(Clear, modal);
     let inner_width = modal.width.saturating_sub(4) as usize;
@@ -2677,22 +2650,22 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
     ];
 
     if inner_width >= 62 {
-        let rows = CONTROLS.len().div_ceil(2);
+        let rows = controls.len().div_ceil(2);
         let column_width = inner_width.saturating_sub(3) / 2;
-        for (row, control) in CONTROLS.iter().take(rows).enumerate() {
-            let left = help_control(*control, column_width);
-            let right = CONTROLS
+        for (row, control) in controls.iter().take(rows).enumerate() {
+            let left = help_control(&control.0, control.1, column_width);
+            let right = controls
                 .get(row + rows)
-                .map(|control| help_control(*control, column_width))
+                .map(|control| help_control(&control.0, control.1, column_width))
                 .unwrap_or_default();
             lines.push(Line::from(format!("{left:<column_width$}   {right}")));
         }
     } else {
         let available = modal.height.saturating_sub(7) as usize;
-        for control in CONTROLS.iter().take(available) {
-            lines.push(Line::from(help_control(*control, inner_width)));
+        for control in controls.iter().take(available) {
+            lines.push(Line::from(help_control(&control.0, control.1, inner_width)));
         }
-        if available < CONTROLS.len() {
+        if available < controls.len() {
             lines.push(Line::from(
                 "More controls: enlarge the terminal or see README.md",
             ));
@@ -2712,7 +2685,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, palette: &GridPalette) {
     );
 }
 
-fn help_control((key, action): (&str, &str), width: usize) -> String {
+fn help_control(key: &str, action: &str, width: usize) -> String {
     truncate_text(&format!("{key:<13} {action}"), width)
 }
 
@@ -2721,7 +2694,7 @@ fn help_modal_rect(area: Rect) -> Rect {
     let height = area
         .height
         .saturating_sub(2)
-        .min(18)
+        .min(22)
         .max(area.height.min(1));
     Rect {
         x: area.x + area.width.saturating_sub(width) / 2,

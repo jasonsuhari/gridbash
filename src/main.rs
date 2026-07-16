@@ -7,6 +7,7 @@ mod config;
 mod control;
 mod copy_mode;
 mod image_preview;
+mod keybindings;
 mod layout;
 mod manager;
 mod onboarding;
