@@ -160,9 +160,12 @@ background-process trick.
 
 ## Try it
 
-The currently published package supports Windows x64:
+GridBash releases native builds for Windows x64, Linux x64/arm64, and macOS
+arm64/x64. Check the npm badge against the latest GitHub release before using
+the install command; if registry publication is temporarily behind, use the
+matching release artifact instead:
 
-```powershell
+```sh
 npm install -g gridbash
 gridbash 2x3 --profile codex --worktrees
 ```

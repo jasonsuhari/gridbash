@@ -91,6 +91,37 @@ If the whole workflow needs to be dispatched again for an exact version whose
 tag already exists, the prepare job skips version preparation and publishes the
 existing tag.
 
+### Registry Publication Incident
+
+When GitHub artifacts exist but npm publication is delayed or blocked by the
+registry:
+
+1. Treat npm as unavailable for the affected version or platform. Do not claim
+   that `npm install -g gridbash` delivers the GitHub release until it does.
+2. Keep the existing release tag immutable. Do not create replacement tags or
+   bump versions solely to retry an external registry incident.
+3. Put a temporary, factual notice in the website or launch material and pause
+   broad promotion. Direct testers may use matching GitHub release artifacts.
+4. Record the failing workflow URL and the external support case privately;
+   never put credentials or private support correspondence in the repository.
+5. After npm confirms resolution, rerun the existing exact-version workflow or
+   failed publish job. The publish step is intentionally idempotent and skips
+   package versions that are already live.
+6. Verify the root launcher and every native package before clearing the notice:
+
+   ```sh
+   npm view gridbash version
+   npm view gridbash-win32-x64 version
+   npm view gridbash-linux-x64 version
+   npm view gridbash-linux-arm64 version
+   npm view gridbash-darwin-arm64 version
+   npm view gridbash-darwin-x64 version
+   ```
+
+The GitHub release succeeding does not make a failed npm publish workflow green.
+Keep the failure visible until the registry-side work is complete; do not weaken
+release checks to improve the status signal.
+
 ### Nightlies
 
 The same `Release` workflow runs daily from `main` and supports a manual
@@ -106,7 +137,7 @@ Install the rolling channel with:
 npm install --global gridbash@nightly
 ```
 
-Cross-platform preview releases use npm's `next` channel instead:
+Prerelease builds use npm's `next` channel instead:
 
 ```sh
 npm install --global gridbash@next
