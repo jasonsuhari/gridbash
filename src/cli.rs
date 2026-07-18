@@ -74,6 +74,24 @@ pub struct Cli {
     pub layout: GridMode,
 }
 
+impl Cli {
+    pub fn allows_automatic_recovery(&self) -> bool {
+        self.command.is_none()
+            && self.grid.is_none()
+            && self.count.is_none()
+            && self.profile.is_none()
+            && self.cwd.is_none()
+            && !self.worktrees
+            && self.layout == GridMode::Grid
+            && !self.agent_api
+            && self.agent_api_port == 0
+            && self.set_default_profile.is_none()
+            && !self.list_profiles
+            && !self.mcp
+            && self.pane_host.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum GridMode {
     Grid,
@@ -180,6 +198,19 @@ mod tests {
         assert!(cli.command.is_none());
         assert_eq!(cli.grid.as_deref(), Some("2x3"));
         assert_eq!(cli.profile.as_deref(), Some("git-bash"));
+        assert!(!cli.allows_automatic_recovery());
+    }
+
+    #[test]
+    fn automatic_recovery_only_applies_to_plain_launches() {
+        let plain = Cli::parse_from(["gridbash"]);
+        assert!(plain.allows_automatic_recovery());
+
+        let worktrees = Cli::parse_from(["gridbash", "--worktrees"]);
+        assert!(!worktrees.allows_automatic_recovery());
+
+        let agent_api = Cli::parse_from(["gridbash", "--agent-api"]);
+        assert!(!agent_api.allows_automatic_recovery());
     }
 
     #[test]

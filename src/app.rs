@@ -50,7 +50,8 @@ use crate::{
     profiles::{default_profile_name, find_profile},
     pty::{PtyEvent, PtyWriteToken},
     session::{
-        SavedBackgroundPane, SavedPane, SavedPaneHistory, SavedTab, SessionRecord, SessionRecorder,
+        InterruptedRecovery, SavedBackgroundPane, SavedPane, SavedPaneHistory, SavedTab,
+        SessionRecord, SessionRecorder,
     },
     setup::{LaunchPlan, PaneLaunchSpec},
     ui,
@@ -68,6 +69,7 @@ const PTY_DRAIN_MAX_EVENTS: usize = 64;
 const PTY_DRAIN_MAX_BYTES: usize = 512 * 1024;
 const PTY_DRAIN_MAX_TIME: Duration = Duration::from_millis(4);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
 const PANE_GOAL_OUTPUT_MAX_BYTES: usize = 12_000;
 const PANE_GOAL_REVIEW_IDLE: Duration = Duration::from_secs(2);
 const PANE_GOAL_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -185,6 +187,7 @@ pub struct App {
     api_spend_label: Option<String>,
     last_activity_decay: Instant,
     last_exit_poll: Instant,
+    last_session_autosave: Instant,
 }
 
 struct AppInit {
@@ -256,18 +259,21 @@ impl BackgroundJob {
     }
 
     fn saved(&self) -> SavedBackgroundPane {
+        let live = self.pane.as_ref();
+        let mut pane = SavedPane::from_background(
+            &self.spec,
+            self.history(),
+            live.map(PtyPane::host_ref).or_else(|| self.host.clone()),
+        );
+        if let Some(live) = live {
+            pane.cwd = live.cwd().to_path_buf();
+            pane.folder_name = crate::setup::folder_display_name(&pane.cwd);
+        }
         SavedBackgroundPane {
             id: self.id,
             source_tab: self.source_tab.clone(),
             name: self.name.clone(),
-            pane: SavedPane::from_background(
-                &self.spec,
-                self.history(),
-                self.pane
-                    .as_ref()
-                    .map(PtyPane::host_ref)
-                    .or_else(|| self.host.clone()),
-            ),
+            pane,
         }
     }
 }
@@ -2486,6 +2492,60 @@ impl App {
         })
     }
 
+    pub fn recover_interrupted(
+        config: Config,
+        recovery: InterruptedRecovery,
+        mouse_enabled: bool,
+    ) -> Result<Self> {
+        let InterruptedRecovery {
+            mut tabs,
+            session_count,
+            pane_count,
+        } = recovery;
+        let active = if tabs.is_empty() {
+            return Err(anyhow!("interrupted recovery has no tabs"));
+        } else {
+            tabs.remove(0)
+        };
+        let mut launch_plan = active.launch_plan()?;
+        apply_auth_defaults(&mut launch_plan, &config)?;
+        let grid = launch_plan.grid;
+        let restored_histories = active.pane_histories();
+        let restored_hosts = active.pane_hosts();
+        let settings = SettingsState::from_config(&config);
+        let command_cwd = launch_plan
+            .panes
+            .first()
+            .map(|pane| pane.cwd.clone())
+            .unwrap_or(resolved_current_dir()?);
+        let tab_count = tabs.len() + 1;
+
+        Self::from_parts(AppInit {
+            config,
+            config_path: None,
+            worktrees: None,
+            launch_plan: Some(launch_plan),
+            grid,
+            mouse_enabled,
+            command_cwd,
+            control_handle: None,
+            control_rx: None,
+            settings,
+            tab_title: active.title,
+            restored_histories,
+            restored_background_panes: Vec::new(),
+            restored_hosts,
+            restored_tabs: tabs,
+            session_recorder: None,
+            status: format!(
+                "recovered {pane_count} pane{} from {session_count} interrupted session{} into {tab_count} tab{} | Alt+t switches tabs",
+                if pane_count == 1 { "" } else { "s" },
+                if session_count == 1 { "" } else { "s" },
+                if tab_count == 1 { "" } else { "s" },
+            ),
+        })
+    }
+
     fn from_parts(init: AppInit) -> Result<Self> {
         let (event_tx, event_rx) = mpsc::channel(PTY_EVENT_CHANNEL_CAPACITY);
         let (usage_tx, usage_rx) = std_mpsc::channel();
@@ -2597,6 +2657,7 @@ impl App {
             api_spend_label: None,
             last_activity_decay: Instant::now(),
             last_exit_poll: Instant::now(),
+            last_session_autosave: Instant::now(),
         })
     }
 
@@ -2634,7 +2695,11 @@ impl App {
         self.sync_initial_pane_sizes(terminal)?;
 
         let run_result = self.run_loop(terminal);
-        let save_result = self.save_session_snapshot();
+        let save_result = if run_result.is_ok() {
+            self.finish_session()
+        } else {
+            self.save_session_snapshot()
+        };
         match (run_result, save_result) {
             (Err(error), _) => Err(error),
             (Ok(()), Err(error)) => Err(error),
@@ -3052,6 +3117,7 @@ impl App {
             immediate_render |= self.update_follow_up_prompt();
             immediate_render |= self.schedule_goal_reviews();
             immediate_render |= self.schedule_activity_summaries();
+            immediate_render |= self.autosave_session_if_due();
             if immediate_render {
                 immediate_render |= self.refresh_workload_classes();
             }
@@ -9272,6 +9338,26 @@ impl App {
             .collect();
         recorder.update(&self.tab_title, &plan, &self.panes, tabs, background_panes);
         recorder.save()
+    }
+
+    fn autosave_session_if_due(&mut self) -> bool {
+        if self.last_session_autosave.elapsed() < SESSION_AUTOSAVE_INTERVAL {
+            return false;
+        }
+        self.last_session_autosave = Instant::now();
+        if let Err(error) = self.save_session_snapshot() {
+            self.status = format!("session autosave failed: {error:#}");
+            return true;
+        }
+        false
+    }
+
+    fn finish_session(&mut self) -> Result<()> {
+        self.save_session_snapshot()?;
+        if let Some(recorder) = self.session_recorder.as_mut() {
+            recorder.finish()?;
+        }
+        Ok(())
     }
 }
 

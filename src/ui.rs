@@ -438,7 +438,12 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel], palette: &G
     ));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
-        "Alt+Shift+r rename tab",
+        "Alt+t switch",
+        Style::default().fg(Color::DarkGray),
+    ));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        "Alt+Shift+r rename",
         Style::default().fg(Color::DarkGray),
     ));
 
