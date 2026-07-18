@@ -1,0 +1,1690 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GridBash Feature Launch</title>
+    <style>
+      @font-face {
+        font-family: "Anton";
+        src: url("assets/fonts/Anton-Regular.ttf") format("truetype");
+        font-style: normal;
+        font-weight: 400;
+      }
+
+      @font-face {
+        font-family: "Geist Mono";
+        src: url("assets/fonts/geist-mono-variable.woff2") format("woff2");
+        font-style: normal;
+        font-weight: 100 900;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 1920px;
+        height: 1080px;
+        margin: 0;
+        overflow: hidden;
+        background: #f3ede1;
+        color: #171817;
+      }
+
+      body {
+        font-family: "Geist Mono", monospace;
+      }
+
+      #main {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: #f3ede1;
+      }
+
+      .scene {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        padding: 66px 78px;
+        background: #f3ede1;
+        opacity: 0;
+      }
+
+      #scene-1 {
+        opacity: 1;
+      }
+
+      .scene-content {
+        position: relative;
+        z-index: 2;
+        display: flex;
+        flex-direction: column;
+        width: 100%;
+        height: 100%;
+        gap: 24px;
+      }
+
+      .display {
+        margin: 0;
+        font-family: "Anton", sans-serif;
+        font-weight: 400;
+        letter-spacing: -0.025em;
+        line-height: 0.88;
+        text-transform: uppercase;
+      }
+
+      .mono {
+        font-family: "Geist Mono", monospace;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .meta-row {
+        display: flex;
+        align-items: center;
+        width: 100%;
+        gap: 24px;
+        font-size: 23px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .meta-row .rule {
+        height: 4px;
+        flex: 1;
+        background: #171817;
+        transform-origin: left center;
+      }
+
+      .tab {
+        display: inline-flex;
+        align-items: center;
+        min-height: 48px;
+        padding: 8px 18px;
+        border: 3px solid #171817;
+        background: #e2c94c;
+        font-size: 23px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        box-shadow: 7px 8px 0 #171817;
+      }
+
+      .mint-tab {
+        background: #78c9b6;
+      }
+
+      .paper-card {
+        border: 4px solid #171817;
+        background: #fff9ee;
+        box-shadow: 13px 15px 0 #2b2c2a;
+      }
+
+      .ink-card {
+        border: 4px solid #171817;
+        background: #171817;
+        color: #fff9ee;
+        box-shadow: 13px 15px 0 #78c9b6;
+      }
+
+      .section-title {
+        font-size: 132px;
+      }
+
+      .support-copy {
+        max-width: 720px;
+        margin: 0;
+        font-size: 32px;
+        line-height: 1.28;
+      }
+
+      .reg-cross {
+        position: absolute;
+        width: 58px;
+        height: 58px;
+      }
+
+      .reg-cross::before,
+      .reg-cross::after {
+        content: "";
+        position: absolute;
+        background: #171817;
+      }
+
+      .reg-cross::before {
+        top: 27px;
+        left: 0;
+        width: 58px;
+        height: 4px;
+      }
+
+      .reg-cross::after {
+        top: 0;
+        left: 27px;
+        width: 4px;
+        height: 58px;
+      }
+
+      .ghost-mark {
+        position: absolute;
+        color: #78c9b6;
+        font-family: "Anton", sans-serif;
+        font-size: 360px;
+        line-height: 1;
+        opacity: 0.16;
+        text-transform: uppercase;
+      }
+
+      .release-ticket {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 16px;
+        border: 3px solid #171817;
+        background: #fff9ee;
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      #paper-grain {
+        position: absolute;
+        inset: 0;
+        z-index: 800;
+        pointer-events: none;
+        opacity: 0.055;
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 220 220' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E");
+        mix-blend-mode: multiply;
+      }
+
+      /* Scene 1 */
+      #s1-ghost {
+        right: -46px;
+        bottom: -102px;
+      }
+
+      #s1-reg-a {
+        top: 150px;
+        left: 40px;
+      }
+
+      #s1-reg-b {
+        right: 54px;
+        bottom: 58px;
+      }
+
+      .s1-layout {
+        display: grid;
+        grid-template-columns: 1.04fr 0.96fr;
+        flex: 1;
+        gap: 70px;
+        align-items: center;
+      }
+
+      .s1-copy {
+        position: relative;
+        z-index: 4;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 18px;
+      }
+
+      .s1-copy .line-a,
+      .s1-copy .line-b,
+      .s1-copy .line-c {
+        display: block;
+      }
+
+      .s1-copy .line-a {
+        font-size: 118px;
+      }
+
+      .s1-copy .line-b {
+        color: #78c9b6;
+        font-size: 174px;
+        -webkit-text-stroke: 4px #171817;
+        paint-order: stroke fill;
+      }
+
+      .s1-copy .line-c {
+        font-size: 130px;
+      }
+
+      #s1-grid {
+        position: relative;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        grid-template-rows: repeat(2, 1fr);
+        width: 760px;
+        height: 640px;
+        gap: 18px;
+        padding: 34px;
+        border: 5px solid #171817;
+        background: #78c9b6;
+        box-shadow: 18px 20px 0 #171817;
+        transform: rotate(1.2deg);
+      }
+
+      #s1-grid .cell {
+        display: flex;
+        align-items: flex-end;
+        justify-content: flex-start;
+        padding: 18px;
+        border: 4px solid #171817;
+        background: #fff9ee;
+        font-size: 25px;
+        font-weight: 700;
+      }
+
+      #s1-route {
+        position: absolute;
+        right: 242px;
+        bottom: 100px;
+        width: 450px;
+        height: 18px;
+        border: 4px solid #171817;
+        background: #e2c94c;
+        transform-origin: left center;
+      }
+
+      /* Scene 2 */
+      .s2-layout {
+        display: grid;
+        grid-template-columns: 1.42fr 0.58fr;
+        flex: 1;
+        gap: 44px;
+        align-items: stretch;
+      }
+
+      #s2-proof {
+        position: relative;
+        align-self: center;
+        width: 1190px;
+        height: 730px;
+        overflow: hidden;
+        border: 6px solid #171817;
+        background: #171817;
+        box-shadow: 18px 20px 0 #78c9b6;
+      }
+
+      #s2-proof video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        transform-origin: center center;
+      }
+
+      #s2-proof-label {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        z-index: 3;
+      }
+
+      #s2-selector {
+        position: absolute;
+        right: 32px;
+        bottom: 30px;
+        z-index: 3;
+        display: flex;
+        gap: 8px;
+      }
+
+      #s2-selector span {
+        width: 27px;
+        height: 27px;
+        border: 3px solid #171817;
+        background: #e2c94c;
+      }
+
+      .s2-side {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 20px;
+      }
+
+      #s2-title {
+        font-size: 116px;
+      }
+
+      #s2-100 {
+        align-self: flex-start;
+        padding: 16px 24px 12px;
+        border: 5px solid #171817;
+        background: #e2c94c;
+        font-family: "Anton", sans-serif;
+        font-size: 174px;
+        line-height: 0.86;
+        box-shadow: 12px 13px 0 #171817;
+      }
+
+      #s2-100 small {
+        display: block;
+        margin-top: 12px;
+        font-family: "Geist Mono", monospace;
+        font-size: 24px;
+        line-height: 1.1;
+        letter-spacing: 0.05em;
+      }
+
+      #s2-routing {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      #s2-routing span {
+        padding: 9px 13px;
+        border: 3px solid #171817;
+        background: #fff9ee;
+        font-size: 23px;
+        font-weight: 700;
+      }
+
+      #s2-worktrees {
+        position: absolute;
+        right: 78px;
+        bottom: 44px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 13px 18px;
+        border: 3px solid #171817;
+        background: #78c9b6;
+        font-size: 22px;
+        font-weight: 700;
+        box-shadow: 8px 9px 0 #171817;
+      }
+
+      /* Scene 3 */
+      .s3-layout {
+        display: grid;
+        grid-template-columns: 0.92fr 1.08fr;
+        flex: 1;
+        gap: 60px;
+        align-items: center;
+      }
+
+      #s3-tabs {
+        position: relative;
+        width: 760px;
+        height: 650px;
+      }
+
+      .grid-sheet {
+        position: absolute;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        grid-template-rows: repeat(2, 1fr);
+        width: 630px;
+        height: 470px;
+        gap: 12px;
+        padding: 56px 24px 24px;
+        border: 4px solid #171817;
+        background: #fff9ee;
+        box-shadow: 12px 14px 0 #2b2c2a;
+      }
+
+      .grid-sheet:nth-child(1) {
+        top: 112px;
+        left: 80px;
+        transform: rotate(-4deg);
+      }
+
+      .grid-sheet:nth-child(2) {
+        top: 68px;
+        left: 46px;
+        transform: rotate(2.6deg);
+      }
+
+      .grid-sheet:nth-child(3) {
+        top: 28px;
+        left: 12px;
+        transform: rotate(-0.8deg);
+      }
+
+      .grid-sheet .sheet-tab {
+        position: absolute;
+        top: -38px;
+        left: 24px;
+        padding: 9px 20px;
+        border: 4px solid #171817;
+        background: #e2c94c;
+        font-size: 24px;
+        font-weight: 700;
+      }
+
+      .grid-sheet:nth-child(3) .sheet-tab {
+        background: #78c9b6;
+      }
+
+      .grid-sheet .mini-pane {
+        border: 3px solid #171817;
+        background: #f3ede1;
+      }
+
+      #s3-map {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        gap: 22px;
+      }
+
+      #s3-title {
+        font-size: 118px;
+      }
+
+      #s3-resizer {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        grid-template-rows: repeat(3, 1fr);
+        width: 830px;
+        height: 450px;
+        gap: 12px;
+        padding: 24px;
+        border: 5px solid #171817;
+        background: #78c9b6;
+        box-shadow: 16px 18px 0 #171817;
+      }
+
+      #s3-resizer .resize-cell {
+        position: relative;
+        display: flex;
+        align-items: flex-end;
+        padding: 13px;
+        border: 3px solid #171817;
+        background: #fff9ee;
+        font-size: 20px;
+        font-weight: 700;
+      }
+
+      #s3-resizer .removed {
+        background: #e2c94c;
+      }
+
+      #s3-zoom-pane {
+        position: absolute;
+        right: 34px;
+        bottom: 34px;
+        z-index: 4;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 525px;
+        height: 270px;
+        border: 5px solid #171817;
+        background: #171817;
+        color: #fff9ee;
+        font-size: 34px;
+        font-weight: 700;
+        box-shadow: 12px 13px 0 #e2c94c;
+      }
+
+      #s3-controls {
+        display: flex;
+        gap: 14px;
+      }
+
+      /* Scene 4 */
+      .s4-layout {
+        display: grid;
+        grid-template-columns: 1.18fr 0.82fr;
+        flex: 1;
+        gap: 54px;
+        align-items: end;
+      }
+
+      #s4-title {
+        max-width: 850px;
+        font-size: 120px;
+      }
+
+      #s4-contact {
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr;
+        grid-template-rows: 1fr 0.78fr;
+        width: 1030px;
+        height: 660px;
+        gap: 18px;
+      }
+
+      .activity-pane {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: 56px 26px 24px;
+        border: 4px solid #171817;
+        background: #fff9ee;
+        box-shadow: 9px 10px 0 #2b2c2a;
+      }
+
+      .activity-pane:nth-child(1) {
+        grid-row: span 2;
+      }
+
+      .activity-pane .summary {
+        position: absolute;
+        top: -4px;
+        left: -4px;
+        right: -4px;
+        min-height: 50px;
+        padding: 10px 16px;
+        border: 4px solid #171817;
+        background: #78c9b6;
+        font-size: 22px;
+        font-weight: 700;
+      }
+
+      .activity-pane .terminal-lines {
+        color: #2b2c2a;
+        font-size: 22px;
+        line-height: 1.48;
+      }
+
+      .activity-pane .terminal-lines span,
+      #s6-custom span,
+      #s8-context span {
+        display: block;
+      }
+
+      .activity-pane .pane-foot {
+        font-size: 20px;
+        font-weight: 700;
+      }
+
+      #s4-scroll {
+        position: absolute;
+        left: 920px;
+        bottom: 118px;
+        width: 30px;
+        height: 470px;
+        border: 3px solid #171817;
+        background: #e2c94c;
+      }
+
+      #s4-scroll-thumb {
+        position: absolute;
+        top: 30px;
+        left: 5px;
+        width: 14px;
+        height: 110px;
+        background: #171817;
+      }
+
+      #s4-side {
+        position: relative;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        gap: 22px;
+        height: 710px;
+      }
+
+      #s4-receipt {
+        padding: 26px;
+        transform: rotate(1.5deg);
+      }
+
+      #s4-receipt h3 {
+        margin: 0 0 18px;
+        font-family: "Anton", sans-serif;
+        font-size: 68px;
+        font-weight: 400;
+        line-height: 0.92;
+        text-transform: uppercase;
+      }
+
+      #s4-receipt ul {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        font-size: 24px;
+        line-height: 1.7;
+      }
+
+      #s4-badges {
+        display: flex;
+        gap: 16px;
+      }
+
+      #s4-badges .done {
+        background: #78c9b6;
+      }
+
+      /* Scene 5 */
+      #s5-title {
+        max-width: 1110px;
+        font-size: 122px;
+      }
+
+      #s5-command {
+        display: flex;
+        align-items: center;
+        width: 100%;
+        min-height: 128px;
+        margin-top: 24px;
+        padding: 22px 30px;
+        border: 5px solid #171817;
+        background: #171817;
+        color: #fff9ee;
+        font-size: 34px;
+        box-shadow: 15px 17px 0 #78c9b6;
+        transform-origin: left center;
+      }
+
+      #s5-command .prompt {
+        margin-right: 18px;
+        color: #e2c94c;
+        font-size: 44px;
+        font-weight: 700;
+      }
+
+      #s5-voice {
+        display: grid;
+        grid-template-columns: 410px 1fr 310px;
+        align-items: center;
+        gap: 26px;
+        margin-top: 42px;
+      }
+
+      #s5-wave {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 210px;
+        gap: 10px;
+        border: 4px solid #171817;
+        background: #78c9b6;
+        box-shadow: 10px 11px 0 #171817;
+      }
+
+      #s5-wave span {
+        width: 14px;
+        height: 100px;
+        background: #171817;
+        transform-origin: center center;
+      }
+
+      #s5-transcript {
+        min-height: 210px;
+        padding: 28px 30px;
+        font-size: 34px;
+        line-height: 1.25;
+      }
+
+      #s5-not-entered {
+        align-self: stretch;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 4px solid #171817;
+        background: #e2c94c;
+        font-family: "Anton", sans-serif;
+        font-size: 48px;
+        line-height: 0.94;
+        text-align: center;
+        text-transform: uppercase;
+        transform: rotate(-1.2deg);
+        box-shadow: 9px 10px 0 #171817;
+      }
+
+      #s5-tools {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        margin-top: 40px;
+      }
+
+      #s5-tools .tool {
+        padding: 11px 16px;
+        border: 3px solid #171817;
+        background: #fff9ee;
+        font-size: 22px;
+        font-weight: 700;
+        box-shadow: 6px 7px 0 #2b2c2a;
+      }
+
+      #s5-tools .sleep {
+        color: #fff9ee;
+        background: #2b2c2a;
+      }
+
+      /* Scene 6 */
+      #s6-title {
+        max-width: 1350px;
+        font-size: 116px;
+      }
+
+      .s6-layout {
+        display: grid;
+        grid-template-columns: 1.02fr 0.98fr;
+        flex: 1;
+        gap: 50px;
+        align-items: center;
+      }
+
+      #s6-profiles {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .profile-strip {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 52px;
+        padding: 10px 16px;
+        border: 3px solid #171817;
+        background: #fff9ee;
+        font-size: 23px;
+        font-weight: 700;
+        box-shadow: 6px 7px 0 #2b2c2a;
+      }
+
+      .profile-strip:nth-child(2),
+      .profile-strip:nth-child(5),
+      .profile-strip:nth-child(8) {
+        width: 88%;
+        margin-left: 7%;
+        background: #78c9b6;
+      }
+
+      .profile-strip:nth-child(3),
+      .profile-strip:nth-child(6),
+      .profile-strip:nth-child(9) {
+        width: 80%;
+        margin-left: 15%;
+      }
+
+      #s6-custom {
+        margin-top: 12px;
+        padding: 18px 20px;
+        border: 4px solid #171817;
+        background: #171817;
+        color: #fff9ee;
+        font-size: 21px;
+        line-height: 1.5;
+        box-shadow: 9px 10px 0 #e2c94c;
+      }
+
+      #s6-auth {
+        position: relative;
+        height: 650px;
+        padding: 28px;
+      }
+
+      #s6-auth h3 {
+        margin: 0;
+        font-family: "Anton", sans-serif;
+        font-size: 72px;
+        font-weight: 400;
+        line-height: 0.9;
+        text-transform: uppercase;
+      }
+
+      .auth-pane {
+        position: absolute;
+        left: 46px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 360px;
+        padding: 18px;
+        border: 4px solid #171817;
+        background: #f3ede1;
+        font-size: 22px;
+        font-weight: 700;
+      }
+
+      #auth-pane-2 {
+        top: 190px;
+      }
+
+      #auth-pane-5 {
+        top: 390px;
+      }
+
+      .auth-receipt {
+        position: absolute;
+        right: 46px;
+        width: 330px;
+        padding: 18px;
+        border: 4px solid #171817;
+        background: #78c9b6;
+        font-size: 22px;
+        font-weight: 700;
+        box-shadow: 8px 9px 0 #171817;
+      }
+
+      .auth-receipt span {
+        display: block;
+      }
+
+      #auth-receipt-a {
+        top: 170px;
+      }
+
+      #auth-receipt-b {
+        top: 370px;
+        background: #e2c94c;
+      }
+
+      .auth-route {
+        position: absolute;
+        left: 405px;
+        width: 190px;
+        height: 12px;
+        border: 3px solid #171817;
+        background: #78c9b6;
+        transform-origin: left center;
+      }
+
+      #auth-route-a {
+        top: 230px;
+      }
+
+      #auth-route-b {
+        top: 430px;
+        background: #e2c94c;
+      }
+
+      #s6-usage {
+        position: absolute;
+        left: 48px;
+        right: 48px;
+        bottom: 38px;
+        display: grid;
+        grid-template-columns: 180px 1fr 110px;
+        align-items: center;
+        gap: 14px;
+        font-size: 21px;
+        font-weight: 700;
+      }
+
+      #s6-usage .meter {
+        height: 28px;
+        border: 3px solid #171817;
+        background: #fff9ee;
+      }
+
+      #s6-usage .meter span {
+        display: block;
+        width: 64%;
+        height: 100%;
+        background: #78c9b6;
+        transform-origin: left center;
+      }
+
+      /* Scene 7 */
+      #s7-title {
+        max-width: 1240px;
+        font-size: 124px;
+      }
+
+      #s7-goal {
+        position: absolute;
+        top: 96px;
+        right: 92px;
+        width: 520px;
+        padding: 22px 26px;
+        transform: rotate(1.4deg);
+      }
+
+      #s7-goal .goal-label {
+        display: block;
+        margin-bottom: 9px;
+        font-size: 21px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+      }
+
+      #s7-goal strong {
+        display: block;
+        font-size: 30px;
+        line-height: 1.25;
+      }
+
+      #s7-board {
+        position: relative;
+        height: 650px;
+        margin-top: 12px;
+        border: 5px solid #171817;
+        background: #fff9ee;
+        box-shadow: 16px 18px 0 #171817;
+      }
+
+      .dispatch-pane {
+        position: absolute;
+        z-index: 3;
+        width: 230px;
+        min-height: 130px;
+        padding: 18px;
+        border: 4px solid #171817;
+        background: #f3ede1;
+        font-size: 20px;
+        font-weight: 700;
+      }
+
+      .dispatch-pane strong {
+        display: block;
+        margin-bottom: 12px;
+        font-size: 24px;
+      }
+
+      .dispatch-pane.targeted {
+        background: #78c9b6;
+        box-shadow: 8px 9px 0 #171817;
+      }
+
+      .dispatch-pane.sleeping {
+        color: #fff9ee;
+        background: #2b2c2a;
+      }
+
+      #dispatch-1 { left: 70px; top: 90px; }
+      #dispatch-2 { left: 350px; top: 58px; }
+      #dispatch-3 { left: 630px; top: 90px; }
+      #dispatch-4 { left: 210px; bottom: 86px; }
+      #dispatch-5 { left: 500px; bottom: 60px; }
+      #dispatch-6 { left: 790px; bottom: 86px; }
+
+      #s7-scan {
+        position: absolute;
+        left: 54px;
+        top: 315px;
+        z-index: 2;
+        width: 1020px;
+        height: 18px;
+        border: 4px solid #171817;
+        background: #e2c94c;
+        transform-origin: left center;
+      }
+
+      #s7-api {
+        position: absolute;
+        top: 48px;
+        right: 42px;
+        width: 540px;
+        height: 550px;
+        padding: 28px;
+        border: 4px solid #171817;
+        background: #171817;
+        color: #fff9ee;
+        box-shadow: 11px 12px 0 #78c9b6;
+      }
+
+      #s7-api h3 {
+        margin: 0 0 22px;
+        font-family: "Anton", sans-serif;
+        font-size: 70px;
+        font-weight: 400;
+        line-height: 0.9;
+        text-transform: uppercase;
+      }
+
+      .api-tool {
+        margin: 14px 0;
+        padding: 15px 16px;
+        border: 3px solid #fff9ee;
+        color: #171817;
+        background: #78c9b6;
+        font-size: 23px;
+        font-weight: 700;
+      }
+
+      .api-tool:nth-of-type(2) {
+        background: #e2c94c;
+      }
+
+      #s7-status {
+        margin-top: 22px;
+        padding: 13px;
+        border: 3px solid #fff9ee;
+        font-size: 21px;
+      }
+
+      /* Scene 8 */
+      #s8-title {
+        max-width: 1080px;
+        font-size: 122px;
+      }
+
+      .s8-layout {
+        display: grid;
+        grid-template-columns: 0.88fr 1.12fr;
+        flex: 1;
+        gap: 54px;
+        align-items: center;
+      }
+
+      #s8-envelope {
+        position: relative;
+        width: 700px;
+        height: 500px;
+        border: 5px solid #171817;
+        background: #e2c94c;
+        box-shadow: 16px 18px 0 #171817;
+      }
+
+      #s8-envelope::before,
+      #s8-envelope::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        width: 100%;
+        height: 50%;
+        border-bottom: 5px solid #171817;
+        background: #fff9ee;
+        transform-origin: center bottom;
+      }
+
+      #s8-envelope::before {
+        top: 0;
+        clip-path: polygon(0 0, 100% 0, 50% 100%);
+      }
+
+      #s8-envelope::after {
+        bottom: 0;
+        clip-path: polygon(0 100%, 100% 100%, 50% 0);
+      }
+
+      #s8-grid {
+        position: absolute;
+        top: 78px;
+        left: 74px;
+        z-index: 3;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        grid-template-rows: repeat(2, 1fr);
+        width: 550px;
+        height: 330px;
+        gap: 10px;
+        padding: 18px;
+        border: 4px solid #171817;
+        background: #78c9b6;
+      }
+
+      #s8-grid span {
+        border: 3px solid #171817;
+        background: #fff9ee;
+      }
+
+      #s8-context {
+        position: absolute;
+        right: -52px;
+        bottom: -70px;
+        z-index: 4;
+        width: 430px;
+        padding: 20px;
+        transform: rotate(1.4deg);
+        font-size: 21px;
+        line-height: 1.45;
+      }
+
+      #s8-lanes {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+
+      .lane-set {
+        padding: 24px;
+      }
+
+      .lane-set h3 {
+        margin: 0 0 18px;
+        font-family: "Anton", sans-serif;
+        font-size: 62px;
+        font-weight: 400;
+        line-height: 0.9;
+        text-transform: uppercase;
+      }
+
+      .lane {
+        display: grid;
+        grid-template-columns: 150px 1fr 80px;
+        align-items: center;
+        gap: 12px;
+        margin: 11px 0;
+        font-size: 20px;
+        font-weight: 700;
+      }
+
+      .lane .track {
+        height: 18px;
+        border: 3px solid #171817;
+        background: #78c9b6;
+        transform-origin: left center;
+      }
+
+      .lane-set.sqlite .track {
+        background: #e2c94c;
+      }
+
+      #s8-command {
+        align-self: flex-start;
+        font-size: 28px;
+      }
+
+      /* Scene 9 */
+      #s9-title {
+        max-width: 990px;
+        font-size: 138px;
+      }
+
+      #s9-platforms {
+        position: absolute;
+        top: 92px;
+        right: 82px;
+        width: 760px;
+        height: 500px;
+      }
+
+      .platform-sheet {
+        position: absolute;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        width: 300px;
+        height: 390px;
+        padding: 28px;
+        border: 5px solid #171817;
+        background: #fff9ee;
+        box-shadow: 12px 13px 0 #171817;
+      }
+
+      .platform-sheet strong {
+        font-family: "Anton", sans-serif;
+        font-size: 64px;
+        font-weight: 400;
+        line-height: 0.9;
+        text-transform: uppercase;
+      }
+
+      .platform-sheet span {
+        font-size: 22px;
+        font-weight: 700;
+      }
+
+      #platform-windows {
+        left: 0;
+        top: 66px;
+        transform: rotate(-4deg);
+      }
+
+      #platform-linux {
+        left: 220px;
+        top: 18px;
+        z-index: 2;
+        background: #78c9b6;
+        transform: rotate(1.8deg);
+      }
+
+      #platform-macos {
+        right: 0;
+        top: 62px;
+        transform: rotate(4deg);
+      }
+
+      #s9-package {
+        position: absolute;
+        top: 420px;
+        right: 140px;
+        z-index: 5;
+        width: 640px;
+        padding: 18px 24px;
+        border: 5px solid #171817;
+        background: #e2c94c;
+        font-size: 27px;
+        font-weight: 700;
+        text-align: center;
+        box-shadow: 10px 11px 0 #171817;
+      }
+
+      #s9-product {
+        position: absolute;
+        right: 88px;
+        bottom: 64px;
+        width: 710px;
+        height: 400px;
+        overflow: hidden;
+        border: 5px solid #171817;
+        background: #171817;
+        box-shadow: 14px 16px 0 #78c9b6;
+      }
+
+      #s9-product img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      #s9-command {
+        position: absolute;
+        left: 82px;
+        bottom: 230px;
+        width: 890px;
+        padding: 24px 28px;
+        border: 5px solid #171817;
+        background: #171817;
+        color: #fff9ee;
+        font-size: 34px;
+        box-shadow: 15px 17px 0 #e2c94c;
+        transform-origin: left center;
+      }
+
+      #s9-command span {
+        margin-right: 16px;
+        color: #e2c94c;
+        font-weight: 700;
+      }
+
+      #s9-receipt {
+        position: absolute;
+        left: 82px;
+        bottom: 108px;
+        display: flex;
+        align-items: center;
+        gap: 22px;
+      }
+
+      #s9-url {
+        font-size: 25px;
+        font-weight: 700;
+      }
+
+      /* Transitions */
+      #paper-wipe-a,
+      #paper-wipe-b {
+        position: absolute;
+        inset: 0;
+        z-index: 900;
+        width: 1920px;
+        height: 1080px;
+        border: 5px solid #171817;
+        opacity: 0;
+      }
+
+      #final-dip {
+        position: absolute;
+        inset: 0;
+        z-index: 950;
+        background: #171817;
+        opacity: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="main"
+      data-composition-id="main"
+      data-width="1920"
+      data-height="1080"
+      data-start="0"
+      data-duration="96"
+    >
+      <section id="scene-1" class="scene" data-layout-allow-overflow>
+        <div class="scene-content">
+          <div id="s1-meta" class="meta-row mono">
+            <span>GridBash / field manual</span>
+            <span class="rule"></span>
+            <span class="release-ticket">Current product / 0.2</span>
+          </div>
+          <div class="s1-layout">
+            <div class="s1-copy">
+              <span id="s1-tab" class="tab">09 chapters / the whole product</span>
+              <h1 class="display">
+                <span id="s1-line-a" class="line-a">The grid</span>
+                <span id="s1-line-b" class="line-b">was only</span>
+                <span id="s1-line-c" class="line-c">the beginning.</span>
+              </h1>
+            </div>
+            <div id="s1-grid" aria-label="Six-pane GridBash stencil">
+              <div class="cell mono">01 / PLAN</div><div class="cell mono">02 / BUILD</div><div class="cell mono">03 / TEST</div>
+              <div class="cell mono">04 / REVIEW</div><div class="cell mono">05 / FIX</div><div class="cell mono">06 / SHIP</div>
+            </div>
+          </div>
+        </div>
+        <div id="s1-ghost" class="ghost-mark" data-layout-ignore>0.2</div>
+        <div id="s1-reg-a" class="reg-cross" data-layout-ignore></div>
+        <div id="s1-reg-b" class="reg-cross" data-layout-ignore></div>
+        <div id="s1-route" data-layout-ignore></div>
+      </section>
+
+      <section id="scene-2" class="scene" data-layout-allow-overflow>
+        <div class="scene-content">
+          <div id="s2-meta" class="meta-row mono"><span>Chapter 01 / the core</span><span class="rule"></span><span>Real product proof</span></div>
+          <div class="s2-layout">
+            <div id="s2-proof">
+              <video id="product-demo" class="clip" data-start="6" data-duration="10" data-media-start="7" data-track-index="1" src="assets/product-demo.mp4" muted playsinline></video>
+              <div id="s2-proof-label" class="tab mint-tab mono">Real PTY / six live sessions</div>
+              <div id="s2-selector"><span></span><span></span><span></span><span></span></div>
+            </div>
+            <div class="s2-side">
+              <h2 id="s2-title" class="display">Real terminals. Deliberate routing.</h2>
+              <div id="s2-100">100<small>panes / auto-arranged</small></div>
+              <div id="s2-routing" class="mono"><span>FOCUS ONE</span><span>SELECT SOME</span><span>ROUTE TO ALL</span></div>
+            </div>
+          </div>
+        </div>
+        <div id="s2-worktrees" class="mono"><span>MANAGED WORKTREES</span><span>ONE CHECKOUT / PANE</span></div>
+      </section>
+
+      <section id="scene-3" class="scene" data-layout-allow-overflow>
+        <div class="scene-content">
+          <div id="s3-meta" class="meta-row mono"><span>Chapter 02 / workspace</span><span class="rule"></span><span>Tabs · resize · zoom · swap</span></div>
+          <div class="s3-layout">
+            <div id="s3-tabs">
+              <div class="grid-sheet"><span class="sheet-tab mono">REVIEW</span><div class="mini-pane"></div><div class="mini-pane"></div><div class="mini-pane"></div><div class="mini-pane"></div><div class="mini-pane"></div><div class="mini-pane"></div></div>
+              <div class="grid-sheet"><span class="sheet-tab mono">TESTS</span><div class="mini-pane"></div><div class="mini-pane"></div><div class="mini-pane"></div><div class="mini-pane"></div><div class="mini-pane"></div><div class="mini-pane"></div></div>
+              <div class="grid-sheet"><span class="sheet-tab mono">FEATURE</span><div class="mini-pane"></div><div class="mini-pane"></div><div class="mini-pane"></div><div class="mini-pane"></div><div class="mini-pane"></div><div class="mini-pane"></div></div>
+            </div>
+            <div id="s3-map">
+              <h2 id="s3-title" class="display">Tab it. Resize it. Zoom in.</h2>
+              <div id="s3-resizer">
+                <div class="resize-cell">plan ready</div><div class="resize-cell">tests running</div><div class="resize-cell removed">fold away</div>
+                <div class="resize-cell">reviewing diff</div><div class="resize-cell">fix complete</div><div class="resize-cell removed">fold away</div>
+                <div class="resize-cell">docs updated</div><div class="resize-cell">release ready</div><div class="resize-cell removed">fold away</div>
+                <div id="s3-zoom-pane">FOCUSED PANE / FULL GRID AREA</div>
+              </div>
+              <div id="s3-controls"><span class="tab mono">ALT+N / ALT+T</span><span class="tab mint-tab mono">ALT+L</span><span class="tab mono">ALT+F</span><span class="tab mint-tab mono">ALT+X</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="scene-4" class="scene" data-layout-allow-overflow>
+        <div class="scene-content">
+          <div id="s4-meta" class="meta-row mono"><span>Chapter 03 / awareness</span><span class="rule"></span><span>Know where the work is</span></div>
+          <div class="s4-layout">
+            <div>
+              <h2 id="s4-title" class="display">Stop re-reading terminals.</h2>
+              <div id="s4-contact">
+                <div class="activity-pane"><div class="summary">Implementing zoom behavior</div><div class="terminal-lines"><span>editing src/app.rs</span><span>checking focus state</span><span>updating tests</span><span>waiting for review</span></div><div class="pane-foot">PANE 01 / ACTIVE</div></div>
+                <div class="activity-pane"><div class="summary">Review complete</div><div class="terminal-lines"><span>diff inspected</span><span>no blockers found</span></div><div class="pane-foot">PANE 02 / QUIET</div></div>
+                <div class="activity-pane"><div class="summary">Running targeted tests</div><div class="terminal-lines"><span>launcher suite</span><span>12 passing</span></div><div class="pane-foot">PANE 03 / DONE</div></div>
+              </div>
+            </div>
+            <div id="s4-side">
+              <div id="s4-receipt" class="paper-card">
+                <h3>Previous panes</h3>
+                <ul class="mono"><li>01 · feature work</li><li>02 · review notes</li><li>03 · test output</li><li>04 · release prep</li></ul>
+              </div>
+              <div id="s4-badges"><span class="tab mono">QUIET</span><span class="tab done mono">DONE</span><span class="tab mono">ALT+P</span></div>
+              <p id="s4-copy" class="support-copy">Pane-local scrollback, contained mouse copy, wrapped focus, and history that stays attached to the pane.</p>
+            </div>
+          </div>
+        </div>
+        <div id="s4-scroll" data-layout-ignore><span id="s4-scroll-thumb"></span></div>
+      </section>
+
+      <section id="scene-5" class="scene" data-layout-allow-overflow>
+        <div class="scene-content">
+          <div id="s5-meta" class="meta-row mono"><span>Chapter 04 / direct control</span><span class="rule"></span><span>Never leave the grid</span></div>
+          <h2 id="s5-title" class="display">Type it. Say it. Fix the pane.</h2>
+          <div id="s5-command" class="mono"><span class="prompt">$</span><span>Run the fastest relevant checks, then summarize the risk.</span></div>
+          <div id="s5-voice">
+            <div id="s5-wave" aria-label="Voice dictation waveform"><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+            <div id="s5-transcript" class="paper-card mono">Dictated text lands in the target. Review it before submission.</div>
+            <div id="s5-not-entered">Enter not pressed</div>
+          </div>
+          <div id="s5-tools" class="mono"><span class="tool">ALT+C COMMAND</span><span class="tool">ALT+SHIFT+V VOICE</span><span class="tool">RENAME</span><span class="tool">SWAP</span><span class="tool sleep">SLEEP / WAKE</span><span class="tool">RESTART</span><span class="tool">DRAG COPY</span><span class="tool">IMAGE PASTE</span></div>
+        </div>
+      </section>
+
+      <section id="scene-6" class="scene" data-layout-allow-overflow>
+        <div class="scene-content">
+          <div id="s6-meta" class="meta-row mono"><span>Chapter 05 / profiles</span><span class="rule"></span><span>Bring the right agent and account</span></div>
+          <h2 id="s6-title" class="display">Your agents. Your profiles. Per pane.</h2>
+          <div class="s6-layout">
+            <div>
+              <div id="s6-profiles" class="mono">
+                <div class="profile-strip"><span>CODEX</span><span>READY</span></div><div class="profile-strip"><span>CLAUDE</span><span>READY</span></div><div class="profile-strip"><span>GEMINI</span><span>READY</span></div>
+                <div class="profile-strip"><span>OPENCODE</span><span>READY</span></div><div class="profile-strip"><span>AIDER</span><span>READY</span></div><div class="profile-strip"><span>AMP</span><span>READY</span></div>
+                <div class="profile-strip"><span>GOOSE</span><span>READY</span></div><div class="profile-strip"><span>COPILOT</span><span>READY</span></div><div class="profile-strip"><span>CURSOR</span><span>READY</span></div>
+              </div>
+              <div id="s6-custom" class="mono"><span>[profiles.review]</span><span>command = "codex"</span><span>args = ["--model", "review"]</span></div>
+            </div>
+            <div id="s6-auth" class="paper-card">
+              <h3>Auth routes</h3>
+              <div id="auth-pane-2" class="auth-pane mono"><span>PANE 02</span><span>CODEX</span></div>
+              <div id="auth-pane-5" class="auth-pane mono"><span>PANE 05</span><span>CLAUDE</span></div>
+              <div id="auth-route-a" class="auth-route"></div><div id="auth-route-b" class="auth-route"></div>
+              <div id="auth-receipt-a" class="auth-receipt mono"><span>codex-2</span><span>account masked</span></div>
+              <div id="auth-receipt-b" class="auth-receipt mono"><span>claude-1</span><span>account masked</span></div>
+              <div id="s6-usage" class="mono"><span>USAGE / REFRESH</span><div class="meter"><span></span></div><span>64%</span></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="scene-7" class="scene" data-layout-allow-overflow>
+        <div class="scene-content">
+          <div id="s7-meta" class="meta-row mono"><span>Chapter 06 / orchestration</span><span class="rule"></span><span>Coordinate, then target</span></div>
+          <h2 id="s7-title" class="display">One goal. Targeted follow-ups.</h2>
+          <div id="s7-board">
+            <div id="dispatch-1" class="dispatch-pane targeted"><strong>PANE 01</strong>Implement the scoped change.</div>
+            <div id="dispatch-2" class="dispatch-pane"><strong>PANE 02</strong>Review the API boundary.</div>
+            <div id="dispatch-3" class="dispatch-pane targeted"><strong>PANE 03</strong>Run focused checks.</div>
+            <div id="dispatch-4" class="dispatch-pane sleeping"><strong>PANE 04</strong>Sleeping / skipped.</div>
+            <div id="dispatch-5" class="dispatch-pane"><strong>PANE 05</strong>Prepare release notes.</div>
+            <div id="dispatch-6" class="dispatch-pane targeted"><strong>PANE 06</strong>Fix the reported failure.</div>
+            <div id="s7-scan"></div>
+            <div id="s7-api">
+              <h3>Local agent API</h3>
+              <div class="api-tool mono">gridbash_get_state</div><div class="api-tool mono">gridbash_send_command</div><div class="api-tool mono">gridbash_set_status</div>
+              <div id="s7-status" class="mono">STATUS / focused tests passing</div>
+            </div>
+          </div>
+        </div>
+        <div id="s7-goal" class="paper-card"><span class="goal-label mono">ALT+G / MANAGER GOAL</span><strong>Ship the feature safely across the panes that can help.</strong></div>
+      </section>
+
+      <section id="scene-8" class="scene" data-layout-allow-overflow>
+        <div class="scene-content">
+          <div id="s8-meta" class="meta-row mono"><span>Chapter 07 / resilience</span><span class="rule"></span><span>Return without collisions</span></div>
+          <h2 id="s8-title" class="display">Resume the work. Keep state apart.</h2>
+          <div class="s8-layout">
+            <div id="s8-envelope">
+              <div id="s8-grid"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+              <div id="s8-context" class="paper-card mono"><span>RESTORED: layout, profiles, working folders, auth assignments, and bounded recent context.</span><strong>No command replay.</strong></div>
+            </div>
+            <div id="s8-lanes">
+              <div id="s8-worktrees" class="lane-set paper-card"><h3>Worktree lanes</h3><div class="lane mono"><span>PANE 01</span><span class="track"></span><span>LOCKED</span></div><div class="lane mono"><span>PANE 02</span><span class="track"></span><span>LOCKED</span></div><div class="lane mono"><span>PANE 03</span><span class="track"></span><span>LOCKED</span></div></div>
+              <div id="s8-sqlite" class="lane-set sqlite paper-card"><h3>Codex SQLite lanes</h3><div class="lane mono"><span>CODEX 01</span><span class="track"></span><span>LEASED</span></div><div class="lane mono"><span>CODEX 02</span><span class="track"></span><span>LEASED</span></div><div class="lane mono"><span>CODEX 03</span><span class="track"></span><span>LEASED</span></div></div>
+              <div id="s8-command" class="tab mint-tab mono">$ GRIDBASH RESUME</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="scene-9" class="scene" data-layout-allow-overflow>
+        <div class="scene-content">
+          <div id="s9-meta" class="meta-row mono"><span>Chapter 08 / install</span><span class="rule"></span><span>GridBash 0.2</span></div>
+          <h2 id="s9-title" class="display">Run the whole squad.</h2>
+        </div>
+        <div id="s9-platforms">
+          <div id="platform-windows" class="platform-sheet"><strong>Windows</strong><span class="mono">x64 native package</span></div>
+          <div id="platform-linux" class="platform-sheet"><strong>Linux</strong><span class="mono">x64 + arm64 native packages</span></div>
+          <div id="platform-macos" class="platform-sheet"><strong>macOS</strong><span class="mono">arm64 + x64 native packages</span></div>
+        </div>
+        <div id="s9-package" class="mono">ONE PLATFORM-NEUTRAL NPM LAUNCHER</div>
+        <div id="s9-product"><img src="assets/product-demo-poster.png" alt="Real six-pane GridBash product view" /></div>
+        <div id="s9-command" class="mono"><span>$</span>npm install -g gridbash</div>
+        <div id="s9-receipt"><span class="tab mint-tab mono">OPEN SOURCE / MIT</span><span id="s9-url" class="mono">github.com/jasonsuhari/gridbash</span></div>
+      </section>
+
+      <audio id="soundtrack" class="clip" data-start="0" data-duration="96" data-track-index="20" src="assets/feature-launch-bed.wav" data-volume="1"></audio>
+      <div id="paper-wipe-a"></div><div id="paper-wipe-b"></div><div id="final-dip"></div><div id="paper-grain" data-layout-ignore></div>
+    </div>
+
+    <script src="assets/gsap.min.js"></script>
+    <script>
+      window.__timelines = window.__timelines || {};
+      var tl = gsap.timeline({ paused: true });
+
+      function enter(selector, fromVars, toVars, at) {
+        tl.set(selector, fromVars, 0);
+        tl.fromTo(selector, fromVars, Object.assign({ immediateRender: false }, toVars), at);
+      }
+
+      function paperCover(oldSelector, newSelector, at, direction, leadColor) {
+        var fromX = direction === "left" ? 1920 : -1920;
+        var toX = -fromX;
+        tl.set("#paper-wipe-a", { x: fromX, opacity: 1, backgroundColor: leadColor }, at - 0.46);
+        tl.set("#paper-wipe-b", { x: fromX, opacity: 1, backgroundColor: "#fff9ee" }, at - 0.46);
+        tl.to("#paper-wipe-a", { x: 0, duration: 0.25, ease: "power4.inOut" }, at - 0.46);
+        tl.to("#paper-wipe-b", { x: 0, duration: 0.25, ease: "power4.inOut" }, at - 0.40);
+        tl.set(oldSelector, { opacity: 0 }, at - 0.18);
+        tl.set(newSelector, { opacity: 1 }, at - 0.18);
+        tl.to("#paper-wipe-a", { x: toX, duration: 0.25, ease: "power4.inOut" }, at - 0.14);
+        tl.to("#paper-wipe-b", { x: toX, duration: 0.25, ease: "power4.inOut" }, at - 0.08);
+        tl.set("#paper-wipe-a, #paper-wipe-b", { opacity: 0, x: 0 }, at + 0.18);
+      }
+
+      function verticalPush(oldSelector, newSelector, at, direction) {
+        var fromY = direction === "up" ? 1080 : -1080;
+        var toY = -fromY;
+        tl.set(newSelector, { opacity: 1, y: fromY }, at - 0.50);
+        tl.to(oldSelector, { y: toY, duration: 0.50, ease: "power3.inOut" }, at - 0.50);
+        tl.to(newSelector, { y: 0, duration: 0.50, ease: "power3.inOut" }, at - 0.50);
+        tl.set(oldSelector, { opacity: 0, y: 0 }, at);
+      }
+
+      /* Scene 1 — monumental manual reveal. */
+      enter("#s1-meta", { y: -46, opacity: 0 }, { y: 0, opacity: 1, duration: 0.50, ease: "expo.out" }, 0.18);
+      enter("#s1-meta .rule", { scaleX: 0 }, { scaleX: 1, duration: 0.82, ease: "power4.out" }, 0.22);
+      enter("#s1-tab", { x: 120, opacity: 0, rotation: 1.5 }, { x: 0, opacity: 1, rotation: 0, duration: 0.44, ease: "back.out(1.22)" }, 0.44);
+      enter("#s1-line-a", { x: -150, opacity: 0 }, { x: 0, opacity: 1, duration: 0.56, ease: "expo.out" }, 0.62);
+      enter("#s1-line-b", { y: -90, opacity: 0 }, { y: 0, opacity: 1, duration: 0.62, ease: "circ.out" }, 0.92);
+      enter("#s1-line-c", { scale: 0.72, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.42, ease: "back.out(1.35)" }, 1.28);
+      enter("#s1-grid", { scale: 0.82, x: 130, opacity: 0, rotation: 4 }, { scale: 1, x: 0, opacity: 1, rotation: 1.2, duration: 0.72, ease: "power4.out" }, 0.72);
+      enter("#s1-grid .cell", { y: 40, opacity: 0 }, { y: 0, opacity: 1, duration: 0.36, ease: "back.out(1.14)", stagger: 0.075 }, 1.18);
+      enter("#s1-reg-a", { x: -50, opacity: 0, rotation: -35 }, { x: 0, opacity: 1, rotation: 0, duration: 0.34, ease: "power3.out" }, 1.54);
+      enter("#s1-reg-b", { y: 54, opacity: 0, rotation: 30 }, { y: 0, opacity: 1, rotation: 0, duration: 0.38, ease: "sine.out" }, 1.68);
+      enter("#s1-ghost", { x: 90, opacity: 0 }, { x: 0, opacity: 0.16, duration: 0.70, ease: "power2.out" }, 0.34);
+      enter("#s1-route", { scaleX: 0, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.68, ease: "power3.out" }, 1.88);
+      tl.to("#s1-route", { x: 54, yoyo: true, repeat: 2, duration: 1.18, ease: "sine.inOut" }, 2.60);
+      paperCover("#scene-1", "#scene-2", 6.00, "right", "#78c9b6");
+
+      /* Scene 2 — real product and scale. */
+      enter("#s2-meta", { x: -70, opacity: 0 }, { x: 0, opacity: 1, duration: 0.48, ease: "expo.out" }, 6.18);
+      enter("#s2-meta .rule", { scaleX: 0 }, { scaleX: 1, duration: 0.76, ease: "power4.out" }, 6.22);
+      enter("#s2-proof", { y: 72, opacity: 0, rotation: -0.8 }, { y: 0, opacity: 1, rotation: 0, duration: 0.64, ease: "power3.out" }, 6.28);
+      tl.fromTo("#product-demo", { scale: 1 }, { scale: 1.025, duration: 9.5, ease: "none", immediateRender: false }, 6.00);
+      enter("#s2-proof-label", { x: -90, opacity: 0 }, { x: 0, opacity: 1, duration: 0.42, ease: "circ.out" }, 6.74);
+      enter("#s2-selector span", { scale: 0, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.25, ease: "back.out(1.4)", stagger: 0.09 }, 7.16);
+      enter("#s2-title", { x: 120, opacity: 0 }, { x: 0, opacity: 1, duration: 0.58, ease: "expo.out" }, 6.52);
+      enter("#s2-100", { scale: 0.70, rotation: 3, opacity: 0 }, { scale: 1, rotation: 0, opacity: 1, duration: 0.46, ease: "back.out(1.28)" }, 7.12);
+      enter("#s2-routing span", { y: 46, opacity: 0 }, { y: 0, opacity: 1, duration: 0.34, ease: "power4.out", stagger: 0.11 }, 7.78);
+      enter("#s2-worktrees", { y: 66, opacity: 0, rotation: -1.4 }, { y: 0, opacity: 1, rotation: 0, duration: 0.52, ease: "sine.out" }, 8.38);
+      paperCover("#scene-2", "#scene-3", 16.00, "left", "#e2c94c");
+
+      /* Scene 3 — tabs, resize, zoom. */
+      enter("#s3-meta", { y: -48, opacity: 0 }, { y: 0, opacity: 1, duration: 0.46, ease: "expo.out" }, 16.18);
+      enter("#s3-meta .rule", { scaleX: 0 }, { scaleX: 1, duration: 0.78, ease: "power4.out" }, 16.22);
+      enter(".grid-sheet:nth-child(1)", { x: -150, y: 80, opacity: 0, rotation: -9 }, { x: 0, y: 0, opacity: 1, rotation: -4, duration: 0.58, ease: "power3.out" }, 16.34);
+      enter(".grid-sheet:nth-child(2)", { x: 80, y: -100, opacity: 0, rotation: 8 }, { x: 0, y: 0, opacity: 1, rotation: 2.6, duration: 0.62, ease: "circ.out" }, 16.48);
+      enter(".grid-sheet:nth-child(3)", { scale: 0.84, opacity: 0, rotation: -4 }, { scale: 1, opacity: 1, rotation: -0.8, duration: 0.52, ease: "back.out(1.18)" }, 16.68);
+      enter("#s3-title", { x: 130, opacity: 0 }, { x: 0, opacity: 1, duration: 0.58, ease: "expo.out" }, 16.48);
+      enter("#s3-resizer", { y: 80, opacity: 0, scale: 0.95 }, { y: 0, opacity: 1, scale: 1, duration: 0.60, ease: "power3.out" }, 17.02);
+      enter("#s3-resizer .resize-cell", { y: 30, opacity: 0 }, { y: 0, opacity: 1, duration: 0.28, ease: "sine.out", stagger: 0.055 }, 17.44);
+      enter("#s3-zoom-pane", { scale: 0.40, x: 170, opacity: 0 }, { scale: 1, x: 0, opacity: 1, duration: 0.62, ease: "expo.inOut" }, 19.18);
+      enter("#s3-controls .tab", { y: 48, opacity: 0 }, { y: 0, opacity: 1, duration: 0.32, ease: "back.out(1.2)", stagger: 0.10 }, 20.02);
+      verticalPush("#scene-3", "#scene-4", 27.00, "up");
+
+      /* Scene 4 — pane awareness. */
+      enter("#s4-meta", { x: 74, opacity: 0 }, { x: 0, opacity: 1, duration: 0.46, ease: "expo.out" }, 27.18);
+      enter("#s4-meta .rule", { scaleX: 0 }, { scaleX: 1, duration: 0.78, ease: "power4.out" }, 27.22);
+      enter("#s4-title", { x: -150, opacity: 0 }, { x: 0, opacity: 1, duration: 0.62, ease: "power3.out" }, 27.32);
+      enter(".activity-pane", { x: function(i){ return i % 2 ? 110 : -110; }, y: function(i){ return i === 2 ? 70 : 0; }, opacity: 0 }, { x: 0, y: 0, opacity: 1, duration: 0.52, ease: "back.out(1.12)", stagger: 0.13 }, 27.78);
+      enter(".activity-pane .summary", { scaleX: 0, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.40, ease: "circ.out", stagger: 0.12 }, 28.36);
+      enter("#s4-scroll", { scaleY: 0, opacity: 0 }, { scaleY: 1, opacity: 1, duration: 0.50, ease: "power3.out" }, 28.76);
+      tl.to("#s4-scroll-thumb", { y: 280, duration: 4.4, ease: "sine.inOut" }, 29.10);
+      enter("#s4-receipt", { x: 160, y: -50, opacity: 0, rotation: 6 }, { x: 0, y: 0, opacity: 1, rotation: 1.5, duration: 0.64, ease: "power3.out" }, 28.10);
+      enter("#s4-badges .tab", { scale: 0.66, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.32, ease: "back.out(1.32)", stagger: 0.13 }, 29.06);
+      enter("#s4-copy", { y: 54, opacity: 0 }, { y: 0, opacity: 1, duration: 0.48, ease: "sine.out" }, 29.64);
+      paperCover("#scene-4", "#scene-5", 38.00, "right", "#78c9b6");
+
+      /* Scene 5 — command, voice, lifecycle. */
+      enter("#s5-meta", { y: -48, opacity: 0 }, { y: 0, opacity: 1, duration: 0.46, ease: "expo.out" }, 38.18);
+      enter("#s5-meta .rule", { scaleX: 0 }, { scaleX: 1, duration: 0.78, ease: "power4.out" }, 38.22);
+      enter("#s5-title", { x: -130, opacity: 0 }, { x: 0, opacity: 1, duration: 0.58, ease: "power3.out" }, 38.32);
+      enter("#s5-command", { scaleX: 0.04, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.70, ease: "expo.out" }, 38.80);
+      enter("#s5-wave", { x: -110, opacity: 0 }, { x: 0, opacity: 1, duration: 0.48, ease: "circ.out" }, 39.46);
+      enter("#s5-wave span", { scaleY: 0.14 }, { scaleY: 1, duration: 0.24, ease: "back.out(1.3)", stagger: 0.045, yoyo: true, repeat: 5 }, 39.82);
+      enter("#s5-transcript", { y: 70, opacity: 0 }, { y: 0, opacity: 1, duration: 0.52, ease: "power3.out" }, 39.64);
+      enter("#s5-not-entered", { scale: 0.72, rotation: 5, opacity: 0 }, { scale: 1, rotation: -1.2, opacity: 1, duration: 0.42, ease: "back.out(1.36)" }, 40.26);
+      enter("#s5-tools .tool", { x: function(i){ return i % 2 ? 60 : -60; }, y: function(i){ return i % 3 === 0 ? 34 : 0; }, opacity: 0 }, { x: 0, y: 0, opacity: 1, duration: 0.32, ease: "power4.out", stagger: 0.07 }, 41.12);
+      paperCover("#scene-5", "#scene-6", 50.00, "left", "#e2c94c");
+
+      /* Scene 6 — agent profiles and auth routes. */
+      enter("#s6-meta", { x: -70, opacity: 0 }, { x: 0, opacity: 1, duration: 0.46, ease: "expo.out" }, 50.18);
+      enter("#s6-meta .rule", { scaleX: 0 }, { scaleX: 1, duration: 0.78, ease: "power4.out" }, 50.22);
+      enter("#s6-title", { y: -84, opacity: 0 }, { y: 0, opacity: 1, duration: 0.62, ease: "power3.out" }, 50.32);
+      enter(".profile-strip", { x: function(i){ return i % 3 === 0 ? -110 : 90; }, rotation: function(i){ return i % 2 ? 1.2 : -1.2; }, opacity: 0 }, { x: 0, rotation: 0, opacity: 1, duration: 0.38, ease: "back.out(1.14)", stagger: 0.065 }, 50.92);
+      enter("#s6-custom", { y: 52, opacity: 0 }, { y: 0, opacity: 1, duration: 0.46, ease: "sine.out" }, 51.72);
+      enter("#s6-auth", { x: 130, opacity: 0, rotation: 1.8 }, { x: 0, opacity: 1, rotation: 0, duration: 0.64, ease: "circ.out" }, 50.74);
+      enter(".auth-pane", { x: -80, opacity: 0 }, { x: 0, opacity: 1, duration: 0.38, ease: "expo.out", stagger: 0.22 }, 51.48);
+      enter(".auth-route", { scaleX: 0, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.54, ease: "power3.out", stagger: 0.20 }, 51.92);
+      enter(".auth-receipt", { x: 90, opacity: 0 }, { x: 0, opacity: 1, duration: 0.42, ease: "back.out(1.2)", stagger: 0.20 }, 52.20);
+      enter("#s6-usage", { y: 46, opacity: 0 }, { y: 0, opacity: 1, duration: 0.44, ease: "sine.out" }, 52.82);
+      enter("#s6-usage .meter span", { scaleX: 0 }, { scaleX: 1, duration: 0.86, ease: "power3.out" }, 53.12);
+      verticalPush("#scene-6", "#scene-7", 62.00, "down");
+
+      /* Scene 7 — manager goal and local control API. */
+      enter("#s7-meta", { y: -48, opacity: 0 }, { y: 0, opacity: 1, duration: 0.46, ease: "expo.out" }, 62.18);
+      enter("#s7-meta .rule", { scaleX: 0 }, { scaleX: 1, duration: 0.78, ease: "power4.out" }, 62.22);
+      enter("#s7-title", { x: -160, opacity: 0 }, { x: 0, opacity: 1, duration: 0.60, ease: "power3.out" }, 62.30);
+      enter("#s7-goal", { y: -150, scale: 0.84, opacity: 0, rotation: 7 }, { y: 0, scale: 1, opacity: 1, rotation: 1.4, duration: 0.58, ease: "back.out(1.26)" }, 62.54);
+      enter("#s7-board", { y: 80, opacity: 0 }, { y: 0, opacity: 1, duration: 0.58, ease: "circ.out" }, 62.82);
+      enter(".dispatch-pane", { x: function(i){ return i % 2 ? 100 : -100; }, y: function(i){ return i < 3 ? -40 : 40; }, opacity: 0 }, { x: 0, y: 0, opacity: 1, duration: 0.40, ease: "power4.out", stagger: 0.075 }, 63.28);
+      enter("#s7-scan", { scaleX: 0, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 1.15, ease: "power3.out" }, 64.14);
+      enter("#s7-api", { x: 160, opacity: 0 }, { x: 0, opacity: 1, duration: 0.62, ease: "expo.out" }, 64.62);
+      enter(".api-tool", { x: function(i){ return i % 2 ? 80 : -80; }, opacity: 0 }, { x: 0, opacity: 1, duration: 0.38, ease: "back.out(1.16)", stagger: 0.14 }, 65.10);
+      enter("#s7-status", { y: 46, opacity: 0 }, { y: 0, opacity: 1, duration: 0.44, ease: "sine.out" }, 65.88);
+      paperCover("#scene-7", "#scene-8", 76.00, "right", "#e2c94c");
+
+      /* Scene 8 — session recovery and isolated state lanes. */
+      enter("#s8-meta", { x: 72, opacity: 0 }, { x: 0, opacity: 1, duration: 0.48, ease: "expo.out" }, 76.18);
+      enter("#s8-meta .rule", { scaleX: 0 }, { scaleX: 1, duration: 0.78, ease: "power4.out" }, 76.22);
+      enter("#s8-title", { x: -150, opacity: 0 }, { x: 0, opacity: 1, duration: 0.62, ease: "power3.out" }, 76.32);
+      enter("#s8-envelope", { scaleY: 0.18, y: 90, opacity: 0 }, { scaleY: 1, y: 0, opacity: 1, duration: 0.68, ease: "expo.out" }, 76.88);
+      enter("#s8-grid", { y: 130, scale: 0.82, opacity: 0 }, { y: 0, scale: 1, opacity: 1, duration: 0.58, ease: "back.out(1.16)" }, 77.42);
+      enter("#s8-context", { x: 120, y: 80, opacity: 0, rotation: 6 }, { x: 0, y: 0, opacity: 1, rotation: 1.4, duration: 0.52, ease: "circ.out" }, 77.86);
+      enter("#s8-worktrees", { x: 130, opacity: 0 }, { x: 0, opacity: 1, duration: 0.52, ease: "power3.out" }, 77.10);
+      enter("#s8-worktrees .track", { scaleX: 0 }, { scaleX: 1, duration: 0.48, ease: "power4.out", stagger: 0.12 }, 77.72);
+      enter("#s8-sqlite", { x: 130, opacity: 0 }, { x: 0, opacity: 1, duration: 0.52, ease: "sine.out" }, 78.16);
+      enter("#s8-sqlite .track", { scaleX: 0 }, { scaleX: 1, duration: 0.48, ease: "circ.out", stagger: 0.12 }, 78.68);
+      enter("#s8-command", { scale: 0.72, opacity: 0, rotation: -3 }, { scale: 1, opacity: 1, rotation: 0, duration: 0.40, ease: "back.out(1.34)" }, 79.36);
+      paperCover("#scene-8", "#scene-9", 86.00, "left", "#fff9ee");
+
+      /* Scene 9 — cross-platform package and final CTA. */
+      enter("#s9-meta", { y: -48, opacity: 0 }, { y: 0, opacity: 1, duration: 0.46, ease: "expo.out" }, 86.18);
+      enter("#s9-meta .rule", { scaleX: 0 }, { scaleX: 1, duration: 0.78, ease: "power4.out" }, 86.22);
+      enter("#s9-title", { x: -170, opacity: 0 }, { x: 0, opacity: 1, duration: 0.66, ease: "power3.out" }, 86.32);
+      enter("#platform-windows", { x: 160, y: -100, opacity: 0, rotation: -12 }, { x: 0, y: 0, opacity: 1, rotation: -4, duration: 0.62, ease: "circ.out" }, 86.68);
+      enter("#platform-linux", { y: -150, scale: 0.84, opacity: 0, rotation: 8 }, { y: 0, scale: 1, opacity: 1, rotation: 1.8, duration: 0.58, ease: "back.out(1.18)" }, 86.84);
+      enter("#platform-macos", { x: -160, y: -80, opacity: 0, rotation: 12 }, { x: 0, y: 0, opacity: 1, rotation: 4, duration: 0.64, ease: "power3.out" }, 87.02);
+      enter("#s9-package", { scaleX: 0.54, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.48, ease: "expo.out" }, 87.62);
+      enter("#s9-product", { x: 160, opacity: 0 }, { x: 0, opacity: 1, duration: 0.62, ease: "sine.out" }, 88.02);
+      enter("#s9-command", { scaleX: 0.05, opacity: 0 }, { scaleX: 1, opacity: 1, duration: 0.70, ease: "expo.out" }, 88.42);
+      enter("#s9-receipt", { y: 64, opacity: 0 }, { y: 0, opacity: 1, duration: 0.48, ease: "back.out(1.18)" }, 89.16);
+      tl.to("#final-dip", { opacity: 1, duration: 0.72, ease: "power1.inOut" }, 95.28);
+
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>
