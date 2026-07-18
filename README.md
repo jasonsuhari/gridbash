@@ -112,6 +112,13 @@ To keep live terminals running after GridBash closes, open Settings with
 launching shell when you quit; reconnect later with `gridbash resume --latest`
 or select the session with `gridbash resume`.
 
+If the terminal or GridBash process closes unexpectedly, the next plain
+`gridbash` launch automatically recovers unfinished agent sessions. Saved panes
+are grouped into tabs by working directory, each tab is named after that
+directory, and `Alt+t` moves to the next tab. Explicit launch arguments still
+start the workspace you requested, and older snapshots remain available through
+`gridbash resume`.
+
 ## Profiles and configuration
 
 A bare `gridbash` opens the agent-workspace setup. Detected agent profiles are

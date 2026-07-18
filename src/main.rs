@@ -34,7 +34,7 @@ use crate::{
     cli::{Cli, Command},
     config::Config,
     profiles::{find_profile, profile_diagnostics},
-    session::select_resume_session,
+    session::{claim_interrupted_recovery, select_resume_session},
 };
 
 fn main() -> Result<()> {
@@ -86,6 +86,13 @@ fn main() -> Result<()> {
         };
 
         let mut app = App::resume(config, record, !cli.no_mouse)?;
+        return app.run();
+    }
+
+    if cli.allows_automatic_recovery()
+        && let Some(recovery) = claim_interrupted_recovery()?
+    {
+        let mut app = App::recover_interrupted(config, recovery, !cli.no_mouse)?;
         return app.run();
     }
 

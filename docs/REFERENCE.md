@@ -76,7 +76,9 @@ terminal panes retain their normal shell environment.
 
 ## Sessions and resume
 
-GridBash writes bounded session snapshots to local app data when grids launch and exit. Resume interactively, resume the latest snapshot, list snapshots, or select a session by its full ID or unique prefix:
+GridBash writes bounded session snapshots to local app data when grids launch,
+while they run, and when they exit. Resume interactively, resume the latest
+snapshot, list snapshots, or select a session by its full ID or unique prefix:
 
 ```powershell
 gridbash resume
@@ -96,6 +98,19 @@ produced while detached is added to the restored view. If a host is no longer
 available, GridBash starts a replacement terminal and retains the saved context.
 The background hosts are local, authenticated, and accept one GridBash client at
 a time.
+
+Session snapshots record whether their GridBash owner is still running and
+whether it exited cleanly. On a plain `gridbash` launch, snapshots left by a
+dead owner are claimed once and reopened automatically. GridBash groups their
+visible, tabbed, and background panes by working directory, names each recovered
+tab after the directory, and preserves the bounded command/output context. It
+does not claim sessions owned by another live GridBash process. Use `Alt+t` to
+cycle through the recovered tabs.
+
+Automatic recovery only applies to a plain launch. Grid, profile, count, cwd,
+worktree, layout, and agent-API launch options take precedence, while every
+saved snapshot remains available through the explicit `gridbash resume`
+commands above.
 
 ## Managed git worktrees
 
