@@ -11,7 +11,7 @@ Release target: unreleased
 
 - The terminal layout reserves no command-line row while the command line is closed.
 - Opening the command line restores its input row and output area, and closing it returns the space to the pane grid.
-- Added a focused regression test for the hidden and visible row heights.
+- Added focused regression tests for hidden and visible row heights and small-terminal rendering while hidden.
 
 ## Why It Matters
 

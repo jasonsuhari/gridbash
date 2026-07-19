@@ -3873,6 +3873,8 @@ fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{cli::Cli, config::Config};
+    use clap::Parser;
     use ratatui::{Terminal, backend::TestBackend};
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
@@ -3911,6 +3913,24 @@ mod tests {
     fn command_line_is_hidden_until_focused() {
         assert_eq!(command_line_height(false), 0);
         assert_eq!(command_line_height(true), 1);
+    }
+
+    #[test]
+    fn hidden_command_line_renders_safely_at_small_terminal_sizes() {
+        let cli = Cli::parse_from(["gridbash"]);
+        let app = App::new(cli, Config::default()).expect("app");
+
+        for (width, height) in [(1, 1), (2, 2), (40, 6)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &app);
+                })
+                .expect("render hidden command line");
+
+            assert!(!buffer_text(&terminal).contains(" > "));
+        }
     }
 
     #[test]
