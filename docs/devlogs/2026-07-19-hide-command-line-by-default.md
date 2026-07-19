@@ -20,9 +20,9 @@ Release target: unreleased
 ## Validation
 
 - `cargo fmt --all -- --check`
-- `cargo test command_line_is_hidden_until_focused --lib`
-- `cargo check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test command_line_is_hidden_until_focused`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test`
 
 ## Release Notes
 
