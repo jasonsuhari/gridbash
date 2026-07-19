@@ -280,7 +280,7 @@ Alt+Shift+B backgrounds every explicitly selected pane, or the focused pane when
 
 Alt+Ctrl+B opens Background Agents. Rows show whether each job is working, quiet, exited, or offline, together with its agent, source tab, folder/worktree, and latest activity. Use Up/Down to choose a row and Enter or Space to swap it into the focused cell; the displaced visible pane goes into the pool instead of being terminated. `R` explicitly restarts an exited or offline row. Delete removes exited/offline rows immediately and requires a second press before stopping a live process.
 
-If the focused pane exits, Enter, `r`, or `t` restarts it, while `z` sleeps it. Alt+Shift+T performs the same restart directly for exited target panes.
+When an agent launched by GridBash exits normally, including through `/exit`, GridBash replaces it with the preferred interactive terminal in the pane's current directory. If another focused pane exits, Enter, `r`, or `t` restarts it, while `z` sleeps it. Alt+Shift+T performs the same restart directly for exited target panes.
 
 ### Configurable shortcuts
 

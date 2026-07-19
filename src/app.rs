@@ -47,13 +47,13 @@ use crate::{
     output_capture::{self, OutputLogs, PaneLogKey},
     pane_host::{PaneHostBusy, PaneHostIncompatible, PaneHostRejected, PtyHostRef, PtyPane},
     process_priority::PaneWorkloadClass,
-    profiles::{default_profile_name, find_profile},
+    profiles::{default_profile_name, find_profile, is_terminal_profile, startup_profiles},
     pty::{PtyEvent, PtyWriteToken},
     session::{
         InterruptedRecovery, SavedBackgroundPane, SavedPane, SavedPaneHistory, SavedTab,
         SessionRecord, SessionRecorder,
     },
-    setup::{LaunchPlan, PaneLaunchSpec},
+    setup::{LaunchPlan, PaneLaunchSpec, folder_display_name},
     ui,
     usage::{self, UsageEvent, UsageTarget},
     voice::{VoiceInput, VoiceOutcome, VoiceStart},
@@ -3498,17 +3498,7 @@ impl App {
             }
             match routes.get(&(pane, generation)).copied() {
                 Some(PaneRoute::Visible(index)) => {
-                    let target = &mut self.panes[index];
-                    if !target.exited {
-                        target.exited = true;
-                        changed = true;
-                    }
-                    if self
-                        .follow_up
-                        .is_some_and(|prompt| prompt.pane_index == index)
-                    {
-                        self.follow_up = None;
-                    }
+                    changed |= self.handle_visible_pane_exit(index, pane, generation);
                 }
                 Some(PaneRoute::Inactive { tab, pane }) => {
                     if let Some(target) = self
@@ -3556,17 +3546,127 @@ impl App {
         }
     }
 
-    fn poll_exited_panes(&mut self) -> bool {
+    fn handle_visible_pane_exit(&mut self, index: usize, pane_id: PaneId, generation: u64) -> bool {
+        let changed = {
+            let Some(pane) = self.panes.get_mut(index) else {
+                return false;
+            };
+            if pane.id() != pane_id || pane.generation() != generation {
+                return false;
+            }
+            let changed = !pane.exited;
+            pane.exited = true;
+            changed
+        };
+
+        if self
+            .follow_up
+            .is_some_and(|prompt| prompt.pane_index == index)
+        {
+            self.follow_up = None;
+        }
+
+        match self.recover_exited_agent_pane_to_shell(index) {
+            Ok(recovered) => changed || recovered,
+            Err(error) => {
+                self.status = format!(
+                    "pane {} agent exited; failed to open an interactive shell: {error:#}",
+                    index + 1
+                );
+                true
+            }
+        }
+    }
+
+    fn recover_exited_agent_pane_to_shell(&mut self, index: usize) -> Result<bool> {
+        let Some(pane) = self.panes.get(index).filter(|pane| pane.exited) else {
+            return Ok(false);
+        };
+        let cwd = pane.cwd().to_path_buf();
+        let history = SavedPaneHistory::from_pane(pane);
+        let Some(spec) = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .cloned()
+        else {
+            return Ok(false);
+        };
+        let Some((shell_spec, agent_label, shell_label)) =
+            agent_shell_fallback_spec(&self.config, &spec, &cwd)?
+        else {
+            return Ok(false);
+        };
+
+        if let Some(pane) = self.panes.get_mut(index) {
+            let _ = pane.terminate();
+        }
+        let mut replacement = self.spawn_pane_instance(&shell_spec, index)?;
+        replacement.restore_history_display(&history.output_tail, &history.input_history);
+        self.panes[index] = replacement;
+        if let Some(plan) = self.launch_plan.as_mut()
+            && let Some(spec) = plan.panes.get_mut(index)
+        {
+            *spec = shell_spec;
+        }
+        if let Some(idle) = self.pane_idle.get_mut(index) {
+            *idle = PaneIdleState::new(Instant::now());
+        }
+        self.sleeping.remove(&index);
+        self.status = format!(
+            "{agent_label} exited; {shell_label} ready in pane {}",
+            index + 1
+        );
+        Ok(true)
+    }
+
+    fn recover_exited_agent_panes_to_shell(&mut self) -> bool {
+        let exited = self
+            .panes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pane)| pane.exited.then_some(index))
+            .collect::<Vec<_>>();
         let mut changed = false;
-        for (index, pane) in self.panes.iter_mut().enumerate() {
-            if pane.poll_exit() {
-                if self
-                    .follow_up
-                    .is_some_and(|prompt| prompt.pane_index == index)
-                {
-                    self.follow_up = None;
+        for index in exited {
+            match self.recover_exited_agent_pane_to_shell(index) {
+                Ok(recovered) => changed |= recovered,
+                Err(error) => {
+                    self.status = format!(
+                        "pane {} agent exited; failed to open an interactive shell: {error:#}",
+                        index + 1
+                    );
+                    changed = true;
                 }
-                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn poll_exited_panes(&mut self) -> bool {
+        let exited = self
+            .panes
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, pane)| pane.poll_exit().then_some(index))
+            .collect::<Vec<_>>();
+        let mut changed = !exited.is_empty();
+        for index in exited {
+            if self
+                .follow_up
+                .is_some_and(|prompt| prompt.pane_index == index)
+            {
+                self.follow_up = None;
+            }
+            match self.recover_exited_agent_pane_to_shell(index) {
+                Ok(recovered) => changed |= recovered,
+                Err(error) => {
+                    self.status = format!(
+                        "pane {} agent exited; failed to open an interactive shell: {error:#}",
+                        index + 1
+                    );
+                    changed = true;
+                }
             }
         }
         for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
@@ -5652,8 +5752,11 @@ impl App {
         };
         self.active_tab = index;
         self.restore_tab_snapshot(snapshot);
+        let recovered_agent = self.recover_exited_agent_panes_to_shell();
         self.start_usage_for_active_tab();
-        self.status = format!("active tab {}", self.tab_title);
+        if !recovered_agent {
+            self.status = format!("active tab {}", self.tab_title);
+        }
     }
 
     fn begin_tab_rename(&mut self) {
@@ -9361,6 +9464,44 @@ impl App {
     }
 }
 
+fn agent_shell_fallback_spec(
+    config: &Config,
+    spec: &PaneLaunchSpec,
+    cwd: &Path,
+) -> Result<Option<(PaneLaunchSpec, String, String)>> {
+    let Some(agent_label) = spec.agent_label() else {
+        return Ok(None);
+    };
+    let profiles = startup_profiles(config);
+    let preferred_profile = config
+        .defaults
+        .profile
+        .as_deref()
+        .filter(|name| is_terminal_profile(name))
+        .unwrap_or(default_profile_name());
+    let preferred_terminal = profiles
+        .iter()
+        .find(|(name, _)| name == preferred_profile)
+        .cloned();
+    let (profile_name, command) = preferred_terminal
+        .or_else(|| {
+            profiles
+                .into_iter()
+                .find(|(name, _)| is_terminal_profile(name))
+        })
+        .ok_or_else(|| anyhow!("no interactive terminal profile is available"))?;
+    let shell_label = command.display_name(&profile_name);
+    let mut shell_spec = spec.clone();
+    shell_spec.profile_name = profile_name;
+    shell_spec.command = command;
+    shell_spec.cwd = cwd.to_path_buf();
+    shell_spec.folder_name = folder_display_name(cwd);
+    shell_spec.auth_name = None;
+    shell_spec.auth_kind = None;
+    shell_spec.auth_dir = None;
+    Ok(Some((shell_spec, agent_label, shell_label)))
+}
+
 fn adaptive_output_frame_interval(refresh_ms: i32, pane_count: usize) -> Duration {
     let configured = Duration::from_millis(refresh_ms.max(1) as u64);
     if pane_count > 8 {
@@ -11677,6 +11818,70 @@ mod tests {
                 indices: vec![1],
                 running: 0,
             }
+        );
+    }
+
+    #[test]
+    fn exited_agents_fall_back_to_an_interactive_shell_in_their_current_directory() {
+        #[cfg(windows)]
+        let shell_name = "powershell".to_string();
+        #[cfg(not(windows))]
+        let shell_name = "sh".to_string();
+        let shell_command = env::current_exe()
+            .expect("test executable")
+            .display()
+            .to_string();
+        let mut config = Config::default();
+        config.defaults.profile = Some(shell_name.clone());
+        config.profiles.insert(
+            shell_name.clone(),
+            Profile {
+                command: shell_command.clone(),
+                args: Vec::new(),
+                title: Some("Test shell".into()),
+                agent_kind: None,
+            },
+        );
+        let cwd = env::current_dir().expect("current directory");
+        let mut env = BTreeMap::new();
+        env.insert("CODEX_HOME".into(), "test-auth-home".into());
+        let spec = PaneLaunchSpec {
+            profile_name: "codex".into(),
+            command: Profile {
+                command: shell_command,
+                args: Vec::new(),
+                title: Some("Codex".into()),
+                agent_kind: Some(AgentKind::Codex),
+            },
+            env,
+            cwd: PathBuf::from("old-directory"),
+            folder_name: "old-directory".into(),
+            worktree_name: Some("fix/agent-exit".into()),
+            auth_name: Some("codex-work".into()),
+            auth_kind: Some(AgentKind::Codex),
+            auth_dir: Some(PathBuf::from("test-auth-home")),
+        };
+
+        let (shell_spec, agent_label, shell_label) =
+            agent_shell_fallback_spec(&config, &spec, &cwd)
+                .expect("fallback spec")
+                .expect("agent fallback");
+
+        assert_eq!(agent_label, "Codex");
+        assert_eq!(shell_label, "Test shell");
+        assert_eq!(shell_spec.profile_name, shell_name);
+        assert_eq!(shell_spec.cwd, cwd);
+        assert_eq!(shell_spec.folder_name, folder_display_name(&shell_spec.cwd));
+        assert_eq!(shell_spec.env, spec.env);
+        assert_eq!(shell_spec.worktree_name, spec.worktree_name);
+        assert!(shell_spec.auth_name.is_none());
+        assert!(shell_spec.auth_kind.is_none());
+        assert!(shell_spec.auth_dir.is_none());
+        assert!(shell_spec.agent_label().is_none());
+        assert!(
+            agent_shell_fallback_spec(&config, &shell_spec, &shell_spec.cwd)
+                .expect("terminal fallback check")
+                .is_none()
         );
     }
 
