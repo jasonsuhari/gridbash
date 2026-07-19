@@ -63,6 +63,7 @@ const PANE_SETTINGS_BUTTON: &str = " Summary ";
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
+    let command_height = command_line_height(app.command_focused());
     let output_height = if app.command_output_expanded() {
         command_output_height(area.height, app.command_output_lines().len())
     } else {
@@ -74,7 +75,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(output_height),
-            Constraint::Length(1),
+            Constraint::Length(command_height),
             Constraint::Length(1),
         ])
         .split(area);
@@ -452,6 +453,10 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel], palette: &G
         area,
     );
 }
+fn command_line_height(focused: bool) -> u16 {
+    u16::from(focused)
+}
+
 fn command_output_height(total_height: u16, line_count: usize) -> u16 {
     let available = total_height.saturating_sub(3);
     if available < 3 {
@@ -3900,6 +3905,12 @@ mod tests {
         let rendered = buffer_text(&terminal);
         assert!(rendered.contains("GridBash Commands"));
         assert!(rendered.contains("No matching"));
+    }
+
+    #[test]
+    fn command_line_is_hidden_until_focused() {
+        assert_eq!(command_line_height(false), 0);
+        assert_eq!(command_line_height(true), 1);
     }
 
     #[test]
