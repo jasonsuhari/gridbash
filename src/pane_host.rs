@@ -102,6 +102,8 @@ enum HostEvent {
     Ready {
         #[serde(default)]
         protocol_version: u16,
+        #[serde(default)]
+        host_process_id: Option<u32>,
         background_output: String,
         cwd: PathBuf,
         exited: bool,
@@ -177,6 +179,7 @@ pub struct PtyPane {
     generation: u64,
     connection: Arc<Mutex<TcpStream>>,
     host: PtyHostRef,
+    host_process_id: Option<u32>,
     view: PtyView,
     keep_running: bool,
     pub active: bool,
@@ -358,13 +361,20 @@ impl PtyPane {
         }
         let ready = serde_json::from_str::<HostEvent>(&line)
             .context("failed to parse pane host handshake")?;
-        let (protocol_version, background_output, cwd, exited) = match ready {
+        let (protocol_version, host_process_id, background_output, cwd, exited) = match ready {
             HostEvent::Ready {
                 protocol_version,
+                host_process_id,
                 background_output,
                 cwd,
                 exited,
-            } => (protocol_version, background_output, cwd, exited),
+            } => (
+                protocol_version,
+                host_process_id,
+                background_output,
+                cwd,
+                exited,
+            ),
             HostEvent::Error { error } => {
                 return Err(PaneHostRejected { reason: error }.into());
             }
@@ -398,6 +408,7 @@ impl PtyPane {
             generation,
             connection: Arc::new(Mutex::new(stream)),
             host,
+            host_process_id,
             view,
             keep_running,
             active: !background_output.is_empty(),
@@ -415,6 +426,10 @@ impl PtyPane {
 
     pub fn host_ref(&self) -> PtyHostRef {
         self.host.clone()
+    }
+
+    pub fn host_process_id(&self) -> Option<u32> {
+        self.host_process_id
     }
 
     pub fn cwd(&self) -> &Path {
@@ -858,6 +873,7 @@ fn accept_client(
         &mut stream,
         &HostEvent::Ready {
             protocol_version: PANE_HOST_PROTOCOL_VERSION,
+            host_process_id: Some(std::process::id()),
             background_output: BASE64.encode(&*background_output),
             cwd: pane.cwd().to_path_buf(),
             exited: pane.exited,

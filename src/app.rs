@@ -46,6 +46,7 @@ use crate::{
     manager::{self, ActivitySummary, AssistantReply, ManagerCommand, ManagerDecision},
     output_capture::{self, OutputLogs, PaneLogKey},
     pane_host::{PaneHostBusy, PaneHostIncompatible, PaneHostRejected, PtyHostRef, PtyPane},
+    ports::{self, AgentPort, AgentProcessRoot},
     process_priority::PaneWorkloadClass,
     profiles::{default_profile_name, find_profile, is_terminal_profile, startup_profiles},
     pty::{PtyEvent, PtyWriteToken},
@@ -69,6 +70,7 @@ const PTY_DRAIN_MAX_EVENTS: usize = 64;
 const PTY_DRAIN_MAX_BYTES: usize = 512 * 1024;
 const PTY_DRAIN_MAX_TIME: Duration = Duration::from_millis(4);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const PORT_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
 const PANE_GOAL_OUTPUT_MAX_BYTES: usize = 12_000;
 const PANE_GOAL_REVIEW_IDLE: Duration = Duration::from_secs(2);
@@ -151,6 +153,9 @@ pub struct App {
     previous_panes: PreviousPanesState,
     background_jobs: Vec<BackgroundJob>,
     background_picker: BackgroundPickerState,
+    port_inspector: PortInspectorState,
+    port_scan_tx: std_mpsc::Sender<Result<Vec<AgentPort>, String>>,
+    port_scan_rx: std_mpsc::Receiver<Result<Vec<AgentPort>, String>>,
     follow_up: Option<FollowUpPromptState>,
     auth_profiles: Vec<AuthProfile>,
     auth_refresh_rx: Option<std_mpsc::Receiver<Result<Vec<AuthProfile>, String>>>,
@@ -175,6 +180,8 @@ pub struct App {
     pane_settings_stop_goal_button: Option<Rect>,
     background_jobs_button: Option<Rect>,
     background_job_rows: Vec<(usize, Rect)>,
+    ports_button: Option<Rect>,
+    port_rows: Vec<(usize, Rect)>,
     event_tx: mpsc::Sender<PtyEvent>,
     event_rx: mpsc::Receiver<PtyEvent>,
     pane_render_cache: RefCell<HashMap<PaneId, ui::PaneRenderCache>>,
@@ -1054,6 +1061,62 @@ pub struct BackgroundJobsView {
     pub cursor: usize,
     pub pending_delete: Option<u64>,
     pub jobs: Vec<BackgroundJobView>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PortInspectorView {
+    pub ports: Vec<AgentPortView>,
+    pub cursor: usize,
+    pub pending_terminate: Option<u32>,
+    pub refreshing: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentPortView {
+    pub port: u16,
+    pub pid: u32,
+    pub process: String,
+    pub owner: String,
+}
+
+#[derive(Debug, Default)]
+struct PortInspectorState {
+    open: bool,
+    ports: Vec<AgentPort>,
+    cursor: usize,
+    pending_terminate: Option<u32>,
+    refreshing: bool,
+    last_scan: Option<Instant>,
+    error: Option<String>,
+}
+
+impl PortInspectorState {
+    fn close(&mut self) {
+        self.open = false;
+        self.pending_terminate = None;
+    }
+
+    fn move_cursor(&mut self, delta: isize) {
+        if self.ports.is_empty() {
+            self.cursor = 0;
+        } else {
+            self.cursor = (self.cursor as isize + delta)
+                .clamp(0, self.ports.len().saturating_sub(1) as isize)
+                as usize;
+        }
+        self.pending_terminate = None;
+    }
+
+    fn clamp_cursor(&mut self) {
+        self.cursor = self.cursor.min(self.ports.len().saturating_sub(1));
+        if self
+            .pending_terminate
+            .is_some_and(|pid| !self.ports.iter().any(|port| port.pid == pid))
+        {
+            self.pending_terminate = None;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2376,10 +2439,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+k commands | Alt+Shift+b background | Alt+Ctrl+b jobs | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+k commands | Alt+Shift+b background | Alt+Ctrl+b jobs | Ctrl+Alt+p ports | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     } else {
-        "Alt+k commands | Alt+Shift+b background | Alt+Ctrl+b jobs | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Alt+k commands | Alt+Shift+b background | Alt+Ctrl+b jobs | Ctrl+Alt+p ports | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     }
 }
@@ -2563,6 +2626,7 @@ impl App {
             .unwrap_or(0)
             .saturating_add(1);
         let (activity_summary_tx, activity_summary_rx) = std_mpsc::channel();
+        let (port_scan_tx, port_scan_rx) = std_mpsc::channel();
         let keybindings = KeyBindings::from_overrides(&init.config.keys)?;
         let (assistant_tx, assistant_rx) = std_mpsc::channel();
 
@@ -2621,6 +2685,9 @@ impl App {
             previous_panes: PreviousPanesState::default(),
             background_jobs,
             background_picker: BackgroundPickerState::default(),
+            port_inspector: PortInspectorState::default(),
+            port_scan_tx,
+            port_scan_rx,
             follow_up: None,
             auth_profiles: Vec::new(),
             auth_refresh_rx: None,
@@ -2645,6 +2712,8 @@ impl App {
             pane_settings_stop_goal_button: None,
             background_jobs_button: None,
             background_job_rows: Vec::new(),
+            ports_button: None,
+            port_rows: Vec::new(),
             event_tx,
             event_rx,
             pane_render_cache: RefCell::new(HashMap::new()),
@@ -2880,6 +2949,7 @@ impl App {
         self.tab_rename.close();
         self.previous_panes.close();
         self.background_picker.close();
+        self.port_inspector.close();
         self.pane_settings.close();
         self.follow_up = None;
         self.goal_editor = None;
@@ -3108,6 +3178,7 @@ impl App {
             immediate_render |= self.drain_usage_events();
             immediate_render |= self.drain_auth_refresh();
             immediate_render |= self.drain_command_events();
+            immediate_render |= self.drain_port_scan();
             immediate_render |= self.drain_goal_reviews();
             immediate_render |= self.drain_activity_summary_events();
             immediate_render |= self.drain_assistant_events();
@@ -3118,6 +3189,7 @@ impl App {
             immediate_render |= self.schedule_goal_reviews();
             immediate_render |= self.schedule_activity_summaries();
             immediate_render |= self.autosave_session_if_due();
+            immediate_render |= self.schedule_port_scan();
             if immediate_render {
                 immediate_render |= self.refresh_workload_classes();
             }
@@ -3139,6 +3211,8 @@ impl App {
                     self.pane_settings_stop_goal_button = draw_state.pane_settings_stop_goal_button;
                     self.background_jobs_button = draw_state.background_jobs_button;
                     self.background_job_rows = draw_state.background_job_rows;
+                    self.ports_button = draw_state.ports_button;
+                    self.port_rows = draw_state.port_rows;
                 })?;
                 self.sync_pane_sizes();
                 immediate_render = false;
@@ -3220,6 +3294,7 @@ impl App {
                     && !self.rename.open
                     && !self.background_picker.open
                     && !self.previous_panes.open
+                    && !self.port_inspector.open
                     && !self.pane_settings.open
                     && self.image_overlay.is_none()
                     && self.follow_up.is_none()
@@ -4362,6 +4437,94 @@ impl App {
         changed
     }
 
+    fn schedule_port_scan(&mut self) -> bool {
+        if self.port_inspector.refreshing
+            || self
+                .port_inspector
+                .last_scan
+                .is_some_and(|last| last.elapsed() < PORT_SCAN_INTERVAL)
+        {
+            return false;
+        }
+
+        let roots = self.agent_process_roots();
+        if roots.is_empty() {
+            let changed = !self.port_inspector.ports.is_empty()
+                || self.port_inspector.error.is_some()
+                || self.port_inspector.refreshing;
+            self.port_inspector.ports.clear();
+            self.port_inspector.error = None;
+            self.port_inspector.refreshing = false;
+            self.port_inspector.last_scan = Some(Instant::now());
+            self.port_inspector.clamp_cursor();
+            return changed;
+        }
+
+        self.port_inspector.refreshing = true;
+        let sender = self.port_scan_tx.clone();
+        thread::spawn(move || {
+            let result = ports::discover_agent_ports(&roots).map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        self.port_inspector.open
+    }
+
+    fn drain_port_scan(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(result) = self.port_scan_rx.try_recv() {
+            self.port_inspector.refreshing = false;
+            self.port_inspector.last_scan = Some(Instant::now());
+            match result {
+                Ok(ports) => {
+                    changed |= self.port_inspector.ports != ports;
+                    self.port_inspector.ports = ports;
+                    self.port_inspector.error = None;
+                }
+                Err(error) => {
+                    let error = bounded_prefix(&error, 240);
+                    changed |= self.port_inspector.error.as_deref() != Some(error.as_str());
+                    self.port_inspector.error = Some(error);
+                }
+            }
+            self.port_inspector.clamp_cursor();
+            changed |= self.port_inspector.open;
+        }
+        changed
+    }
+
+    fn agent_process_roots(&self) -> Vec<AgentProcessRoot> {
+        let mut roots = Vec::new();
+        roots.extend(self.panes.iter().enumerate().filter_map(|(index, pane)| {
+            pane.host_process_id().map(|pid| AgentProcessRoot {
+                pid,
+                label: port_owner_label(&self.tab_title, &self.pane_names, index),
+            })
+        }));
+        for tab in self.tabs.iter().filter_map(Option::as_ref) {
+            roots.extend(tab.panes.iter().enumerate().filter_map(|(index, pane)| {
+                pane.host_process_id().map(|pid| AgentProcessRoot {
+                    pid,
+                    label: port_owner_label(&tab.title, &tab.pane_names, index),
+                })
+            }));
+        }
+        roots.extend(self.background_jobs.iter().filter_map(|job| {
+            job.pane
+                .as_ref()?
+                .host_process_id()
+                .map(|pid| AgentProcessRoot {
+                    pid,
+                    label: format!(
+                        "Background / {}",
+                        job.name
+                            .clone()
+                            .unwrap_or_else(|| format!("job {}", job.id))
+                    ),
+                })
+        }));
+        roots
+    }
+
     fn drain_voice_events(&mut self) -> Result<bool> {
         let Some(outcome) = self.voice.poll() else {
             return Ok(false);
@@ -5038,6 +5201,10 @@ impl App {
             self.status = "pane activity closed".into();
             return Ok(KeyOutcome::Render);
         }
+        if self.port_inspector.open && action == Some(Action::Ports) {
+            self.close_port_inspector();
+            return Ok(KeyOutcome::Render);
+        }
         if self.settings.open && action == Some(Action::Settings) {
             self.settings.open = false;
             self.status = "settings closed".into();
@@ -5079,6 +5246,11 @@ impl App {
 
         if self.pane_settings.open {
             let outcome = self.handle_pane_settings_key(key)?;
+            return Ok(render_if_selection_cleared(outcome, selection_cleared));
+        }
+
+        if self.port_inspector.open {
+            let outcome = self.handle_port_inspector_key(key);
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
         }
 
@@ -5609,6 +5781,9 @@ impl App {
             Action::PaneActivity => {
                 self.toggle_pane_settings();
             }
+            Action::Ports => {
+                self.open_port_inspector();
+            }
             Action::CopyMode => {
                 self.open_copy_mode();
             }
@@ -5938,6 +6113,139 @@ impl App {
     fn close_background_jobs(&mut self) {
         self.background_picker.close();
         self.status = "background agents closed".into();
+    }
+
+    fn open_port_inspector(&mut self) {
+        self.close_tab_modals();
+        self.settings.open = false;
+        self.image_overlay = None;
+        self.help_open = false;
+        self.port_inspector.open = true;
+        self.port_inspector.pending_terminate = None;
+        self.port_inspector.last_scan = None;
+        self.status = if self.port_inspector.ports.is_empty() {
+            "looking for agent-owned localhost ports".into()
+        } else {
+            format!(
+                "{} agent-owned localhost port(s)",
+                self.port_inspector.ports.len()
+            )
+        };
+    }
+
+    fn close_port_inspector(&mut self) {
+        self.port_inspector.close();
+        self.status = "agent ports closed".into();
+    }
+
+    fn handle_port_inspector_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return KeyOutcome::Quit;
+        }
+        let changed = match key.code {
+            KeyCode::Esc if self.port_inspector.pending_terminate.is_some() => {
+                self.port_inspector.pending_terminate = None;
+                self.status = "port termination canceled".into();
+                true
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.close_port_inspector();
+                true
+            }
+            KeyCode::Up => {
+                self.port_inspector.move_cursor(-1);
+                true
+            }
+            KeyCode::Down => {
+                self.port_inspector.move_cursor(1);
+                true
+            }
+            KeyCode::Home => {
+                self.port_inspector.cursor = 0;
+                self.port_inspector.pending_terminate = None;
+                true
+            }
+            KeyCode::End => {
+                self.port_inspector.cursor = self.port_inspector.ports.len().saturating_sub(1);
+                self.port_inspector.pending_terminate = None;
+                true
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.port_inspector.last_scan = None;
+                self.port_inspector.error = None;
+                self.status = "refreshing agent-owned localhost ports".into();
+                true
+            }
+            KeyCode::Delete | KeyCode::Enter => {
+                self.confirm_or_terminate_selected_port();
+                true
+            }
+            _ => false,
+        };
+        if changed {
+            KeyOutcome::Render
+        } else {
+            KeyOutcome::Continue
+        }
+    }
+
+    fn confirm_or_terminate_selected_port(&mut self) {
+        let Some(port) = self
+            .port_inspector
+            .ports
+            .get(self.port_inspector.cursor)
+            .cloned()
+        else {
+            self.status = "no agent-owned port selected".into();
+            return;
+        };
+        if self.port_inspector.pending_terminate != Some(port.pid) {
+            self.port_inspector.pending_terminate = Some(port.pid);
+            self.status = format!(
+                "press Enter to terminate {} (PID {}) on port {}",
+                port.process, port.pid, port.port
+            );
+            return;
+        }
+
+        let roots = self.agent_process_roots();
+        let verified = match ports::discover_agent_ports(&roots) {
+            Ok(current) => current
+                .iter()
+                .any(|listener| listener.pid == port.pid && listener.port == port.port),
+            Err(error) => {
+                self.port_inspector.pending_terminate = None;
+                self.port_inspector.last_scan = None;
+                self.status = format!("could not verify port before termination: {error}");
+                return;
+            }
+        };
+        if !verified {
+            self.port_inspector.pending_terminate = None;
+            self.port_inspector.last_scan = None;
+            self.status = format!("port {} is no longer owned by PID {}", port.port, port.pid);
+            return;
+        }
+
+        match ports::terminate_process(port.pid) {
+            Ok(()) => {
+                self.port_inspector
+                    .ports
+                    .retain(|listener| listener.pid != port.pid);
+                self.port_inspector.pending_terminate = None;
+                self.port_inspector.last_scan = None;
+                self.port_inspector.clamp_cursor();
+                self.status = format!(
+                    "terminated {} (PID {}) from port {}",
+                    port.process, port.pid, port.port
+                );
+            }
+            Err(error) => {
+                self.port_inspector.pending_terminate = None;
+                self.port_inspector.last_scan = None;
+                self.status = format!("failed to terminate PID {}: {error}", port.pid);
+            }
+        }
     }
 
     fn handle_background_jobs_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -7140,6 +7448,18 @@ impl App {
 
         if self.mouse_enabled
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.ports_button_at(mouse.column, mouse.row)
+        {
+            if self.port_inspector.open {
+                self.close_port_inspector();
+            } else {
+                self.open_port_inspector();
+            }
+            return Ok(true);
+        }
+
+        if self.mouse_enabled
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.background_jobs_button_at(mouse.column, mouse.row)
         {
             if self.background_picker.open {
@@ -7176,6 +7496,14 @@ impl App {
             } else {
                 Ok(false)
             };
+        }
+
+        if self.port_inspector.open {
+            return Ok(if self.mouse_enabled {
+                self.handle_port_inspector_mouse(mouse)
+            } else {
+                false
+            });
         }
 
         if self.previous_panes.open {
@@ -7333,6 +7661,24 @@ impl App {
         self.background_picker.pending_delete = None;
         self.insert_background_job(index)?;
         Ok(true)
+    }
+
+    fn handle_port_inspector_mouse(&mut self, mouse: MouseEvent) -> bool {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return false;
+        }
+        let Some(index) = self.port_row_at(mouse.column, mouse.row) else {
+            return false;
+        };
+        self.port_inspector.cursor = index;
+        self.port_inspector.pending_terminate = None;
+        if let Some(port) = self.port_inspector.ports.get(index) {
+            self.status = format!(
+                "port {} | {} | PID {} | {}",
+                port.port, port.process, port.pid, port.owner
+            );
+        }
+        true
     }
 
     fn handle_pane_settings_mouse(&mut self, mouse: MouseEvent) -> bool {
@@ -8868,6 +9214,48 @@ impl App {
             .find_map(|(index, rect)| rect_contains(*rect, x, y).then_some(*index))
     }
 
+    fn ports_button_at(&self, x: u16, y: u16) -> bool {
+        self.ports_button
+            .is_some_and(|rect| rect_contains(rect, x, y))
+    }
+
+    fn port_row_at(&self, x: u16, y: u16) -> Option<usize> {
+        self.port_rows
+            .iter()
+            .find_map(|(index, rect)| rect_contains(*rect, x, y).then_some(*index))
+    }
+
+    pub fn port_inspector_view(&self) -> Option<PortInspectorView> {
+        self.port_inspector.open.then(|| PortInspectorView {
+            ports: self
+                .port_inspector
+                .ports
+                .iter()
+                .map(|port| AgentPortView {
+                    port: port.port,
+                    pid: port.pid,
+                    process: port.process.clone(),
+                    owner: port.owner.clone(),
+                })
+                .collect(),
+            cursor: self
+                .port_inspector
+                .cursor
+                .min(self.port_inspector.ports.len().saturating_sub(1)),
+            pending_terminate: self.port_inspector.pending_terminate,
+            refreshing: self.port_inspector.refreshing,
+            error: self.port_inspector.error.clone(),
+        })
+    }
+
+    pub fn agent_port_count(&self) -> usize {
+        self.port_inspector.ports.len()
+    }
+
+    pub fn port_inspector_open(&self) -> bool {
+        self.port_inspector.open
+    }
+
     pub fn background_jobs_view(&self) -> Option<BackgroundJobsView> {
         self.background_picker.open.then(|| BackgroundJobsView {
             cursor: self
@@ -9500,6 +9888,16 @@ fn agent_shell_fallback_spec(
     shell_spec.auth_kind = None;
     shell_spec.auth_dir = None;
     Ok(Some((shell_spec, agent_label, shell_label)))
+}
+
+fn port_owner_label(tab_title: &str, pane_names: &[Option<String>], index: usize) -> String {
+    let pane = pane_names
+        .get(index)
+        .and_then(|name| name.as_deref())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Pane {}", index + 1));
+    format!("{tab_title} / {pane}")
 }
 
 fn adaptive_output_frame_interval(refresh_ms: i32, pane_count: usize) -> Duration {
@@ -13223,5 +13621,31 @@ mod selection_tests {
             .find(|row| row.label == "AI activity summaries")
             .expect("AI activity summary row");
         assert_eq!(summaries.value, "on");
+    }
+
+    #[test]
+    fn port_inspector_navigation_clears_termination_confirmation() {
+        let mut inspector = PortInspectorState {
+            open: true,
+            ports: vec![
+                AgentPort {
+                    port: 3000,
+                    pid: 30,
+                    process: "node".into(),
+                    owner: "Grid 1 / Pane 1".into(),
+                },
+                AgentPort {
+                    port: 8080,
+                    pid: 80,
+                    process: "python".into(),
+                    owner: "Grid 1 / Pane 2".into(),
+                },
+            ],
+            pending_terminate: Some(30),
+            ..PortInspectorState::default()
+        };
+        inspector.move_cursor(1);
+        assert_eq!(inspector.cursor, 1);
+        assert_eq!(inspector.pending_terminate, None);
     }
 }

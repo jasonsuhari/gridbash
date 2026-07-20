@@ -14,6 +14,7 @@ mod layout;
 mod manager;
 mod output_capture;
 mod pane_host;
+mod ports;
 mod process_priority;
 mod profiles;
 mod pty;

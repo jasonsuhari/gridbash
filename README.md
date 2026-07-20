@@ -94,6 +94,7 @@ agents and shells.
 | `Alt+d` | Chat with BashBot across all open grids and panes |
 | `Alt+n` / `Alt+t` | Open a new tab / switch tabs |
 | `Alt+p` | Open focused-pane activity |
+| `Ctrl+Alt+p` | Inspect and stop localhost ports launched by agents |
 | `Alt+Shift+A` | Manage auth profiles and assign one to the focused pane |
 | `Alt+f` | Zoom or restore the focused pane |
 | `Alt+b` | Search, select, and copy focused-pane scrollback |
