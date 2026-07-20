@@ -5932,6 +5932,7 @@ impl App {
         if !recovered_agent {
             self.status = format!("active tab {}", self.tab_title);
         }
+        self.sync_pane_sizes_for_current_layout();
     }
 
     fn begin_tab_rename(&mut self) {
@@ -9549,11 +9550,15 @@ impl App {
         }
     }
 
+    fn sync_pane_sizes_for_current_layout(&mut self) {
+        self.rects = self.pane_rects(self.grid_area);
+        self.sync_pane_sizes();
+    }
+
     fn sync_initial_pane_sizes(&mut self, terminal: &Tui) -> Result<()> {
         let size = terminal.size().context("failed to read terminal size")?;
         self.grid_area = Rect::new(0, 1, size.width, size.height.saturating_sub(3));
-        self.rects = self.pane_rects(self.grid_area);
-        self.sync_pane_sizes();
+        self.sync_pane_sizes_for_current_layout();
         Ok(())
     }
 
