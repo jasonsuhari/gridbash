@@ -678,6 +678,8 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
     let mut keep_running = spec.keep_running;
     let mut background_output = Vec::new();
     let mut last_exit_poll = Instant::now();
+    let initial_client_deadline = Instant::now() + HOST_START_TIMEOUT;
+    let mut accepted_client_once = false;
 
     loop {
         match listener.accept() {
@@ -704,6 +706,7 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
                         &mut background_output,
                         command_tx.clone(),
                     )? {
+                        accepted_client_once = true;
                         keep_running = connected.keep_running;
                         active_client_id = Some(connected.client.id);
                         client = Some(connected.client);
@@ -852,7 +855,10 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
             last_exit_poll = Instant::now();
         }
 
-        if client.is_none() && !keep_running {
+        if client.is_none()
+            && !keep_running
+            && (accepted_client_once || Instant::now() >= initial_client_deadline)
+        {
             pane.terminate();
             return Ok(());
         }
@@ -1301,6 +1307,77 @@ mod tests {
         append_background_output(&mut output, b"latest");
         assert_eq!(output.len(), BACKGROUND_OUTPUT_LIMIT);
         assert!(output.ends_with(b"latest"));
+    }
+
+    #[test]
+    fn non_persistent_host_waits_for_its_initial_client() {
+        let _guard = PANE_HOST_TEST_LOCK.lock().expect("lock pane host test");
+        let files = TestHostFiles::new();
+        let host_token = random_token().expect("host token");
+        #[cfg(windows)]
+        let (profile_name, command, args, line_ending) = (
+            "cmd",
+            PathBuf::from("cmd.exe"),
+            vec!["/d".to_string(), "/q".to_string()],
+            "\r",
+        );
+        #[cfg(unix)]
+        let (profile_name, command, args, line_ending) =
+            ("sh", PathBuf::from("/bin/sh"), vec!["-i".to_string()], "\n");
+        let spec = HostLaunchSpec {
+            token: host_token.clone(),
+            ready_path: files.ready.clone(),
+            profile_name: profile_name.into(),
+            pane_id: 6,
+            generation: 0,
+            command,
+            args,
+            env: BTreeMap::new(),
+            cwd: std::env::current_dir().expect("current directory"),
+            extra_env: Vec::new(),
+            scrollback_rows: 1_000,
+            process_priority: PaneProcessPriority::Normal,
+            workload_policy: PaneWorkloadPolicy::Unrestricted,
+            keep_running: false,
+        };
+        fs::write(
+            &files.spec,
+            serde_json::to_vec(&spec).expect("serialize host spec"),
+        )
+        .expect("write host spec");
+        let spec_path = files.spec.clone();
+        let host_thread = thread::spawn(move || run_pane_host(&spec_path));
+
+        let ready = wait_for_ready(&files.ready);
+        thread::sleep(Duration::from_millis(100));
+        let host = PtyHostRef {
+            endpoint: ready.endpoint,
+            token: host_token,
+            codex_sqlite_home: None,
+            started_at_ms: None,
+        };
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let pane = PtyPane::attach(
+            host,
+            PaneId(6),
+            0,
+            &spec.cwd,
+            1_000,
+            false,
+            "",
+            &[],
+            event_tx,
+        )
+        .expect("attach initial client after startup delay");
+        pane.write(format!("echo initial-client{line_ending}").as_bytes())
+            .expect("write to initial client");
+        assert_output_contains(&mut event_rx, "initial-client");
+        drop(pane);
+
+        host_thread
+            .join()
+            .expect("join pane host")
+            .expect("non-persistent pane host exits cleanly");
     }
 
     #[test]
