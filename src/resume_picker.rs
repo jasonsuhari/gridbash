@@ -635,9 +635,12 @@ mod tests {
             auth_name: None,
             auth_kind: None,
             history: SavedPaneHistory::default(),
+            codex_thread_id: None,
             host: host.then(|| crate::pane_host::PtyHostRef {
                 endpoint: "127.0.0.1:12345".into(),
                 token: "token".into(),
+                codex_sqlite_home: None,
+                started_at_ms: None,
             }),
         };
         SessionRecord {

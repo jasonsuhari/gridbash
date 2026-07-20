@@ -19,6 +19,7 @@ use crate::{
     cli::ResumeArgs,
     layout::GridSize,
     pane_host::{PtyHostRef, PtyPane},
+    ports::roots_with_descendant_named,
     profiles::Profile,
     setup::{LaunchPlan, PaneLaunchSpec, folder_display_name},
 };
@@ -77,6 +78,8 @@ pub struct SavedPane {
     pub auth_kind: Option<AgentKind>,
     #[serde(default)]
     pub history: SavedPaneHistory,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<PtyHostRef>,
 }
@@ -151,7 +154,7 @@ impl SavedSession {
                 .iter()
                 .enumerate()
                 .map(|(index, spec)| {
-                    SavedPane::from_spec(index, spec, SavedPaneHistory::default(), None)
+                    SavedPane::from_spec(index, spec, SavedPaneHistory::default(), None, None)
                 })
                 .collect(),
             background_panes: Vec::new(),
@@ -285,20 +288,7 @@ fn launch_plan_from_saved(
             saved_grid.columns
         )
     })?;
-    let panes = panes
-        .iter()
-        .map(|pane| PaneLaunchSpec {
-            profile_name: pane.profile_name.clone(),
-            command: pane.command.clone(),
-            env: BTreeMap::new(),
-            cwd: pane.cwd.clone(),
-            folder_name: pane.folder_name.clone(),
-            worktree_name: pane.worktree_name.clone(),
-            auth_name: pane.auth_name.clone(),
-            auth_kind: pane.auth_kind,
-            auth_dir: None,
-        })
-        .collect::<Vec<_>>();
+    let panes = panes.iter().map(SavedPane::launch_spec).collect::<Vec<_>>();
     if panes.is_empty() {
         bail!("saved session {id} has no panes");
     }
@@ -306,6 +296,11 @@ fn launch_plan_from_saved(
 }
 
 fn saved_panes_from_live(plan: &LaunchPlan, panes: &[PtyPane]) -> Vec<SavedPane> {
+    let host_processes = panes
+        .iter()
+        .filter_map(PtyPane::host_process_id)
+        .collect::<Vec<_>>();
+    let codex_roots = roots_with_descendant_named(&host_processes, "codex").ok();
     plan.panes
         .iter()
         .enumerate()
@@ -313,7 +308,20 @@ fn saved_panes_from_live(plan: &LaunchPlan, panes: &[PtyPane]) -> Vec<SavedPane>
             let live = panes.get(index);
             let history = live.map(SavedPaneHistory::from_pane).unwrap_or_default();
             let host = live.map(PtyPane::host_ref);
-            let mut saved = SavedPane::from_spec(index, spec, history, host);
+            let codex_running = live.is_some_and(|pane| {
+                pane.host_process_id().is_some_and(|process_id| {
+                    codex_roots
+                        .as_ref()
+                        .is_some_and(|roots| roots.contains(&process_id))
+                }) || (spec.command.agent_kind == Some(AgentKind::Codex) && !pane.exited)
+            });
+            let codex_thread_id = codex_running
+                .then(|| {
+                    codex_resume_id(&spec.command, &history.input_history)
+                        .or_else(|| live.and_then(|pane| pane.codex_thread_id(pane.cwd())))
+                })
+                .flatten();
+            let mut saved = SavedPane::from_spec(index, spec, history, codex_thread_id, host);
             if let Some(live) = live {
                 saved.cwd = live.cwd().to_path_buf();
                 saved.folder_name = folder_display_name(&saved.cwd);
@@ -325,9 +333,14 @@ fn saved_panes_from_live(plan: &LaunchPlan, panes: &[PtyPane]) -> Vec<SavedPane>
 
 impl SavedPane {
     pub fn launch_spec(&self) -> PaneLaunchSpec {
+        let (profile_name, command) = self
+            .codex_thread_id
+            .as_deref()
+            .map(|thread_id| codex_resume_profile(&self.profile_name, &self.command, thread_id))
+            .unwrap_or_else(|| (self.profile_name.clone(), self.command.clone()));
         PaneLaunchSpec {
-            profile_name: self.profile_name.clone(),
-            command: self.command.clone(),
+            profile_name,
+            command,
             env: BTreeMap::new(),
             cwd: self.cwd.clone(),
             folder_name: self.folder_name.clone(),
@@ -343,13 +356,14 @@ impl SavedPane {
         history: SavedPaneHistory,
         host: Option<PtyHostRef>,
     ) -> Self {
-        Self::from_spec(0, spec, history, host)
+        Self::from_spec(0, spec, history, None, host)
     }
 
     fn from_spec(
         index: usize,
         spec: &PaneLaunchSpec,
         history: SavedPaneHistory,
+        codex_thread_id: Option<String>,
         host: Option<PtyHostRef>,
     ) -> Self {
         Self {
@@ -362,9 +376,101 @@ impl SavedPane {
             auth_name: spec.auth_name.clone(),
             auth_kind: spec.auth_kind,
             history,
+            codex_thread_id,
             host,
         }
     }
+}
+
+fn codex_resume_profile(
+    profile_name: &str,
+    command: &Profile,
+    thread_id: &str,
+) -> (String, Profile) {
+    if command.agent_kind == Some(AgentKind::Codex) && is_direct_codex_command(&command.command) {
+        let mut command = command.clone();
+        if let Some(resume_index) = command
+            .args
+            .iter()
+            .position(|argument| argument == "resume")
+        {
+            if command
+                .args
+                .get(resume_index + 1)
+                .is_some_and(|argument| looks_like_thread_id(argument))
+            {
+                command.args[resume_index + 1] = thread_id.to_string();
+            } else {
+                command.args.insert(resume_index + 1, thread_id.to_string());
+            }
+        } else {
+            command.args.extend(["resume".into(), thread_id.into()]);
+        }
+        return (profile_name.to_string(), command);
+    }
+    if codex_resume_id(command, &[]).as_deref() == Some(thread_id) {
+        return (profile_name.to_string(), command.clone());
+    }
+
+    (
+        "codex".into(),
+        Profile {
+            command: "codex".into(),
+            args: vec!["resume".into(), thread_id.into()],
+            title: Some("Codex".into()),
+            agent_kind: Some(AgentKind::Codex),
+        },
+    )
+}
+
+fn codex_resume_id(command: &Profile, input_history: &[String]) -> Option<String> {
+    command
+        .args
+        .windows(2)
+        .find_map(|arguments| {
+            (arguments[0] == "resume" && looks_like_thread_id(&arguments[1]))
+                .then(|| arguments[1].clone())
+        })
+        .or_else(|| {
+            command
+                .args
+                .iter()
+                .rev()
+                .find_map(|argument| resume_id_in_text(argument))
+        })
+        .or_else(|| {
+            input_history
+                .iter()
+                .rev()
+                .find_map(|input| resume_id_in_text(input))
+        })
+}
+
+fn resume_id_in_text(value: &str) -> Option<String> {
+    let tokens = value
+        .split_whitespace()
+        .map(|token| {
+            token.trim_matches(|character: char| matches!(character, '"' | '\'' | ';' | ','))
+        })
+        .collect::<Vec<_>>();
+    tokens.windows(2).find_map(|tokens| {
+        (tokens[0] == "resume" && looks_like_thread_id(tokens[1])).then(|| tokens[1].to_string())
+    })
+}
+
+fn is_direct_codex_command(command: &str) -> bool {
+    Path::new(command)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("codex"))
+}
+
+fn looks_like_thread_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
 }
 
 impl SavedPaneHistory {
@@ -907,6 +1013,80 @@ mod tests {
     }
 
     #[test]
+    fn saved_codex_thread_relaunches_with_resume() {
+        let mut pane = pane("fluent", "codex");
+        pane.command.agent_kind = Some(AgentKind::Codex);
+        pane.command.args = vec!["--dangerously-bypass-approvals-and-sandbox".into()];
+        pane.codex_thread_id = Some("019f7b81-de49-7782-8186-a3dc2c644c61".into());
+
+        let launch = pane.launch_spec();
+
+        assert_eq!(launch.profile_name, "codex");
+        assert_eq!(
+            launch.command.args,
+            [
+                "--dangerously-bypass-approvals-and-sandbox",
+                "resume",
+                "019f7b81-de49-7782-8186-a3dc2c644c61",
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_running_codex_becomes_a_resumable_codex_pane() {
+        let mut pane = pane("fluent", "git-bash");
+        pane.codex_thread_id = Some("019f7b81-e026-7d12-a013-25f4763f4bce".into());
+
+        let launch = pane.launch_spec();
+
+        assert_eq!(launch.profile_name, "codex");
+        assert_eq!(launch.command.command, "codex");
+        assert_eq!(
+            launch.command.args,
+            ["resume", "019f7b81-e026-7d12-a013-25f4763f4bce"]
+        );
+        assert_eq!(launch.command.agent_kind, Some(AgentKind::Codex));
+    }
+
+    #[test]
+    fn extracts_codex_resume_id_from_shell_history() {
+        let command = Profile {
+            command: "bash".into(),
+            args: Vec::new(),
+            title: Some("Git Bash".into()),
+            agent_kind: None,
+        };
+
+        assert_eq!(
+            codex_resume_id(
+                &command,
+                &["codex resume 019f7b81-e2cd-71c1-84dd-9f09622cf74e".into()]
+            )
+            .as_deref(),
+            Some("019f7b81-e2cd-71c1-84dd-9f09622cf74e")
+        );
+    }
+
+    #[test]
+    fn preserves_a_wrapper_that_already_resumes_the_saved_thread() {
+        let thread_id = "019f7b81-de49-7782-8186-a3dc2c644c61";
+        let command = Profile {
+            command: "powershell.exe".into(),
+            args: vec![
+                "-Command".into(),
+                format!("& codex --dangerously-bypass-approvals-and-sandbox resume {thread_id}"),
+            ],
+            title: Some("Codex".into()),
+            agent_kind: Some(AgentKind::Codex),
+        };
+
+        let (profile_name, restored) = codex_resume_profile("codex", &command, thread_id);
+        assert_eq!(profile_name, "codex");
+        assert_eq!(restored.command, command.command);
+        assert_eq!(restored.args, command.args);
+    }
+
+    #[test]
     fn summarizes_unique_folders_and_profiles() {
         let session = SavedSession {
             version: SESSION_VERSION,
@@ -944,6 +1124,8 @@ mod tests {
         background_pane.host = Some(PtyHostRef {
             endpoint: "127.0.0.1:32123".into(),
             token: "secret".into(),
+            codex_sqlite_home: None,
+            started_at_ms: None,
         });
         let mut session = SavedSession {
             version: SESSION_VERSION,
@@ -1191,6 +1373,7 @@ mod tests {
             auth_name: None,
             auth_kind: None,
             history: SavedPaneHistory::default(),
+            codex_thread_id: None,
             host: None,
         }
     }

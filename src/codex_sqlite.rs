@@ -9,6 +9,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use directories::ProjectDirs;
 use fs4::{FileExt, TryLockError};
+use rusqlite::{Connection, OpenFlags};
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -18,6 +19,8 @@ const CODEX_SQLITE_HOME_ENV: &str = "CODEX_SQLITE_HOME";
 const GRIDBASH_MANAGED_CODEX_SQLITE_ENV: &str = "GRIDBASH_MANAGED_CODEX_SQLITE_HOME";
 const DEFAULT_CODEX_HOME_SCOPE: &str = "<default>";
 const MAX_CODEX_SQLITE_LANES: usize = 4096;
+const CODEX_STATE_DB_PREFIX: &str = "state_";
+const CODEX_STATE_DB_SUFFIX: &str = ".sqlite";
 
 pub(crate) struct CodexSqlitePool {
     root: PathBuf,
@@ -37,6 +40,7 @@ impl Drop for CodexSqliteLease {
 
 pub(crate) struct PaneCodexSqlite {
     pub(crate) env: Vec<(OsString, OsString)>,
+    pub(crate) home: Option<PathBuf>,
     pub(crate) lease: Option<CodexSqliteLease>,
 }
 
@@ -73,6 +77,7 @@ impl CodexSqlitePool {
         if has_explicit_sqlite_home(pane_env, inherited_sqlite_home, inherited_managed_home) {
             return Ok(PaneCodexSqlite {
                 env: Vec::new(),
+                home: explicit_sqlite_home(pane_env, inherited_sqlite_home),
                 lease: None,
             });
         }
@@ -86,6 +91,7 @@ impl CodexSqlitePool {
                 (CODEX_SQLITE_HOME_ENV.into(), home.clone()),
                 (GRIDBASH_MANAGED_CODEX_SQLITE_ENV.into(), home),
             ],
+            home: Some(lease.home.clone()),
             lease: Some(lease),
         })
     }
@@ -138,6 +144,98 @@ impl CodexSqlitePool {
     }
 }
 
+pub(crate) fn latest_thread_id(
+    home: &Path,
+    cwd: &Path,
+    not_before_ms: u64,
+) -> Result<Option<String>> {
+    let Some(path) = latest_state_db(home)? else {
+        return Ok(None);
+    };
+    let connection = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("failed to open Codex state DB {}", path.display()))?;
+    connection.busy_timeout(std::time::Duration::from_millis(250))?;
+
+    let columns = connection
+        .prepare("PRAGMA table_info(threads)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !columns.iter().any(|column| column == "id") || !columns.iter().any(|column| column == "cwd")
+    {
+        return Ok(None);
+    }
+
+    let timestamp_column = [
+        "recency_at_ms",
+        "updated_at_ms",
+        "created_at_ms",
+        "updated_at",
+        "created_at",
+    ]
+    .into_iter()
+    .find(|candidate| columns.iter().any(|column| column == candidate));
+    let Some(timestamp_column) = timestamp_column else {
+        return Ok(None);
+    };
+    let seconds_column = !timestamp_column.ends_with("_ms");
+    let query = format!(
+        "SELECT id, cwd, {timestamp_column} FROM threads \
+         WHERE {timestamp_column} IS NOT NULL ORDER BY {timestamp_column} DESC LIMIT 128"
+    );
+    let mut statement = connection.prepare(&query)?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let expected_cwd = normalized_path(cwd);
+    for row in rows {
+        let (id, row_cwd, timestamp) = row?;
+        let timestamp_ms = if seconds_column {
+            timestamp.saturating_mul(1_000)
+        } else {
+            timestamp
+        };
+        if timestamp_ms >= i64::try_from(not_before_ms).unwrap_or(i64::MAX)
+            && normalized_path(Path::new(&row_cwd)) == expected_cwd
+        {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+fn latest_state_db(home: &Path) -> Result<Option<PathBuf>> {
+    let mut candidates = fs::read_dir(home)
+        .with_context(|| format!("failed to inspect Codex SQLite home {}", home.display()))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter_map(|path| {
+            let name = path.file_name()?.to_str()?;
+            let version = name
+                .strip_prefix(CODEX_STATE_DB_PREFIX)?
+                .strip_suffix(CODEX_STATE_DB_SUFFIX)?
+                .parse::<u64>()
+                .ok()?;
+            Some((version, path))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|(version, _)| *version);
+    Ok(candidates.pop().map(|(_, path)| path))
+}
+
+fn normalized_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
 fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -162,6 +260,21 @@ fn has_explicit_sqlite_home(
 
     let inherited_is_managed = inherited_home.is_some() && inherited_home == inherited_managed_home;
     inherited_home.is_some_and(non_empty_os_str) && !inherited_is_managed
+}
+
+fn explicit_sqlite_home(
+    pane_env: &BTreeMap<String, String>,
+    inherited_home: Option<&OsStr>,
+) -> Option<PathBuf> {
+    pane_env
+        .get(CODEX_SQLITE_HOME_ENV)
+        .and_then(|value| non_empty(value))
+        .map(PathBuf::from)
+        .or_else(|| {
+            inherited_home
+                .filter(|value| non_empty_os_str(value))
+                .map(PathBuf::from)
+        })
 }
 
 fn codex_home_scope(
@@ -204,6 +317,27 @@ fn stable_scope_id(value: &OsStr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_threads(path: &Path, rows: &[(&str, &str, i64)]) {
+        let connection = Connection::open(path).expect("open test state DB");
+        connection
+            .execute_batch(
+                "CREATE TABLE threads (\
+                    id TEXT PRIMARY KEY,\
+                    cwd TEXT NOT NULL,\
+                    recency_at_ms INTEGER NOT NULL\
+                );",
+            )
+            .expect("create threads table");
+        for (id, cwd, recency_at_ms) in rows {
+            connection
+                .execute(
+                    "INSERT INTO threads (id, cwd, recency_at_ms) VALUES (?1, ?2, ?3)",
+                    (id, cwd, recency_at_ms),
+                )
+                .expect("insert thread");
+        }
+    }
 
     struct TestRoot(PathBuf);
 
@@ -303,6 +437,45 @@ mod tests {
 
         assert!(old_pane.lease.is_some());
         assert_ne!(sqlite_home(&replacement), old_home);
+    }
+
+    #[test]
+    fn finds_the_latest_matching_thread_created_after_the_pane_started() {
+        let root = TestRoot::new();
+        let lane = root.0.join("lane-1");
+        fs::create_dir_all(&lane).expect("create lane");
+        write_threads(
+            &lane.join("state_5.sqlite"),
+            &[
+                (
+                    "019f7b81-de49-7782-8186-a3dc2c644c61",
+                    r"C:\work\fluent",
+                    1_000,
+                ),
+                (
+                    "019f7b81-e026-7d12-a013-25f4763f4bce",
+                    r"\\?\C:\work\fluent",
+                    3_000,
+                ),
+                (
+                    "019f7b81-e2cd-71c1-84dd-9f09622cf74e",
+                    r"C:\work\other",
+                    4_000,
+                ),
+            ],
+        );
+
+        assert_eq!(
+            latest_thread_id(&lane, Path::new(r"C:/work/fluent"), 2_000)
+                .expect("find thread")
+                .as_deref(),
+            Some("019f7b81-e026-7d12-a013-25f4763f4bce")
+        );
+        assert_eq!(
+            latest_thread_id(&lane, Path::new(r"C:/work/fluent"), 3_001)
+                .expect("filter old thread"),
+            None
+        );
     }
 
     #[test]
