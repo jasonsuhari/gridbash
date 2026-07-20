@@ -4,17 +4,18 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
 };
 use vt100::Cell;
 
 use crate::{
     app::{
         App, AssistantMessageRole, BackgroundJobState, BackgroundJobView, BackgroundJobsView,
-        CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog, GoalEditorView, GridPalette,
-        PaneSelection, PaneSettingsTarget, PaneSettingsView, PortInspectorView, PreviousPaneView,
-        PreviousPanesView, RenamePaneView, RenameTabView, SettingsGroup, SettingsRow, SettingsTab,
-        SettingsValueKind, TabLabel, WorkspaceAssistantView,
+        CloseGridConfirmationView, CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog,
+        GoalEditorView, GridPalette, PaneSelection, PaneSettingsTarget, PaneSettingsView,
+        PortInspectorView, PreviousPaneView, PreviousPanesView, RenamePaneView, RenameTabView,
+        SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
+        WorkspaceAssistantView,
     },
     auth::{AgentKind, AuthProfile},
     composer::GridPickerMode,
@@ -102,6 +103,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let grid_resizer = app.grid_resizer();
     let image_overlay = app.image_overlay_view();
     let assistant_view = app.workspace_assistant_view();
+    let close_grid_confirmation = app.close_grid_confirmation_view();
     let help_open = app.help_open();
     let copy_mode_open = app.copy_mode_open();
     let exited_recovery = if command_palette_view.is_some()
@@ -119,6 +121,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || goal_editor_view.is_some()
         || image_overlay.is_some()
         || assistant_view.is_some()
+        || close_grid_confirmation.is_some()
     {
         None
     } else {
@@ -139,6 +142,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || goal_editor_view.is_some()
         || image_overlay.is_some()
         || assistant_view.is_some()
+        || close_grid_confirmation.is_some()
         || exited_recovery.is_some();
     let mut pane_settings_rename_button = None;
     let mut pane_settings_reload_button = None;
@@ -348,6 +352,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
     if let Some(view) = command_palette_view.as_ref() {
         render_command_palette(frame, area, view, palette);
+    }
+    if let Some(confirmation) = close_grid_confirmation.as_ref() {
+        render_close_grid_confirmation(frame, area, confirmation, palette);
     }
 
     DrawState {
@@ -3595,6 +3602,71 @@ fn render_command_palette(
     frame.set_cursor_position((cursor_x, inner.y));
 }
 
+fn render_close_grid_confirmation(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    confirmation: &CloseGridConfirmationView,
+    palette: &GridPalette,
+) {
+    let modal = close_grid_confirmation_modal_rect(area);
+    let shadow = settings_shadow_rect(area, modal);
+
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+
+    frame.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.exited())
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" Close current grid? ")
+        .title_bottom(" Enter / Y closes | Esc / N cancels ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let pane_label = if confirmation.pane_count == 1 {
+        "pane"
+    } else {
+        "panes"
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(
+                "Close \"{}\" and terminate {} {pane_label}?",
+                confirmation.title, confirmation.pane_count
+            ),
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Every visible process in this grid will stop.",
+            Style::default().fg(SETTINGS_TEXT),
+        )),
+        Line::from(Span::styled(
+            "Managed worktrees and branches will stay on disk.",
+            Style::default().fg(SETTINGS_MUTED),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .style(settings_panel_style()),
+        inner,
+    );
+}
+
 fn help_control(key: &str, action: &str, width: usize) -> String {
     truncate_text(&format!("{key:<13} {action}"), width)
 }
@@ -3654,6 +3726,22 @@ fn settings_modal_rect(area: Rect, row_count: usize) -> Rect {
 fn exited_recovery_modal_rect(area: Rect) -> Rect {
     let width = area.width.saturating_sub(4).min(62).max(area.width.min(1));
     let height = area.height.saturating_sub(2).min(9).max(area.height.min(1));
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn close_grid_confirmation_modal_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(4).min(66).max(area.width.min(1));
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(11)
+        .max(area.height.min(1));
 
     Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
@@ -4171,6 +4259,29 @@ mod tests {
         let rendered = buffer_text(&terminal);
         assert!(rendered.contains("GridBash Commands"));
         assert!(rendered.contains("No matching"));
+    }
+
+    #[test]
+    fn close_grid_confirmation_names_the_grid_and_consequences() {
+        let backend = TestBackend::new(90, 18);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let view = CloseGridConfirmationView {
+            title: "Backend agents".into(),
+            pane_count: 3,
+        };
+
+        terminal
+            .draw(|frame| {
+                render_close_grid_confirmation(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render close-grid confirmation");
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("Close current grid?"));
+        assert!(rendered.contains("Backend agents"));
+        assert!(rendered.contains("terminate 3 panes"));
+        assert!(rendered.contains("worktrees and branches will stay on disk"));
+        assert!(rendered.contains("Enter / Y closes"));
     }
 
     #[test]

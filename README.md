@@ -93,6 +93,7 @@ agents and shells.
 | `Alt+Shift+L` | Start or stop continuous target-pane logging |
 | `Alt+d` | Chat with BashBot across all open grids and panes |
 | `Alt+n` / `Alt+t` | Open a new tab / switch tabs |
+| `Alt+w` | Close the current grid after confirmation |
 | `Alt+p` | Open focused-pane activity |
 | `Ctrl+Alt+p` | Inspect and stop localhost ports launched by agents |
 | `Alt+Shift+A` | Manage auth profiles and assign one to the focused pane |
