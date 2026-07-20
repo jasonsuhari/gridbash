@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     ffi::{OsString, OsString as PlatformString},
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -28,6 +28,7 @@ use crate::{
     layout::PaneId,
     process_priority::PaneWorkloadClass,
     pty::{PtyEvent, PtyPane as LocalPtyPane, PtyView, PtyWriteToken},
+    session::process_is_running,
 };
 
 const HOST_START_TIMEOUT: Duration = Duration::from_secs(8);
@@ -73,6 +74,8 @@ enum HostCommand {
         protocol_version: u16,
         token: String,
         keep_running: bool,
+        #[serde(default)]
+        client_pid: Option<u32>,
     },
     Write {
         data: String,
@@ -334,6 +337,8 @@ impl PtyPane {
             .with_context(|| format!("invalid pane host endpoint {}", host.endpoint))?;
         let mut stream = TcpStream::connect_timeout(&endpoint, HANDSHAKE_TIMEOUT)
             .with_context(|| format!("failed to connect to pane host {}", host.endpoint))?;
+        prevent_stream_inheritance(&stream)
+            .context("failed to protect pane host connection from child-process inheritance")?;
         stream.set_nodelay(true).ok();
         stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).ok();
         send_json(
@@ -342,12 +347,15 @@ impl PtyPane {
                 protocol_version: PANE_HOST_PROTOCOL_VERSION,
                 token: host.token.clone(),
                 keep_running,
+                client_pid: Some(std::process::id()),
             },
         )?;
 
         let reader_stream = stream
             .try_clone()
             .context("failed to clone pane host connection")?;
+        prevent_stream_inheritance(&reader_stream)
+            .context("failed to protect pane host reader from child-process inheritance")?;
         let mut reader = BufReader::new(reader_stream);
         let mut line = String::new();
         reader
@@ -564,6 +572,8 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
     let _ = fs::remove_file(spec_path);
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).context("failed to bind pane host")?;
+    prevent_listener_inheritance(&listener)
+        .context("failed to protect pane host listener from child-process inheritance")?;
     listener
         .set_nonblocking(true)
         .context("failed to make pane host listener nonblocking")?;
@@ -610,6 +620,7 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
 
     let (command_tx, command_rx) = std_mpsc::channel::<HostInput>();
     let mut client = None::<HostClient>;
+    let mut active_client_id = None::<u64>;
     let mut next_client_id = 1_u64;
     let mut keep_running = spec.keep_running;
     let mut background_output = Vec::new();
@@ -618,6 +629,15 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                prevent_stream_inheritance(&stream).context(
+                    "failed to protect accepted pane host connection from child-process inheritance",
+                )?;
+                if client
+                    .as_ref()
+                    .is_some_and(|client| client_process_is_gone(client.owner_pid))
+                {
+                    disconnect_client(&mut client);
+                }
                 if client.is_none() {
                     if let Some(connected) = accept_client(
                         stream,
@@ -628,6 +648,7 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
                         command_tx.clone(),
                     )? {
                         keep_running = connected.keep_running;
+                        active_client_id = Some(connected.client.id);
                         client = Some(connected.client);
                         next_client_id = next_client_id.wrapping_add(1);
                     }
@@ -650,7 +671,7 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
         }
 
         while let Ok(input) = command_rx.try_recv() {
-            if client.as_ref().map(|value| value.id) != Some(input.client_id) {
+            if active_client_id != Some(input.client_id) {
                 continue;
             }
             match input.message {
@@ -708,6 +729,7 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
                     } => {
                         keep_running = value;
                         disconnect_client(&mut client);
+                        active_client_id = None;
                         if !keep_running {
                             pane.terminate();
                             return Ok(());
@@ -721,6 +743,7 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
                 },
                 HostInputMessage::Closed => {
                     disconnect_client(&mut client);
+                    active_client_id = None;
                     if !keep_running {
                         pane.terminate();
                         return Ok(());
@@ -783,6 +806,7 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
 struct HostClient {
     id: u64,
     stream: TcpStream,
+    owner_pid: Option<u32>,
 }
 
 struct AcceptedClient {
@@ -816,6 +840,8 @@ fn accept_client(
     let reader_stream = stream
         .try_clone()
         .context("failed to clone pane host client")?;
+    prevent_stream_inheritance(&reader_stream)
+        .context("failed to protect pane host client reader from child-process inheritance")?;
     let mut reader = BufReader::new(reader_stream);
     let mut line = String::new();
     reader
@@ -825,6 +851,7 @@ fn accept_client(
         protocol_version,
         token,
         keep_running,
+        client_pid,
     }) = serde_json::from_str::<HostCommand>(&line)
     else {
         let _ = send_json(
@@ -870,6 +897,7 @@ fn accept_client(
         client: HostClient {
             id: client_id,
             stream,
+            owner_pid: client_pid,
         },
         keep_running,
     }))
@@ -1001,6 +1029,44 @@ fn disconnect_client(client: &mut Option<HostClient>) {
     }
 }
 
+fn client_process_is_gone(owner_pid: Option<u32>) -> bool {
+    owner_pid.is_some_and(|owner_pid| !process_is_running(owner_pid))
+}
+
+#[cfg(windows)]
+fn prevent_stream_inheritance(stream: &TcpStream) -> io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    prevent_socket_inheritance(stream.as_raw_socket())
+}
+
+#[cfg(not(windows))]
+fn prevent_stream_inheritance(_stream: &TcpStream) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn prevent_listener_inheritance(listener: &TcpListener) -> io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    prevent_socket_inheritance(listener.as_raw_socket())
+}
+
+#[cfg(not(windows))]
+fn prevent_listener_inheritance(_listener: &TcpListener) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn prevent_socket_inheritance(socket: std::os::windows::io::RawSocket) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+    let result = unsafe { SetHandleInformation(socket as HANDLE, HANDLE_FLAG_INHERIT, 0) };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
 fn append_background_output(buffer: &mut Vec<u8>, bytes: &[u8]) {
     buffer.extend_from_slice(bytes);
     if buffer.len() > BACKGROUND_OUTPUT_LIMIT {
@@ -1093,6 +1159,8 @@ fn spawn_detached_host(spec_path: &Path) -> Result<std::process::Child> {
 mod tests {
     use super::*;
 
+    static PANE_HOST_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     struct TestHostFiles {
         directory: PathBuf,
         spec: PathBuf,
@@ -1136,6 +1204,23 @@ mod tests {
     }
 
     #[test]
+    fn hello_protocol_accepts_clients_without_owner_pid() {
+        let raw = r#"{"type":"hello","protocol_version":1,"token":"secret","keep_running":true}"#;
+        let command = serde_json::from_str::<HostCommand>(raw).expect("parse legacy hello");
+        let HostCommand::Hello { client_pid, .. } = command else {
+            panic!("wrong command kind");
+        };
+        assert_eq!(client_pid, None);
+    }
+
+    #[test]
+    fn stale_client_detection_requires_a_known_dead_owner() {
+        assert!(!client_process_is_gone(None));
+        assert!(!client_process_is_gone(Some(std::process::id())));
+        assert!(client_process_is_gone(Some(u32::MAX)));
+    }
+
+    #[test]
     fn background_output_keeps_a_bounded_tail() {
         let mut output = vec![b'a'; BACKGROUND_OUTPUT_LIMIT];
         append_background_output(&mut output, b"latest");
@@ -1145,6 +1230,7 @@ mod tests {
 
     #[test]
     fn pane_host_survives_disconnect_and_accepts_reattach() {
+        let _guard = PANE_HOST_TEST_LOCK.lock().expect("lock pane host test");
         let files = TestHostFiles::new();
         let host_token = random_token().expect("host token");
         #[cfg(windows)]
@@ -1254,6 +1340,101 @@ mod tests {
             .expect("pane host exits cleanly");
     }
 
+    #[test]
+    fn pane_host_replaces_a_client_owned_by_a_dead_process() {
+        let _guard = PANE_HOST_TEST_LOCK.lock().expect("lock pane host test");
+        let files = TestHostFiles::new();
+        let host_token = random_token().expect("host token");
+        #[cfg(windows)]
+        let (profile_name, command, args, line_ending) = (
+            "cmd",
+            PathBuf::from("cmd.exe"),
+            vec!["/d".to_string(), "/q".to_string()],
+            "\r",
+        );
+        #[cfg(unix)]
+        let (profile_name, command, args, line_ending) =
+            ("sh", PathBuf::from("/bin/sh"), vec!["-i".to_string()], "\n");
+        let spec = HostLaunchSpec {
+            token: host_token.clone(),
+            ready_path: files.ready.clone(),
+            profile_name: profile_name.into(),
+            pane_id: 8,
+            generation: 0,
+            command,
+            args,
+            env: BTreeMap::new(),
+            cwd: std::env::current_dir().expect("current directory"),
+            extra_env: Vec::new(),
+            scrollback_rows: 1_000,
+            process_priority: PaneProcessPriority::Normal,
+            workload_policy: PaneWorkloadPolicy::Unrestricted,
+            keep_running: true,
+        };
+        fs::write(
+            &files.spec,
+            serde_json::to_vec(&spec).expect("serialize host spec"),
+        )
+        .expect("write host spec");
+        let spec_path = files.spec.clone();
+        let host_thread = thread::spawn(move || run_pane_host(&spec_path));
+
+        let ready = wait_for_ready(&files.ready);
+        let mut stale = TcpStream::connect(&ready.endpoint).expect("connect stale client");
+        send_json(
+            &mut stale,
+            &HostCommand::Hello {
+                protocol_version: PANE_HOST_PROTOCOL_VERSION,
+                token: host_token.clone(),
+                keep_running: true,
+                client_pid: Some(u32::MAX),
+            },
+        )
+        .expect("send stale hello");
+        let mut stale_reader = BufReader::new(stale.try_clone().expect("clone stale client"));
+        let mut hello = String::new();
+        stale_reader
+            .read_line(&mut hello)
+            .expect("read stale client handshake");
+        assert!(matches!(
+            serde_json::from_str::<HostEvent>(&hello).expect("parse stale handshake"),
+            HostEvent::Ready { .. }
+        ));
+
+        let host = PtyHostRef {
+            endpoint: ready.endpoint,
+            token: host_token,
+        };
+        let (replacement_tx, mut replacement_rx) = mpsc::channel(8);
+        let mut replacement = PtyPane::attach(
+            host,
+            PaneId(8),
+            0,
+            &spec.cwd,
+            1_000,
+            true,
+            "",
+            &[],
+            replacement_tx,
+        )
+        .expect("replacement client takes over");
+        replacement
+            .write(format!("exit{line_ending}").as_bytes())
+            .expect("exit replacement shell");
+        assert_pane_exits(&mut replacement_rx);
+        replacement
+            .set_keep_running(false)
+            .expect("disable host persistence");
+        drop(replacement);
+        drop(stale_reader);
+        drop(stale);
+
+        host_thread
+            .join()
+            .expect("join pane host")
+            .expect("pane host exits cleanly");
+    }
+
     fn wait_for_ready(path: &Path) -> HostReadyFile {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1286,5 +1467,20 @@ mod tests {
             }
         }
         panic!("expected output {expected:?}, got {output:?}");
+    }
+
+    fn assert_pane_exits(receiver: &mut mpsc::Receiver<PtyEvent>) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match receiver.try_recv() {
+                Ok(PtyEvent::Exited { .. }) => return,
+                Ok(PtyEvent::WriteFailed { error, .. }) => panic!("pane write failed: {error}"),
+                Ok(_) | Err(mpsc::error::TryRecvError::Empty) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        panic!("expected pane to exit");
     }
 }

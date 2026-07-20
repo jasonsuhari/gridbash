@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -554,15 +554,21 @@ pub fn select_resume_session(args: &ResumeArgs) -> Result<Option<SessionRecord>>
         return Ok(None);
     }
 
-    if let Some(query) = args.session.as_deref() {
-        return find_session(&sessions, query).map(Some);
-    }
+    let selected = if let Some(query) = args.session.as_deref() {
+        Some(find_session(&sessions, query)?)
+    } else if args.latest {
+        sessions
+            .iter()
+            .find(|record| live_owner_pid(record).is_none())
+            .cloned()
+            .or_else(|| sessions.first().cloned())
+    } else if sessions.len() == 1 {
+        sessions.first().cloned()
+    } else {
+        prompt_for_session(&sessions)?
+    };
 
-    if args.latest || sessions.len() == 1 {
-        return Ok(sessions.into_iter().next());
-    }
-
-    prompt_for_session(&sessions)
+    selected.map(ensure_session_is_resumable).transpose()
 }
 
 pub fn load_recent_sessions() -> Result<Vec<SessionRecord>> {
@@ -631,6 +637,33 @@ fn find_session(sessions: &[SessionRecord], query: &str) -> Result<SessionRecord
 }
 
 fn prompt_for_session(sessions: &[SessionRecord]) -> Result<Option<SessionRecord>> {
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        return crate::resume_picker::select_session(sessions);
+    }
+
+    prompt_for_session_plain(sessions)
+}
+
+fn live_owner_pid(record: &SessionRecord) -> Option<u32> {
+    record
+        .session
+        .running
+        .then_some(record.session.owner_pid)
+        .flatten()
+        .filter(|owner_pid| process_is_running(*owner_pid))
+}
+
+fn ensure_session_is_resumable(record: SessionRecord) -> Result<SessionRecord> {
+    if let Some(owner_pid) = live_owner_pid(&record) {
+        bail!(
+            "session {} is already open in GridBash (PID {owner_pid}); switch to that client or close it before resuming",
+            record.session.id
+        );
+    }
+    Ok(record)
+}
+
+fn prompt_for_session_plain(sessions: &[SessionRecord]) -> Result<Option<SessionRecord>> {
     println!("Recent GridBash sessions:");
     for (index, record) in sessions.iter().take(20).enumerate() {
         println!(
@@ -761,7 +794,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 #[cfg(unix)]
-fn process_is_running(process_id: u32) -> bool {
+pub(crate) fn process_is_running(process_id: u32) -> bool {
     let Ok(process_id) = i32::try_from(process_id) else {
         return false;
     };
@@ -774,7 +807,7 @@ fn process_is_running(process_id: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn process_is_running(process_id: u32) -> bool {
+pub(crate) fn process_is_running(process_id: u32) -> bool {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, ERROR_ACCESS_DENIED, STILL_ACTIVE},
         System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
@@ -795,7 +828,7 @@ fn process_is_running(process_id: u32) -> bool {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn process_is_running(_process_id: u32) -> bool {
+pub(crate) fn process_is_running(_process_id: u32) -> bool {
     true
 }
 
@@ -1045,6 +1078,24 @@ mod tests {
 
         record.session.recovered_at = Some(now_seconds());
         assert!(!is_interrupted_agent_session(&record));
+    }
+
+    #[test]
+    fn resume_rejects_only_sessions_with_live_owners() {
+        let mut session = recovery_session("live", vec![pane("alpha", "codex")]);
+        session.running = true;
+        session.owner_pid = Some(std::process::id());
+        let record = SessionRecord {
+            path: PathBuf::from("live.toml"),
+            session,
+        };
+
+        let error = ensure_session_is_resumable(record.clone()).expect_err("live owner rejected");
+        assert!(error.to_string().contains("already open"));
+
+        let mut interrupted = record;
+        interrupted.session.owner_pid = Some(u32::MAX);
+        ensure_session_is_resumable(interrupted).expect("dead owner can be recovered");
     }
 
     #[test]

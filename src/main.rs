@@ -17,6 +17,7 @@ mod pane_host;
 mod process_priority;
 mod profiles;
 mod pty;
+mod resume_picker;
 mod session;
 mod setup;
 mod ui;
