@@ -17,6 +17,7 @@ pub enum Action {
     RestartPanes,
     NextTab,
     NewTab,
+    CloseGrid,
     ResizeGrid,
     SwapPanes,
     ZoomPane,
@@ -49,6 +50,7 @@ const ACTIONS: &[Action] = &[
     Action::SelectAll,
     Action::NewTab,
     Action::NextTab,
+    Action::CloseGrid,
     Action::RenameTab,
     Action::CommandLine,
     Action::CommandPalette,
@@ -95,6 +97,7 @@ impl Action {
             Self::RestartPanes => "restart-panes",
             Self::NextTab => "next-tab",
             Self::NewTab => "new-tab",
+            Self::CloseGrid => "close-grid",
             Self::ResizeGrid => "resize-grid",
             Self::SwapPanes => "swap-panes",
             Self::ZoomPane => "zoom-pane",
@@ -133,6 +136,7 @@ impl Action {
             Self::RestartPanes => "restart exited panes",
             Self::NextTab => "switch to next tab",
             Self::NewTab => "open a new tab",
+            Self::CloseGrid => "close current grid",
             Self::ResizeGrid => "resize the grid",
             Self::SwapPanes => "swap selected panes",
             Self::ZoomPane => "zoom or restore focused pane",
@@ -175,6 +179,7 @@ impl Action {
             Self::RestartPanes => "alt+shift+t",
             Self::NextTab => "alt+t",
             Self::NewTab => "alt+n",
+            Self::CloseGrid => "alt+w",
             Self::ResizeGrid => "alt+l",
             Self::SwapPanes => "alt+x",
             Self::ZoomPane => "alt+f",
@@ -514,6 +519,15 @@ mod tests {
             .map(|action| action.name())
             .collect::<BTreeSet<_>>();
         assert_eq!(names.len(), ACTIONS.len());
+    }
+
+    #[test]
+    fn close_grid_has_a_modeless_default_shortcut() {
+        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
+        assert_eq!(
+            bindings.action_for(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT)),
+            Some(Action::CloseGrid)
+        );
     }
 
     #[test]

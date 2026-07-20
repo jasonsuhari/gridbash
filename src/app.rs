@@ -147,6 +147,7 @@ pub struct App {
     grid_resizer: Option<GridPicker>,
     help_open: bool,
     quit_confirmation_pending: bool,
+    close_grid_confirmation_pending: bool,
     settings: SettingsState,
     rename: RenamePaneState,
     tab_rename: RenameTabState,
@@ -299,6 +300,13 @@ enum KeyOutcome {
     Render,
     AuthLogin(AuthProfile),
     Quit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseGridConfirmationAction {
+    Confirm,
+    Cancel,
+    Continue,
 }
 
 #[derive(Debug, Clone)]
@@ -915,6 +923,12 @@ pub struct FollowUpDialog {
     pub todo_position: usize,
     pub todo_count: usize,
     pub quiet_seconds: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CloseGridConfirmationView {
+    pub title: String,
+    pub pane_count: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2439,10 +2453,10 @@ fn switch_value(enabled: bool) -> String {
 
 fn default_status(mouse_enabled: bool) -> String {
     if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+k commands | Alt+Shift+b background | Alt+Ctrl+b jobs | Ctrl+Alt+p ports | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+k commands | Alt+Shift+b background | Alt+Ctrl+b jobs | Ctrl+Alt+p ports | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+w close grid | Alt+Shift+t restart | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     } else {
-        "Alt+k commands | Alt+Shift+b background | Alt+Ctrl+b jobs | Ctrl+Alt+p ports | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
+        "Alt+k commands | Alt+Shift+b background | Alt+Ctrl+b jobs | Ctrl+Alt+p ports | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+w close grid | Alt+Shift+t restart | Alt+s select | Alt+c command line | Alt+d BashBot | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+g grid goal | Alt+u stop goal | Alt+o settings | Alt+h help"
             .into()
     }
 }
@@ -2679,6 +2693,7 @@ impl App {
             grid_resizer: None,
             help_open: false,
             quit_confirmation_pending: false,
+            close_grid_confirmation_pending: false,
             settings: init.settings,
             rename: RenamePaneState::default(),
             tab_rename: RenameTabState::default(),
@@ -2957,6 +2972,7 @@ impl App {
         self.copy_mode = None;
         self.command_line.focused = false;
         self.grid_resizer = None;
+        self.close_grid_confirmation_pending = false;
     }
 
     fn activate_plan_as_tab(&mut self, title: String, mut plan: LaunchPlan) -> Result<()> {
@@ -5152,6 +5168,9 @@ impl App {
 
     fn handle_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<KeyOutcome> {
         let action = self.keybindings.action_for(&key);
+        if self.close_grid_confirmation_pending {
+            return self.handle_close_grid_confirmation_key(key);
+        }
         if is_quit_recovery(&key) || action == Some(Action::Quit) {
             return Ok(self.request_quit());
         }
@@ -5740,6 +5759,9 @@ impl App {
             Action::NewTab => {
                 self.open_new_tab(terminal)?;
             }
+            Action::CloseGrid => {
+                self.request_close_current_grid()?;
+            }
             Action::ToggleOutputLogging => {
                 self.toggle_target_output_logging();
             }
@@ -5912,6 +5934,91 @@ impl App {
 
         let next = (self.active_tab + 1) % self.tabs.len();
         self.switch_to_tab(next);
+    }
+
+    fn request_close_current_grid(&mut self) -> Result<()> {
+        if self.tabs.len() <= 1 {
+            self.close_grid_confirmation_pending = false;
+            self.status = "the only grid cannot be closed; use Alt+q to quit GridBash".into();
+            return Ok(());
+        }
+
+        self.close_tab_modals();
+        self.close_grid_confirmation_pending = true;
+        self.status = format!("close grid confirmation open for {}", self.tab_title);
+        Ok(())
+    }
+
+    fn handle_close_grid_confirmation_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        match close_grid_confirmation_action(key) {
+            CloseGridConfirmationAction::Confirm => {
+                self.close_grid_confirmation_pending = false;
+                self.close_current_grid()?;
+            }
+            CloseGridConfirmationAction::Cancel => {
+                self.close_grid_confirmation_pending = false;
+                self.status = "close grid canceled".into();
+            }
+            CloseGridConfirmationAction::Continue => return Ok(KeyOutcome::Continue),
+        }
+        Ok(KeyOutcome::Render)
+    }
+
+    fn close_current_grid(&mut self) -> Result<()> {
+        let closing_title = self.tab_title.clone();
+        let closing_index = self.active_tab;
+        let Some(next_index) = tab_index_after_close(closing_index, self.tabs.len()) else {
+            self.status = "the only grid cannot be closed; use Alt+q to quit GridBash".into();
+            return Ok(());
+        };
+
+        self.close_tab_modals();
+        let mut termination_failures = 0usize;
+        for mut pane in mem::take(&mut self.panes) {
+            let pane_id = pane.id();
+            let log_key = PaneLogKey::new(pane_id, pane.generation());
+            if self.output_logs.stop(log_key).is_err() {
+                termination_failures += 1;
+            }
+            self.pane_render_cache.borrow_mut().remove(&pane_id);
+            self.applied_workloads.remove(&pane_id);
+            self.activity_summary_states.remove(&pane_id);
+            if pane.terminate().is_err() {
+                termination_failures += 1;
+            }
+        }
+        self.voice.cancel();
+        self.voice_destination = None;
+
+        self.tabs.remove(closing_index);
+        let snapshot = self.tabs[next_index]
+            .take()
+            .ok_or_else(|| anyhow!("surviving grid {} is unavailable", next_index + 1))?;
+        self.active_tab = next_index;
+        self.restore_tab_snapshot(snapshot);
+        let recovered_agent = self.recover_exited_agent_panes_to_shell();
+        if let Some(cwd) = self.active_pane_cwd() {
+            self.command_line.cwd = cwd;
+        }
+        self.start_usage_for_active_tab();
+        self.sync_pane_sizes_for_current_layout();
+        self.save_session_snapshot()?;
+
+        self.status = if termination_failures == 0 {
+            format!(
+                "closed grid {closing_title}; active grid {}",
+                self.tab_title
+            )
+        } else {
+            format!(
+                "closed grid {closing_title}; {termination_failures} pane cleanup operation(s) reported errors"
+            )
+        };
+        if recovered_agent && termination_failures == 0 {
+            self.status
+                .push_str("; restored exited agent panes to shells");
+        }
+        Ok(())
     }
 
     fn switch_to_tab(&mut self, index: usize) {
@@ -8918,6 +9025,14 @@ impl App {
         &self.status
     }
 
+    pub fn close_grid_confirmation_view(&self) -> Option<CloseGridConfirmationView> {
+        self.close_grid_confirmation_pending
+            .then(|| CloseGridConfirmationView {
+                title: self.tab_title.clone(),
+                pane_count: self.panes.len(),
+            })
+    }
+
     pub fn grid_resizer(&self) -> Option<&GridPicker> {
         self.grid_resizer.as_ref()
     }
@@ -11104,6 +11219,10 @@ fn swapped_index(index: usize, first: usize, second: usize) -> usize {
     }
 }
 
+fn tab_index_after_close(active: usize, tab_count: usize) -> Option<usize> {
+    (tab_count > 1).then(|| active.min(tab_count - 2))
+}
+
 fn wrapped_row_focus_target(
     focus: usize,
     pane_count: usize,
@@ -11246,6 +11365,22 @@ fn exited_recovery_action_for(key: KeyEvent) -> Option<ExitedRecoveryAction> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+fn close_grid_confirmation_action(key: KeyEvent) -> CloseGridConfirmationAction {
+    if key.modifiers.contains(KeyModifiers::ALT) || key.modifiers.contains(KeyModifiers::CONTROL) {
+        return CloseGridConfirmationAction::Continue;
+    }
+    match key.code {
+        KeyCode::Enter => CloseGridConfirmationAction::Confirm,
+        KeyCode::Esc => CloseGridConfirmationAction::Cancel,
+        KeyCode::Char(ch) => match ch.to_ascii_lowercase() {
+            'y' => CloseGridConfirmationAction::Confirm,
+            'n' => CloseGridConfirmationAction::Cancel,
+            _ => CloseGridConfirmationAction::Continue,
+        },
+        _ => CloseGridConfirmationAction::Continue,
     }
 }
 
@@ -12106,6 +12241,14 @@ mod tests {
     }
 
     #[test]
+    fn closing_a_grid_keeps_the_next_slot_or_falls_back_to_the_previous_one() {
+        assert_eq!(tab_index_after_close(0, 3), Some(0));
+        assert_eq!(tab_index_after_close(1, 3), Some(1));
+        assert_eq!(tab_index_after_close(2, 3), Some(1));
+        assert_eq!(tab_index_after_close(0, 1), None);
+    }
+
+    #[test]
     fn horizontal_focus_wraps_within_the_current_row() {
         let sleeping = selected(&[]);
 
@@ -12321,6 +12464,30 @@ mod tests {
         assert_eq!(
             exited_recovery_action_for(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT)),
             None
+        );
+    }
+
+    #[test]
+    fn close_grid_confirmation_requires_an_explicit_choice() {
+        assert_eq!(
+            close_grid_confirmation_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            CloseGridConfirmationAction::Confirm
+        );
+        assert_eq!(
+            close_grid_confirmation_action(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT)),
+            CloseGridConfirmationAction::Confirm
+        );
+        assert_eq!(
+            close_grid_confirmation_action(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+            CloseGridConfirmationAction::Cancel
+        );
+        assert_eq!(
+            close_grid_confirmation_action(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            CloseGridConfirmationAction::Cancel
+        );
+        assert_eq!(
+            close_grid_confirmation_action(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT)),
+            CloseGridConfirmationAction::Continue
         );
     }
 

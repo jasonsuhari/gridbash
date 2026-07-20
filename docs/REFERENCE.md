@@ -226,6 +226,7 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+x | Swap the two selected panes. |
 | Alt+n | Open the startup picker and launch a new tab. |
 | Alt+t | Switch to the next tab. |
+| Alt+w | Open the current-grid close confirmation. |
 | Alt+s | Toggle selection of the focused pane. |
 | Alt+a | Select all panes, or clear the set when all are selected. |
 | Alt+c | Open or close the expanded command line. |
@@ -279,6 +280,13 @@ Alt+D opens BashBot in a compact dock at the bottom-right. BashBot uses bounded,
 
 The command palette lists the available pane, tab, grid, manager, settings, help, and quit actions together with their configured shortcuts. Its query supports tolerant subsequence matching, pasted Unicode text, and cursor editing. Palette input is never sent to a child terminal; press Esc or the configured command-palette shortcut to close it without running anything.
 
+The close-grid confirmation names the grid, reports its pane count, and requires
+Enter or Y before GridBash terminates all of its visible panes, even when **Keep
+terminals running** is enabled. Escape or N cancels. After confirmation,
+GridBash removes the tab and activates the next grid or the previous grid when
+the closed one was last. GridBash never closes the only remaining grid; use
+Alt+q to quit the workspace. Managed worktrees and their branches are preserved.
+
 Pane Activity provides auth, rename, refresh, sleep/wake, deactivate, and manager-goal controls. Navigate with Up/Down and activate with Enter or Space. Direct keys inside the view are `n` to rename, `r` to refresh, `z` to sleep or wake, `d` to deactivate, `g` to edit the grid goal, and `u` to stop it. Close it with Esc, `q`, or Alt+p; Alt+Shift+A opens Auth Profiles and Alt+o switches to overall settings.
 
 The bottom-right **Ports** control counts TCP listeners launched inside GridBash agent process trees. Click it or press Ctrl+Alt+p to see each port, process name, PID, and owning pane or tab. Use Up/Down to select a listener, `R` to refresh, and Enter or Delete followed by Enter to terminate its process. GridBash excludes unrelated system listeners and its own pane-host control sockets from this view.
@@ -305,7 +313,7 @@ settings = "f8"
 
 Supported actions are `quit`, `help`, `focus-left`, `focus-right`, `focus-up`,
 `focus-down`, `toggle-selection`, `select-all`, `sleep-panes`, `restart-panes`,
-`next-tab`, `new-tab`, `resize-grid`, `swap-panes`, `zoom-pane`, `command-line`,
+`next-tab`, `new-tab`, `close-grid`, `resize-grid`, `swap-panes`, `zoom-pane`, `command-line`,
 `command-palette`, `bashbot`, `voice-input`, `edit-goal`, `stop-goal`, `settings`, `previous-panes`, `ports`,
 `pane-activity`, `copy-mode`, `auth-profiles`, `capture-output`,
 `toggle-output-logging`, `rename-tab`, and `rename-pane`. Unlisted actions retain their
