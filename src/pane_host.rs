@@ -697,8 +697,10 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
                         next_client_id,
                         &spec.token,
                         &pane,
-                        codex_sqlite_home.as_deref(),
-                        started_at_ms,
+                        HostCodexMetadata {
+                            sqlite_home: codex_sqlite_home.as_deref(),
+                            started_at_ms,
+                        },
                         &mut background_output,
                         command_tx.clone(),
                     )? {
@@ -869,6 +871,11 @@ struct AcceptedClient {
     keep_running: bool,
 }
 
+struct HostCodexMetadata<'a> {
+    sqlite_home: Option<&'a Path>,
+    started_at_ms: u64,
+}
+
 struct HostInput {
     client_id: u64,
     message: HostInputMessage,
@@ -884,8 +891,7 @@ fn accept_client(
     client_id: u64,
     expected_token: &str,
     pane: &LocalPtyPane,
-    codex_sqlite_home: Option<&Path>,
-    started_at_ms: u64,
+    codex: HostCodexMetadata<'_>,
     background_output: &mut Vec<u8>,
     command_tx: std_mpsc::Sender<HostInput>,
 ) -> Result<Option<AcceptedClient>> {
@@ -946,8 +952,8 @@ fn accept_client(
             background_output: BASE64.encode(&*background_output),
             cwd: pane.cwd().to_path_buf(),
             exited: pane.exited,
-            codex_sqlite_home: codex_sqlite_home.map(Path::to_path_buf),
-            started_at_ms: Some(started_at_ms),
+            codex_sqlite_home: codex.sqlite_home.map(Path::to_path_buf),
+            started_at_ms: Some(codex.started_at_ms),
         },
     )?;
     background_output.clear();
