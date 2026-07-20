@@ -31,6 +31,7 @@ pub enum Action {
     Settings,
     PreviousPanes,
     PaneActivity,
+    Ports,
     CopyMode,
     BackgroundPanes,
     BackgroundJobs,
@@ -55,6 +56,7 @@ const ACTIONS: &[Action] = &[
     Action::CaptureOutput,
     Action::ToggleOutputLogging,
     Action::PaneActivity,
+    Action::Ports,
     Action::PreviousPanes,
     Action::CopyMode,
     Action::BackgroundPanes,
@@ -107,6 +109,7 @@ impl Action {
             Self::Settings => "settings",
             Self::PreviousPanes => "previous-panes",
             Self::PaneActivity => "pane-activity",
+            Self::Ports => "ports",
             Self::CopyMode => "copy-mode",
             Self::BackgroundPanes => "background-panes",
             Self::BackgroundJobs => "background-jobs",
@@ -144,6 +147,7 @@ impl Action {
             Self::Settings => "open settings and profiles",
             Self::PreviousPanes => "show previous panes",
             Self::PaneActivity => "show focused-pane activity",
+            Self::Ports => "show ports used by coding agents",
             Self::CopyMode => "search and copy pane scrollback",
             Self::BackgroundPanes => "background selected or focused panes",
             Self::BackgroundJobs => "show background agents",
@@ -185,6 +189,7 @@ impl Action {
             Self::Settings => "alt+o",
             Self::PreviousPanes => "alt+shift+p",
             Self::PaneActivity => "alt+p",
+            Self::Ports => "ctrl+alt+p",
             Self::CopyMode => "alt+b",
             Self::BackgroundPanes => "alt+shift+b",
             Self::BackgroundJobs => "ctrl+alt+b",
@@ -509,5 +514,17 @@ mod tests {
             .map(|action| action.name())
             .collect::<BTreeSet<_>>();
         assert_eq!(names.len(), ACTIONS.len());
+    }
+
+    #[test]
+    fn agent_ports_has_a_modeless_default_shortcut() {
+        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
+        assert_eq!(
+            bindings.action_for(&KeyEvent::new(
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )),
+            Some(Action::Ports)
+        );
     }
 }

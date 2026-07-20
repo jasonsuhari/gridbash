@@ -231,6 +231,7 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+Shift+V | Dictate one utterance, or cancel active listening. |
 | Alt+h / F1 | Open or close help. |
 | Alt+p | Open the focused-pane activity summary. |
+| Ctrl+Alt+p | Open the agent port inspector. |
 | Alt+Shift+P | Open the previous-panes list. |
 | Alt+Shift+A | Open Auth Profiles to manage accounts or assign one to the focused pane. |
 | Alt+Shift+B | Move selected panes, or the focused pane, into the background and launch fresh replacements. |
@@ -274,6 +275,8 @@ The command palette lists the available pane, tab, grid, manager, settings, help
 
 Pane Activity provides auth, rename, refresh, sleep/wake, deactivate, and manager-goal controls. Navigate with Up/Down and activate with Enter or Space. Direct keys inside the view are `n` to rename, `r` to refresh, `z` to sleep or wake, `d` to deactivate, `g` to edit the grid goal, and `u` to stop it. Close it with Esc, `q`, or Alt+p; Alt+Shift+A opens Auth Profiles and Alt+o switches to overall settings.
 
+The bottom-right **Ports** control counts TCP listeners launched inside GridBash agent process trees. Click it or press Ctrl+Alt+p to see each port, process name, PID, and owning pane or tab. Use Up/Down to select a listener, `R` to refresh, and Enter or Delete followed by Enter to terminate its process. GridBash excludes unrelated system listeners and its own pane-host control sockets from this view.
+
 Deactivating a pane ends its terminal process, compacts the remaining panes, and shrinks the grid whenever a smaller dimension can still hold them. Columns are removed before rows, so deactivating two panes from a `2x3` grid compacts it to `2x2`. The final pane cannot be deactivated.
 
 Alt+Shift+B backgrounds every explicitly selected pane, or the focused pane when the selected set is empty. GridBash first launches fresh panes with the same profile, command, auth, folder, and worktree; only after all replacements succeed are the original PTYs moved into the session-wide pool. Custom pane names follow the original jobs, while fresh replacements return to numbered labels.
@@ -297,7 +300,7 @@ settings = "f8"
 Supported actions are `quit`, `help`, `focus-left`, `focus-right`, `focus-up`,
 `focus-down`, `toggle-selection`, `select-all`, `sleep-panes`, `restart-panes`,
 `next-tab`, `new-tab`, `resize-grid`, `swap-panes`, `zoom-pane`, `command-line`,
-`command-palette`, `bashbot`, `voice-input`, `edit-goal`, `stop-goal`, `settings`, `previous-panes`,
+`command-palette`, `bashbot`, `voice-input`, `edit-goal`, `stop-goal`, `settings`, `previous-panes`, `ports`,
 `pane-activity`, `copy-mode`, `auth-profiles`, `capture-output`,
 `toggle-output-logging`, `rename-tab`, and `rename-pane`. Unlisted actions retain their
 defaults. Duplicate chords and unmodified terminal keys are rejected. F1 and

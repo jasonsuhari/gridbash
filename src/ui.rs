@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Widget},
@@ -12,9 +12,9 @@ use crate::{
     app::{
         App, AssistantMessageRole, BackgroundJobState, BackgroundJobView, BackgroundJobsView,
         CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog, GoalEditorView, GridPalette,
-        PaneSelection, PaneSettingsTarget, PaneSettingsView, PreviousPaneView, PreviousPanesView,
-        RenamePaneView, RenameTabView, SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind,
-        TabLabel, WorkspaceAssistantView,
+        PaneSelection, PaneSettingsTarget, PaneSettingsView, PortInspectorView, PreviousPaneView,
+        PreviousPanesView, RenamePaneView, RenameTabView, SettingsGroup, SettingsRow, SettingsTab,
+        SettingsValueKind, TabLabel, WorkspaceAssistantView,
     },
     auth::{AgentKind, AuthProfile},
     composer::GridPickerMode,
@@ -45,6 +45,8 @@ pub struct DrawState {
     pub pane_settings_stop_goal_button: Option<Rect>,
     pub background_jobs_button: Option<Rect>,
     pub background_job_rows: Vec<(usize, Rect)>,
+    pub ports_button: Option<Rect>,
+    pub port_rows: Vec<(usize, Rect)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -91,6 +93,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let tab_rename_view = app.rename_tab_view();
     let previous_panes_view = app.previous_panes_view();
     let background_jobs_view = app.background_jobs_view();
+    let port_inspector_view = app.port_inspector_view();
     let follow_up_dialog = app.follow_up_dialog();
     let goal_editor_view = app.goal_editor_view();
     let pane_settings_view = app.pane_settings_view();
@@ -107,6 +110,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || app.settings_open()
         || previous_panes_view.is_some()
         || background_jobs_view.is_some()
+        || port_inspector_view.is_some()
         || pane_settings_open
         || rename_view.is_some()
         || tab_rename_view.is_some()
@@ -126,6 +130,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || app.settings_open()
         || previous_panes_view.is_some()
         || background_jobs_view.is_some()
+        || port_inspector_view.is_some()
         || pane_settings_open
         || rename_view.is_some()
         || tab_rename_view.is_some()
@@ -214,6 +219,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let pane_settings_button = pane_settings_button_rect(status_area);
     let background_jobs_button =
         background_jobs_button_rect(status_area, app.background_job_count());
+    let ports_button = ports_button_rect(status_area, app.agent_port_count());
     let status = Line::from(vec![
         Span::styled(
             STATUS_BRAND,
@@ -275,6 +281,18 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
         status_area,
     );
+    if let Some(button) = ports_button {
+        frame.render_widget(
+            Paragraph::new(ports_button_label(app.agent_port_count()))
+                .alignment(Alignment::Center)
+                .style(ports_button_style(
+                    app.port_inspector_open(),
+                    app.agent_port_count(),
+                    palette,
+                )),
+            button,
+        );
+    }
 
     if app.settings_open() {
         render_settings(frame, area, app, palette);
@@ -296,6 +314,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     };
     let background_job_rows = if let Some(view) = background_jobs_view.as_ref() {
         render_background_jobs(frame, area, view, palette)
+    } else {
+        Vec::new()
+    };
+    let port_rows = if let Some(view) = port_inspector_view.as_ref() {
+        render_port_inspector(frame, area, view, palette)
     } else {
         Vec::new()
     };
@@ -341,6 +364,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         pane_settings_stop_goal_button,
         background_jobs_button,
         background_job_rows,
+        ports_button,
+        port_rows,
     }
 }
 
@@ -750,6 +775,42 @@ fn background_jobs_button_style(open: bool, palette: &GridPalette) -> Style {
     } else {
         Style::default()
             .fg(palette.accent())
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
+fn ports_button_label(count: usize) -> String {
+    format!(" Ports {count} ")
+}
+
+fn ports_button_rect(status_area: Rect, count: usize) -> Option<Rect> {
+    let width = ports_button_label(count).len() as u16;
+    if status_area.height == 0 || status_area.width < width {
+        return None;
+    }
+    Some(Rect {
+        x: status_area.right().saturating_sub(width),
+        y: status_area.y,
+        width,
+        height: 1,
+    })
+}
+
+fn ports_button_style(open: bool, count: usize, palette: &GridPalette) -> Style {
+    if open {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if count > 0 {
+        Style::default()
+            .fg(Color::Black)
+            .bg(palette.accent())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::DarkGray)
+            .bg(APP_BG)
             .add_modifier(Modifier::BOLD)
     }
 }
@@ -1784,6 +1845,209 @@ fn previous_panes_command_bar(width: u16) -> Line<'static> {
         Span::styled(" move  ", Style::default().fg(Color::Gray)),
         command_key("Enter"),
         Span::styled(" focus  ", Style::default().fg(Color::Gray)),
+        command_key("Esc"),
+        Span::styled(" close", Style::default().fg(Color::Gray)),
+    ])
+}
+
+fn render_port_inspector(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &PortInspectorView,
+    palette: &GridPalette,
+) -> Vec<(usize, Rect)> {
+    let modal = previous_panes_modal_rect(area, view.ports.len().max(1));
+    let shadow = settings_shadow_rect(area, modal);
+    let mut row_hits = Vec::new();
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.accent())
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" Agent Ports ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    if inner.width == 0 || inner.height == 0 {
+        return row_hits;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    let count = match view.ports.len() {
+        1 => "1 TCP listener".to_string(),
+        count => format!("{count} TCP listeners"),
+    };
+    let scan_state = if view.refreshing {
+        "  refreshing..."
+    } else {
+        "  launched by GridBash agents"
+    };
+    let header = vec![
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                count,
+                Style::default()
+                    .fg(palette.accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(scan_state, Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(Span::styled(
+            view.error
+                .as_deref()
+                .map(|error| format!("  Scan error: {error}"))
+                .unwrap_or_else(|| "  PORT   PROCESS              PID  PANE / TAB".into()),
+            Style::default().fg(if view.error.is_some() {
+                Color::LightRed
+            } else {
+                SETTINGS_MUTED
+            }),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(header).style(settings_panel_style()),
+        chunks[0],
+    );
+
+    let list_area = chunks[1];
+    if view.ports.is_empty() {
+        let message = if view.refreshing {
+            "  Looking for localhost listeners in agent process trees..."
+        } else {
+            "  No agent-owned localhost listeners are active."
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(message, Style::default().fg(SETTINGS_MUTED)))
+                .style(settings_panel_style()),
+            list_area,
+        );
+    } else {
+        let visible =
+            visible_previous_pane_range(view.ports.len(), view.cursor, list_area.height as usize);
+        let mut rows = Vec::new();
+        for (row_offset, index) in visible.enumerate() {
+            let Some(port) = view.ports.get(index) else {
+                continue;
+            };
+            let row_area = Rect {
+                x: list_area.x,
+                y: list_area.y.saturating_add(row_offset as u16),
+                width: list_area.width,
+                height: 1,
+            };
+            row_hits.push((index, row_area));
+            rows.push(agent_port_line(
+                port.port,
+                port.pid,
+                &port.process,
+                &port.owner,
+                view.cursor == index,
+                view.pending_terminate == Some(port.pid),
+                list_area.width,
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(rows).style(settings_panel_style()),
+            list_area,
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(port_inspector_command_bar(
+            chunks[2].width,
+            view.pending_terminate.is_some(),
+        ))
+        .style(settings_panel_style()),
+        chunks[2],
+    );
+    row_hits
+}
+
+#[allow(clippy::too_many_arguments)]
+fn agent_port_line(
+    port: u16,
+    pid: u32,
+    process: &str,
+    owner: &str,
+    active: bool,
+    pending_terminate: bool,
+    width: u16,
+) -> Line<'static> {
+    let process_width = if width < 62 { 12 } else { 18 };
+    let owner = if active && pending_terminate {
+        "Press Enter to terminate"
+    } else {
+        owner
+    };
+    let text = format!(
+        "{} {:>5}   {:<process_width$} {:>7}  {}",
+        if active { ">" } else { " " },
+        port,
+        truncate_text(process, process_width),
+        pid,
+        owner,
+    );
+    let fg = if active && pending_terminate {
+        Color::LightRed
+    } else if active {
+        SETTINGS_TEXT
+    } else {
+        Color::LightCyan
+    };
+    Line::from(Span::styled(
+        fixed_width(&text, width as usize),
+        row_style(fg, active.then_some(SETTINGS_ROW_ACTIVE), active),
+    ))
+}
+
+fn port_inspector_command_bar(width: u16, pending_terminate: bool) -> Line<'static> {
+    if pending_terminate {
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Enter"),
+            Span::styled(" terminate process  ", Style::default().fg(Color::LightRed)),
+            command_key("Esc"),
+            Span::styled(" cancel", Style::default().fg(Color::Gray)),
+        ]);
+    }
+    if width < 60 {
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Enter"),
+            Span::styled(" stop  ", Style::default().fg(Color::Gray)),
+            command_key("R"),
+            Span::styled(" refresh  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" close", Style::default().fg(Color::Gray)),
+        ]);
+    }
+    Line::from(vec![
+        Span::raw("  "),
+        command_key("Up/Down"),
+        Span::styled(" move  ", Style::default().fg(Color::Gray)),
+        command_key("Enter/Delete"),
+        Span::styled(" terminate  ", Style::default().fg(Color::Gray)),
+        command_key("R"),
+        Span::styled(" refresh  ", Style::default().fg(Color::Gray)),
         command_key("Esc"),
         Span::styled(" close", Style::default().fg(Color::Gray)),
     ])
@@ -4511,5 +4775,13 @@ mod tests {
         assert_eq!(target[(3, 2)].symbol(), "C");
         assert_eq!(target[(4, 2)].symbol(), "D");
         assert_eq!(target[(2, 1)].symbol(), " ");
+    }
+
+    #[test]
+    fn ports_button_stays_anchored_to_footer_right_edge() {
+        let footer = Rect::new(4, 20, 80, 1);
+        let button = ports_button_rect(footer, 3).expect("ports button");
+        assert_eq!(button.right(), footer.right());
+        assert_eq!(button.width, ports_button_label(3).len() as u16);
     }
 }
