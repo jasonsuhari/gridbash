@@ -3895,11 +3895,11 @@ impl App {
         self.assistant
             .push_message(AssistantRole::User, message.clone());
 
-        if let Some(objective) = message.strip_prefix("/goal") {
-            if message == "/goal" || message.starts_with("/goal ") {
-                self.start_director_goal(objective);
-                return;
-            }
+        if let Some(objective) = message.strip_prefix("/goal")
+            && (message == "/goal" || message.starts_with("/goal "))
+        {
+            self.start_director_goal(objective);
+            return;
         }
         if message == "/stop" {
             let stopped = self.manager_goal.take().is_some();
