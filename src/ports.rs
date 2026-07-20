@@ -50,6 +50,51 @@ pub fn terminate_process(pid: u32) -> io::Result<()> {
     terminate_process_platform(pid)
 }
 
+pub fn roots_with_descendant_named(roots: &[u32], expected_name: &str) -> io::Result<HashSet<u32>> {
+    if roots.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let processes = process_snapshot()?;
+    let roots = roots.iter().copied().collect::<HashSet<_>>();
+    let expected_name = expected_name.trim_end_matches(".exe").to_ascii_lowercase();
+    Ok(processes
+        .iter()
+        .filter(|(_, process)| {
+            let name = process
+                .name
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&process.name)
+                .to_ascii_lowercase();
+            name.trim_end_matches(".exe") == expected_name
+        })
+        .filter_map(|(pid, _)| descendant_root(*pid, &processes, &roots))
+        .collect())
+}
+
+fn descendant_root(
+    pid: u32,
+    processes: &HashMap<u32, ProcessInfo>,
+    roots: &HashSet<u32>,
+) -> Option<u32> {
+    let mut current = pid;
+    let mut visited = HashSet::new();
+    for _ in 0..64 {
+        if !visited.insert(current) {
+            return None;
+        }
+        let parent = processes.get(&current)?.parent_pid;
+        if roots.contains(&parent) {
+            return Some(parent);
+        }
+        if parent == 0 || parent == current {
+            return None;
+        }
+        current = parent;
+    }
+    None
+}
+
 fn associate_agent_ports(
     roots: &[AgentProcessRoot],
     processes: &HashMap<u32, ProcessInfo>,
@@ -470,6 +515,37 @@ mod tests {
                 owner: "Grid 1 / Pane 2".into(),
             }]
         );
+    }
+
+    #[test]
+    fn finds_the_owning_root_for_nested_processes() {
+        let processes = HashMap::from([
+            (
+                10,
+                ProcessInfo {
+                    parent_pid: 1,
+                    name: "gridbash".into(),
+                },
+            ),
+            (
+                20,
+                ProcessInfo {
+                    parent_pid: 10,
+                    name: "bash".into(),
+                },
+            ),
+            (
+                30,
+                ProcessInfo {
+                    parent_pid: 20,
+                    name: "codex".into(),
+                },
+            ),
+        ]);
+        let roots = HashSet::from([10]);
+
+        assert_eq!(descendant_root(30, &processes, &roots), Some(10));
+        assert_eq!(descendant_root(10, &processes, &roots), None);
     }
 
     #[cfg(windows)]

@@ -92,6 +92,12 @@ worktree names, auth assignments, and a pane-local view of recent submitted
 commands and output. By default, resume starts new child terminals and does not
 replay old commands into a shell.
 
+For a pane that is actively running Codex, the snapshot also stores the Codex
+conversation ID. If the original pane host is gone after a restart or laptop
+shutdown, GridBash relaunches that pane with `codex resume <conversation-id>`.
+This applies both to Codex profiles and to Codex launched inside a GridBash Git
+Bash pane. Unrelated shell commands are never replayed.
+
 Enable **Keep terminals running** in Settings to detach live pane hosts when the
 GridBash UI closes. `gridbash resume` then reconnects to the same PTYs; output
 produced while detached is added to the restored view. If a host is no longer

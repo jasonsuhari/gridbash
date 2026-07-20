@@ -113,6 +113,11 @@ To keep live terminals running after GridBash closes, open Settings with
 launching shell when you quit; reconnect later with `gridbash resume --latest`
 or select the session with `gridbash resume`.
 
+Running Codex panes are also saved by conversation ID. If their live terminal
+cannot survive a restart or laptop shutdown, `gridbash resume` relaunches them
+with `codex resume <conversation-id>` instead of opening an empty terminal.
+This also covers Codex started manually inside a GridBash Git Bash pane.
+
 If the terminal or GridBash process closes unexpectedly, the next plain
 `gridbash` launch automatically recovers unfinished agent sessions. Saved panes
 are grouped into tabs by working directory, each tab is named after that

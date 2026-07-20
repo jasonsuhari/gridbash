@@ -8,7 +8,7 @@ use std::{
     process::{Command, Stdio},
     sync::{Arc, Mutex, mpsc as std_mpsc},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use std::{error::Error as StdError, fmt};
 
@@ -42,6 +42,10 @@ const PANE_HOST_PROTOCOL_VERSION: u16 = 1;
 pub struct PtyHostRef {
     pub endpoint: String,
     pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_sqlite_home: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -110,6 +114,10 @@ enum HostEvent {
         background_output: String,
         cwd: PathBuf,
         exited: bool,
+        #[serde(default)]
+        codex_sqlite_home: Option<PathBuf>,
+        #[serde(default)]
+        started_at_ms: Option<u64>,
     },
     Output {
         data: String,
@@ -283,6 +291,8 @@ impl PtyPane {
         let host = PtyHostRef {
             endpoint: ready.endpoint,
             token,
+            codex_sqlite_home: None,
+            started_at_ms: None,
         };
         Self::connect(
             host,
@@ -324,7 +334,7 @@ impl PtyPane {
 
     #[allow(clippy::too_many_arguments)]
     fn connect(
-        host: PtyHostRef,
+        mut host: PtyHostRef,
         id: PaneId,
         generation: u64,
         fallback_cwd: &Path,
@@ -369,19 +379,31 @@ impl PtyPane {
         }
         let ready = serde_json::from_str::<HostEvent>(&line)
             .context("failed to parse pane host handshake")?;
-        let (protocol_version, host_process_id, background_output, cwd, exited) = match ready {
+        let (
+            protocol_version,
+            host_process_id,
+            background_output,
+            cwd,
+            exited,
+            codex_sqlite_home,
+            started_at_ms,
+        ) = match ready {
             HostEvent::Ready {
                 protocol_version,
                 host_process_id,
                 background_output,
                 cwd,
                 exited,
+                codex_sqlite_home,
+                started_at_ms,
             } => (
                 protocol_version,
                 host_process_id,
                 background_output,
                 cwd,
                 exited,
+                codex_sqlite_home,
+                started_at_ms,
             ),
             HostEvent::Error { error } => {
                 return Err(PaneHostRejected { reason: error }.into());
@@ -410,6 +432,12 @@ impl PtyPane {
             view.process_output(&background_output);
         }
 
+        if codex_sqlite_home.is_some() {
+            host.codex_sqlite_home = codex_sqlite_home;
+        }
+        if started_at_ms.is_some() {
+            host.started_at_ms = started_at_ms;
+        }
         spawn_client_reader(reader, id, generation, event_tx);
         Ok(Self {
             id,
@@ -438,6 +466,14 @@ impl PtyPane {
 
     pub fn host_process_id(&self) -> Option<u32> {
         self.host_process_id
+    }
+
+    pub fn codex_thread_id(&self, cwd: &Path) -> Option<String> {
+        let home = self.host.codex_sqlite_home.as_deref()?;
+        let started_at_ms = self.host.started_at_ms?;
+        crate::codex_sqlite::latest_thread_id(home, cwd, started_at_ms)
+            .ok()
+            .flatten()
     }
 
     pub fn cwd(&self) -> &Path {
@@ -608,8 +644,10 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
 
     let PaneCodexSqlite {
         env: codex_env,
+        home: codex_sqlite_home,
         lease,
     } = CodexSqlitePool::new()?.for_pane(&spec.env)?;
+    let started_at_ms = now_millis();
     let mut extra_env = spec
         .extra_env
         .iter()
@@ -659,6 +697,10 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
                         next_client_id,
                         &spec.token,
                         &pane,
+                        HostCodexMetadata {
+                            sqlite_home: codex_sqlite_home.as_deref(),
+                            started_at_ms,
+                        },
                         &mut background_output,
                         command_tx.clone(),
                     )? {
@@ -829,6 +871,11 @@ struct AcceptedClient {
     keep_running: bool,
 }
 
+struct HostCodexMetadata<'a> {
+    sqlite_home: Option<&'a Path>,
+    started_at_ms: u64,
+}
+
 struct HostInput {
     client_id: u64,
     message: HostInputMessage,
@@ -844,6 +891,7 @@ fn accept_client(
     client_id: u64,
     expected_token: &str,
     pane: &LocalPtyPane,
+    codex: HostCodexMetadata<'_>,
     background_output: &mut Vec<u8>,
     command_tx: std_mpsc::Sender<HostInput>,
 ) -> Result<Option<AcceptedClient>> {
@@ -904,6 +952,8 @@ fn accept_client(
             background_output: BASE64.encode(&*background_output),
             cwd: pane.cwd().to_path_buf(),
             exited: pane.exited,
+            codex_sqlite_home: codex.sqlite_home.map(Path::to_path_buf),
+            started_at_ms: Some(codex.started_at_ms),
         },
     )?;
     background_output.clear();
@@ -917,6 +967,15 @@ fn accept_client(
         },
         keep_running,
     }))
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn spawn_host_reader(
@@ -1287,6 +1346,8 @@ mod tests {
         let host = PtyHostRef {
             endpoint: ready.endpoint,
             token: host_token,
+            codex_sqlite_home: None,
+            started_at_ms: None,
         };
         let (first_tx, mut first_rx) = mpsc::channel(32);
         let first = PtyPane::attach(
@@ -1420,6 +1481,8 @@ mod tests {
         let host = PtyHostRef {
             endpoint: ready.endpoint,
             token: host_token,
+            codex_sqlite_home: None,
+            started_at_ms: None,
         };
         let (replacement_tx, mut replacement_rx) = mpsc::channel(8);
         let mut replacement = PtyPane::attach(
