@@ -16,7 +16,7 @@ fn search_keywords(action: Action) -> &'static str {
         Action::ZoomPane => "maximize fullscreen restore",
         Action::RestartPanes => "exited dead",
         Action::PreviousPanes => "history list switch",
-        Action::CloseGrid => "remove delete tab workspace terminate",
+        Action::CloseGrid => "remove delete grid tab workspace terminate",
         Action::Ports => "localhost server listener process pid terminate",
         Action::VoiceInput => "microphone speech",
         Action::AuthProfiles => "accounts credentials profiles",
