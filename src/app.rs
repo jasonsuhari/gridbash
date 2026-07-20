@@ -1702,14 +1702,6 @@ impl CommandLineState {
         }
     }
 
-    fn toggle_focus(&mut self) {
-        self.focused = !self.focused;
-    }
-
-    fn output_expanded(&self) -> bool {
-        self.focused
-    }
-
     fn insert_text(&mut self, text: &str) {
         for ch in text.chars() {
             if matches!(ch, '\r' | '\n') {
@@ -9653,10 +9645,6 @@ impl App {
         self.command_line.cursor_chars()
     }
 
-    pub fn command_output_expanded(&self) -> bool {
-        self.command_line.output_expanded()
-    }
-
     pub fn command_output_lines(&self) -> &[String] {
         &self.command_line.output_lines
     }
@@ -13078,21 +13066,6 @@ mod tests {
         assert_eq!(command.cursor_chars(), 3);
         assert!(command.backspace());
         assert_eq!(command.input, "abc");
-    }
-
-    #[test]
-    fn command_line_focus_controls_output_visibility() {
-        let mut command = CommandLineState::new(PathBuf::from("C:\\repo"));
-        assert!(!command.focused);
-        assert!(!command.output_expanded());
-
-        command.toggle_focus();
-        assert!(command.focused);
-        assert!(command.output_expanded());
-
-        command.toggle_focus();
-        assert!(!command.focused);
-        assert!(!command.output_expanded());
     }
 
     #[test]
