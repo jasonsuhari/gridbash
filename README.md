@@ -52,8 +52,8 @@ use that release's matching native artifact until npm publication catches up.
   Amp, Cursor, Copilot, shells, or custom commands.
 - **Built-in workflow tools.** Resize grids, restore sessions, dictate prompts,
   inspect stable pane activity, optionally generate concise AI work summaries,
-  ask BashBot to brief or coordinate the workspace, and let a manager route
-  targeted follow-ups.
+  use the per-grid BashBot Director to brief panes, route targeted follow-ups,
+  or continuously supervise an explicit goal.
 - **Optional background terminals.** Close the UI without stopping live panes,
   then reconnect to the same processes from a saved session.
 
@@ -88,10 +88,9 @@ agents and shells.
 | `Alt+k` | Search and run GridBash commands |
 | `Alt` + arrow keys | Move focus between panes |
 | `Alt+s` / `Alt+a` | Toggle the focused pane / select or clear all panes |
-| `Alt+c` | Open or close the command line |
+| `Alt+c` | Open or close the per-grid BashBot Director command center |
 | `Alt+Shift+C` | Save bounded recent output from the target panes |
 | `Alt+Shift+L` | Start or stop continuous target-pane logging |
-| `Alt+d` | Chat with BashBot across all open grids and panes |
 | `Alt+n` / `Alt+t` | Open a new tab / switch tabs |
 | `Alt+w` | Close the current grid after confirmation |
 | `Alt+p` | Open focused-pane activity |
@@ -100,7 +99,6 @@ agents and shells.
 | `Alt+f` | Zoom or restore the focused pane |
 | `Alt+b` | Search, select, and copy focused-pane scrollback |
 | `Alt+Shift+b` / `Alt+Ctrl+b` | Background selected panes / open background agents |
-| `Alt+g` / `Alt+u` | Start or stop the grid manager goal |
 | `Alt+Shift+V` | Dictate one prompt without submitting it |
 | `Alt+o` | Open settings |
 | `Alt+h` or `F1` | Open the full in-app shortcut guide |
