@@ -29,7 +29,14 @@ Release target: unreleased
 
 ## Validation
 
-- Pending focused Rust tests, formatting, and the repository validation batch.
+- `cargo fmt --all -- --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo test` (287 passed, 3 ignored)
+- Repository Node test files (48 passed)
+- `cargo build --release --bin gridbash`
+- Release-binary `--help`, `agent --help`, and `agent prompt --help` smoke checks
+- `node npm/scripts/prepare.js`
+- Root and Windows native `npm pack --dry-run --ignore-scripts`
 
 ## Release Notes
 
