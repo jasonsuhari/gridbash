@@ -979,7 +979,7 @@ fn tool_arguments_to_command(tool_name: &str, arguments: Value) -> Result<Contro
             if args.prompt.trim().is_empty() {
                 return Err(anyhow!("pane prompt cannot be empty"));
             }
-            if args.other_panes == !args.targets.is_empty() {
+            if args.other_panes != args.targets.is_empty() {
                 return Err(anyhow!(
                     "provide stable pane targets or set other_panes to true"
                 ));
