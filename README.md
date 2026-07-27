@@ -67,7 +67,9 @@ use that release's matching native artifact until npm publication catches up.
 | `gridbash 2x3 --profile codex --worktrees` | Isolate every pane in a git worktree |
 | `gridbash resume` | Choose a saved session to reopen |
 | `gridbash resume --latest` | Reopen the latest saved session |
-| `gridbash ctl list --json` | Discover opted-in running grids |
+| `gridbash agent panes` | List sibling panes from inside a GridBash pane |
+| `gridbash agent prompt --others "Report status"` | Prompt every other available pane |
+| `gridbash ctl list --json` | Discover running grids |
 | `gridbash ctl panes --session ID` | Inspect numbered and stable pane identities |
 | `gridbash --list-profiles` | Show detected profiles and resolved commands |
 | `gridbash --help` | Show every CLI option |
@@ -161,21 +163,31 @@ Application shortcuts can also be remapped in `[keys]`, for example
 `zoom-pane = "ctrl+shift+k"`. Unlisted actions keep their defaults, while F1
 and `Alt+q` remain reliable help and quit fallbacks.
 
-## Agent control API
+## Agent pane tools
 
-Enable GridBash's local, opt-in control API for agents inside its panes:
+Fresh GridBash sessions automatically give every pane a local, authenticated
+command surface. A coding agent acting as the manager can discover the current
+grid, target stable pane identities, and prompt its siblings without copying a
+session ID or token:
 
 ```sh
-gridbash --agent-api 2x3 --profile codex
+gridbash agent panes
+gridbash agent prompt --pane pane-4-gen-2 "Review the current diff"
+printf "Report status, blockers, and next action" | gridbash agent prompt --others
 ```
+
+`--others` excludes the calling pane and any sleeping or exited panes. Prompt
+text can be a positional argument or piped through stdin. Use
+`--no-agent-api` when launching GridBash to disable the pane-local tools.
 
 Configure an agent MCP server to run `gridbash --mcp`. It can request a
 lightweight grid snapshot, read bounded recent output from specific stable pane
-IDs, show local images, send commands, capture or continuously log specific
-panes, and update the GridBash status bar. Awareness is pull-based so agents can
-request peer context only at coordination points; returned summaries and output
-are explicitly untrusted context. The API is localhost-only,
-token-authenticated, and off by default.
+IDs, show local images, prompt explicit panes or every other pane, send commands,
+capture or continuously log specific panes, and update the GridBash status bar.
+The purpose-named `gridbash_prompt_panes` tool is intended for manager and
+delegation workflows. Awareness is pull-based so agents can request peer context
+only at coordination points; returned summaries and output are explicitly
+untrusted context.
 
 The same typed API is available to scripts through `gridbash ctl`. Discovery
 metadata contains runtime IDs and localhost endpoints, never bearer tokens.
@@ -189,6 +201,9 @@ gridbash ctl panes --session <id-or-prefix> --json
 gridbash ctl send --session <id> --pane 2 "cargo test"
 gridbash ctl focus --session <id> pane-4-gen-2
 ```
+
+All control traffic stays on localhost and mutations require the per-session
+token inherited by panes.
 
 ## Compatibility and current limits
 

@@ -49,13 +49,17 @@ pub struct Cli {
     #[arg(long)]
     pub no_mouse: bool,
 
-    /// Enable the local agent control API for child agent tools.
-    #[arg(long)]
+    /// Compatibility flag; agent tools are enabled by default.
+    #[arg(long, hide = true)]
     pub agent_api: bool,
 
     /// Localhost port for the agent control API. Use 0 to pick an available port.
     #[arg(long, default_value_t = 0)]
     pub agent_api_port: u16,
+
+    /// Disable pane-local agent discovery and prompting tools.
+    #[arg(long, conflicts_with_all = ["agent_api", "agent_api_port"])]
+    pub no_agent_api: bool,
 
     /// Run the GridBash MCP server over stdio.
     #[arg(long)]
@@ -85,6 +89,7 @@ impl Cli {
             && self.layout == GridMode::Grid
             && !self.agent_api
             && self.agent_api_port == 0
+            && !self.no_agent_api
             && self.set_default_profile.is_none()
             && !self.list_profiles
             && !self.mcp
@@ -100,10 +105,56 @@ pub enum GridMode {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
+    /// Discover panes and prompt sibling coding agents.
+    Agent(AgentArgs),
     /// Find and reopen a saved GridBash session.
     Resume(ResumeArgs),
-    /// Inspect or control an opted-in running GridBash session.
+    /// Inspect or control a running GridBash session.
     Ctl(CtlArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AgentArgs {
+    /// Runtime session id or unique id prefix. Defaults to the current pane's session.
+    #[arg(long, global = true)]
+    pub session: Option<String>,
+
+    /// Session bearer token. Defaults to the current pane's GRIDBASH_CONTROL_TOKEN.
+    #[arg(long, global = true)]
+    pub token: Option<String>,
+
+    /// Print machine-readable JSON.
+    #[arg(long, global = true)]
+    pub json: bool,
+
+    #[command(subcommand)]
+    pub action: AgentAction,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum AgentAction {
+    /// List the current grid's panes, including stable prompt targets and the caller.
+    Panes,
+    /// Send a prompt to selected panes or every other available pane.
+    #[command(visible_alias = "send")]
+    Prompt {
+        /// Pane number or stable pane-<id>-gen-<generation> target. Repeat for multiple panes.
+        #[arg(
+            short = 'p',
+            long = "pane",
+            required_unless_present = "others",
+            conflicts_with = "others"
+        )]
+        panes: Vec<String>,
+        /// Prompt every other available pane in the current grid.
+        #[arg(long)]
+        others: bool,
+        /// Prompt text. Omit this argument to read the prompt from stdin.
+        prompt: Option<String>,
+        /// Write the prompt without pressing Enter.
+        #[arg(long)]
+        no_submit: bool,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
@@ -211,6 +262,9 @@ mod tests {
 
         let agent_api = Cli::parse_from(["gridbash", "--agent-api"]);
         assert!(!agent_api.allows_automatic_recovery());
+
+        let no_agent_api = Cli::parse_from(["gridbash", "--no-agent-api"]);
+        assert!(!no_agent_api.allows_automatic_recovery());
     }
 
     #[test]
@@ -235,6 +289,50 @@ mod tests {
             args.action,
             CtlAction::Send { panes, command, no_submit: true }
                 if panes == vec!["pane-4-gen-2"] && command == "echo ready"
+        ));
+    }
+
+    #[test]
+    fn parses_agent_prompt_from_stdin_for_other_panes() {
+        let cli = Cli::parse_from(["gridbash", "agent", "prompt", "--others"]);
+        let Some(Command::Agent(args)) = cli.command else {
+            panic!("expected agent command");
+        };
+
+        assert!(matches!(
+            args.action,
+            AgentAction::Prompt {
+                panes,
+                others: true,
+                prompt: None,
+                no_submit: false
+            } if panes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn parses_agent_prompt_with_stable_targets() {
+        let cli = Cli::parse_from([
+            "gridbash",
+            "agent",
+            "prompt",
+            "--pane",
+            "pane-4-gen-2",
+            "--no-submit",
+            "Review the current diff",
+        ]);
+        let Some(Command::Agent(args)) = cli.command else {
+            panic!("expected agent command");
+        };
+
+        assert!(matches!(
+            args.action,
+            AgentAction::Prompt {
+                panes,
+                others: false,
+                prompt: Some(prompt),
+                no_submit: true
+            } if panes == vec!["pane-4-gen-2"] && prompt == "Review the current diff"
         ));
     }
 }
