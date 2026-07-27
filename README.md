@@ -179,6 +179,8 @@ printf "Report status, blockers, and next action" | gridbash agent prompt --othe
 `--others` excludes the calling pane and any sleeping or exited panes. Prompt
 text can be a positional argument or piped through stdin. Use
 `--no-agent-api` when launching GridBash to disable the pane-local tools.
+`GRIDBASH_AGENT_TOOLS` is a human-readable discovery hint, not a stable
+protocol; scripts should use `gridbash agent --help` for command discovery.
 
 Configure an agent MCP server to run `gridbash --mcp`. It can request a
 lightweight grid snapshot, read bounded recent output from specific stable pane
