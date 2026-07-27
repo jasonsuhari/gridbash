@@ -2479,6 +2479,23 @@ fn default_status(mouse_enabled: bool) -> String {
     }
 }
 
+fn start_agent_control(
+    enabled: bool,
+    port: u16,
+) -> Result<(
+    Option<ControlHandle>,
+    Option<std_mpsc::Receiver<ControlEnvelope>>,
+)> {
+    if !enabled {
+        return Ok((None, None));
+    }
+    let (control_tx, control_rx) = std_mpsc::channel();
+    Ok((
+        Some(control::start_control_server(port, control_tx)?),
+        Some(control_rx),
+    ))
+}
+
 impl App {
     pub fn new(cli: Cli, config: Config) -> Result<Self> {
         let startup_cwd = resolved_current_dir()?;
@@ -2499,19 +2516,8 @@ impl App {
                 rows: 2,
                 columns: 3,
             });
-        let agent_api_enabled = cli.agent_api || cli.agent_api_port != 0;
-        let (control_handle, control_rx) = if agent_api_enabled {
-            let (control_tx, control_rx) = std_mpsc::channel();
-            (
-                Some(control::start_control_server(
-                    cli.agent_api_port,
-                    control_tx,
-                )?),
-                Some(control_rx),
-            )
-        } else {
-            (None, None)
-        };
+        let (control_handle, control_rx) =
+            start_agent_control(cli.agent_control_enabled(), cli.agent_api_port)?;
         let base_status = if config.keys.is_empty() {
             default_status(mouse_enabled)
         } else {
@@ -2519,7 +2525,7 @@ impl App {
         };
         let status = control_handle
             .as_ref()
-            .map(|control| format!("agent API {} | {base_status}", control.endpoint()))
+            .map(|_| format!("agent pane tools ready | {base_status}"))
             .unwrap_or(base_status);
         let settings = SettingsState::from_config(&config);
 
@@ -2544,7 +2550,13 @@ impl App {
         })
     }
 
-    pub fn resume(config: Config, record: SessionRecord, mouse_enabled: bool) -> Result<Self> {
+    pub fn resume(
+        config: Config,
+        record: SessionRecord,
+        mouse_enabled: bool,
+        agent_control_enabled: bool,
+        agent_control_port: u16,
+    ) -> Result<Self> {
         let mut launch_plan = record.session.launch_plan()?;
         apply_auth_defaults(&mut launch_plan, &config)?;
         let grid = launch_plan.grid;
@@ -2565,6 +2577,13 @@ impl App {
             .first()
             .map(|pane| pane.cwd.clone())
             .unwrap_or(resolved_current_dir()?);
+        let (control_handle, control_rx) =
+            start_agent_control(agent_control_enabled, agent_control_port)?;
+        let status = if control_handle.is_some() {
+            format!("resumed session {session_id} | agent pane tools ready")
+        } else {
+            format!("resumed session {session_id}")
+        };
 
         Self::from_parts(AppInit {
             config,
@@ -2574,8 +2593,8 @@ impl App {
             grid,
             mouse_enabled,
             command_cwd,
-            control_handle: None,
-            control_rx: None,
+            control_handle,
+            control_rx,
             settings,
             tab_title,
             restored_histories,
@@ -2583,7 +2602,7 @@ impl App {
             restored_hosts,
             restored_tabs,
             session_recorder: Some(recorder),
-            status: format!("resumed session {session_id}"),
+            status,
         })
     }
 
@@ -2591,6 +2610,8 @@ impl App {
         config: Config,
         recovery: InterruptedRecovery,
         mouse_enabled: bool,
+        agent_control_enabled: bool,
+        agent_control_port: u16,
     ) -> Result<Self> {
         let InterruptedRecovery {
             mut tabs,
@@ -2614,6 +2635,13 @@ impl App {
             .map(|pane| pane.cwd.clone())
             .unwrap_or(resolved_current_dir()?);
         let tab_count = tabs.len() + 1;
+        let (control_handle, control_rx) =
+            start_agent_control(agent_control_enabled, agent_control_port)?;
+        let agent_control_status = if control_handle.is_some() {
+            " | agent pane tools ready"
+        } else {
+            ""
+        };
 
         Self::from_parts(AppInit {
             config,
@@ -2623,8 +2651,8 @@ impl App {
             grid,
             mouse_enabled,
             command_cwd,
-            control_handle: None,
-            control_rx: None,
+            control_handle,
+            control_rx,
             settings,
             tab_title: active.title,
             restored_histories,
@@ -2633,7 +2661,7 @@ impl App {
             restored_tabs: tabs,
             session_recorder: None,
             status: format!(
-                "recovered {pane_count} pane{} from {session_count} interrupted session{} into {tab_count} tab{} | Alt+t switches tabs",
+                "recovered {pane_count} pane{} from {session_count} interrupted session{} into {tab_count} tab{} | Alt+t switches tabs{agent_control_status}",
                 if pane_count == 1 { "" } else { "s" },
                 if session_count == 1 { "" } else { "s" },
                 if tab_count == 1 { "" } else { "s" },
@@ -3201,6 +3229,11 @@ impl App {
                 (
                     "GRIDBASH_PANE_ID".into(),
                     pane_id.0.saturating_add(1).to_string().into(),
+                ),
+                (
+                    "GRIDBASH_AGENT_TOOLS".into(),
+                    "gridbash agent panes | gridbash agent prompt --pane TARGET | gridbash agent prompt --others"
+                        .into(),
                 ),
             ]);
         }
@@ -4760,7 +4793,7 @@ impl App {
     ) -> ControlResponse {
         match command {
             ControlCommand::Ping => ControlResponse::ok("GridBash control session is live"),
-            ControlCommand::Describe => self.describe_control_session(),
+            ControlCommand::Describe => self.describe_control_session(caller_pane_id),
             ControlCommand::GetGridSnapshot => self.control_grid_snapshot(caller_pane_id),
             ControlCommand::ReadPaneOutput {
                 pane_ids,
@@ -4772,6 +4805,12 @@ impl App {
                 command,
                 submit,
             } => self.send_control_command(&panes, &command, submit),
+            ControlCommand::PromptPanes {
+                panes,
+                prompt,
+                submit,
+                others,
+            } => self.prompt_control_panes(&panes, &prompt, submit, others, caller_pane_id),
             ControlCommand::ShowImage { path, title } => self.show_control_image(path, title),
             ControlCommand::CaptureOutput { panes, directory } => {
                 self.capture_control_output(&panes, directory.as_deref())
@@ -4801,6 +4840,7 @@ impl App {
                 serde_json::json!({
                     "pane_id": pane_id,
                     "pane_number": index + 1,
+                    "target": PaneTarget::stable_label(pane.id(), pane.generation()),
                     "is_self": caller_pane_id == Some(pane_id),
                     "label": self.pane_label(index),
                     "name": self.pane_names.get(index).and_then(|name| name.as_deref()),
@@ -4847,7 +4887,7 @@ impl App {
         )
     }
 
-    fn describe_control_session(&self) -> ControlResponse {
+    fn describe_control_session(&self, caller_pane_id: Option<usize>) -> ControlResponse {
         let Some(control) = self.control_handle.as_ref() else {
             return ControlResponse::error("GridBash control API is not enabled");
         };
@@ -4861,6 +4901,7 @@ impl App {
                     "id": PaneTarget::stable_label(pane.id(), pane.generation()),
                     "pane_id": pane.id().0,
                     "generation": pane.generation(),
+                    "is_self": caller_pane_id == Some(stable_control_pane_id(pane.id())),
                     "label": self.pane_label(index),
                     "cwd": pane.cwd().display().to_string(),
                     "focused": self.focus == index && !self.command_line.focused,
@@ -5001,38 +5042,16 @@ impl App {
 
     fn send_control_command(
         &mut self,
-        pane_numbers: &[PaneTarget],
+        pane_targets: &[PaneTarget],
         command: &str,
         submit: bool,
     ) -> ControlResponse {
-        let targets = match self.control_pane_indices(pane_numbers) {
+        let targets = match self.control_pane_indices(pane_targets) {
             Ok(targets) => targets,
             Err(error) => return ControlResponse::error(format!("{error:#}")),
         };
-        let command_bytes = command.as_bytes();
-
-        for index in &targets {
-            let Some(pane) = self.panes.get_mut(*index) else {
-                return ControlResponse::error(format!("pane {} is unavailable", index + 1));
-            };
-            if !command_bytes.is_empty() {
-                if let Err(error) = pane.write(command_bytes) {
-                    return ControlResponse::error(format!(
-                        "failed to send command to pane {}: {error:#}",
-                        index + 1
-                    ));
-                }
-                pane.record_input(command_bytes);
-            }
-            if submit {
-                if let Err(error) = pane.write(b"\r") {
-                    return ControlResponse::error(format!(
-                        "failed to submit command in pane {}: {error:#}",
-                        index + 1
-                    ));
-                }
-                pane.record_input(b"\r");
-            }
+        if let Err(error) = self.write_control_input(&targets, command, submit) {
+            return ControlResponse::error(format!("{error:#}"));
         }
 
         let panes = pane_number_list(&targets);
@@ -5042,6 +5061,83 @@ impl App {
             format!("agent wrote text to pane(s) {panes}")
         };
         ControlResponse::ok(self.status.clone())
+    }
+
+    fn prompt_control_panes(
+        &mut self,
+        pane_targets: &[PaneTarget],
+        prompt: &str,
+        submit: bool,
+        others: bool,
+        caller_pane_id: Option<usize>,
+    ) -> ControlResponse {
+        if prompt.trim().is_empty() {
+            return ControlResponse::error("pane prompt cannot be empty");
+        }
+        if others && !pane_targets.is_empty() {
+            return ControlResponse::error(
+                "choose explicit pane targets or every other pane, not both",
+            );
+        }
+
+        let targets = if others {
+            let Some(caller_pane_id) = caller_pane_id else {
+                return ControlResponse::error(
+                    "--others is only available inside a GridBash pane; use --pane outside the grid",
+                );
+            };
+            match other_available_pane_indices(&self.control_pane_states(), caller_pane_id) {
+                Ok(targets) => targets,
+                Err(error) => return ControlResponse::error(format!("{error:#}")),
+            }
+        } else {
+            let targets = match self.control_pane_indices(pane_targets) {
+                Ok(targets) => targets,
+                Err(error) => return ControlResponse::error(format!("{error:#}")),
+            };
+            for index in &targets {
+                if self.panes.get(*index).is_some_and(|pane| pane.exited) {
+                    return ControlResponse::error(format!("pane {} has exited", index + 1));
+                }
+                if self.sleeping.contains(index) {
+                    return ControlResponse::error(format!("pane {} is asleep", index + 1));
+                }
+            }
+            targets
+        };
+
+        if let Err(error) = self.write_control_input(&targets, prompt, submit) {
+            return ControlResponse::error(format!("{error:#}"));
+        }
+
+        let panes = pane_number_list(&targets);
+        self.status = if submit {
+            format!("agent prompted pane(s) {panes}")
+        } else {
+            format!("agent wrote a prompt to pane(s) {panes}")
+        };
+        ControlResponse::ok(self.status.clone())
+    }
+
+    fn write_control_input(&mut self, targets: &[usize], input: &str, submit: bool) -> Result<()> {
+        let input_bytes = input.as_bytes();
+        for index in targets {
+            let pane = self
+                .panes
+                .get_mut(*index)
+                .ok_or_else(|| anyhow!("pane {} is unavailable", index + 1))?;
+            if !input_bytes.is_empty() {
+                pane.write(input_bytes)
+                    .with_context(|| format!("failed to send input to pane {}", index + 1))?;
+                pane.record_input(input_bytes);
+            }
+            if submit {
+                pane.write(b"\r")
+                    .with_context(|| format!("failed to submit input in pane {}", index + 1))?;
+                pane.record_input(b"\r");
+            }
+        }
+        Ok(())
     }
 
     fn show_control_image(
@@ -10406,6 +10502,28 @@ fn control_pane_indices_by_id(
     Ok(targets)
 }
 
+fn other_available_pane_indices(
+    states: &[ControlPaneState],
+    caller_pane_id: usize,
+) -> Result<Vec<usize>> {
+    if !states.iter().any(|state| state.pane_id == caller_pane_id) {
+        return Err(anyhow!(
+            "the calling pane is not in the current grid; use explicit --pane targets"
+        ));
+    }
+    let targets = states
+        .iter()
+        .enumerate()
+        .filter_map(|(index, state)| {
+            (state.pane_id != caller_pane_id && state.unavailable_reason.is_none()).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return Err(anyhow!("no other available panes to prompt"));
+    }
+    Ok(targets)
+}
+
 fn capture_goal_text(
     manager_goal: &mut Option<ManagerGoal>,
     sleeping: &BTreeSet<usize>,
@@ -13723,6 +13841,38 @@ mod selection_tests {
                 .unwrap_err()
                 .to_string()
                 .contains("current grid")
+        );
+    }
+
+    #[test]
+    fn other_pane_prompt_targets_exclude_the_caller_and_unavailable_panes() {
+        let states = [
+            ControlPaneState {
+                pane_id: 2,
+                unavailable_reason: None,
+            },
+            ControlPaneState {
+                pane_id: 4,
+                unavailable_reason: Some("is asleep"),
+            },
+            ControlPaneState {
+                pane_id: 7,
+                unavailable_reason: None,
+            },
+        ];
+
+        assert_eq!(other_available_pane_indices(&states, 2).unwrap(), vec![2]);
+        assert!(
+            other_available_pane_indices(&states, 9)
+                .unwrap_err()
+                .to_string()
+                .contains("calling pane")
+        );
+        assert!(
+            other_available_pane_indices(&states[..1], 2)
+                .unwrap_err()
+                .to_string()
+                .contains("no other available")
         );
     }
 

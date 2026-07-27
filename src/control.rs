@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeSet,
     env,
-    io::{self, BufRead, Read, Write},
+    io::{self, BufRead, IsTerminal, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
     sync::mpsc::{self, Sender},
@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    cli::{CtlAction, CtlArgs},
+    cli::{AgentAction, AgentArgs, CtlAction, CtlArgs},
     control_discovery::{self, DiscoveryLease, DiscoveryRecord},
     layout::PaneId,
 };
@@ -153,6 +153,12 @@ pub enum ControlCommand {
         panes: Vec<PaneTarget>,
         command: String,
         submit: bool,
+    },
+    PromptPanes {
+        panes: Vec<PaneTarget>,
+        prompt: String,
+        submit: bool,
+        others: bool,
     },
     ShowImage {
         path: PathBuf,
@@ -365,6 +371,49 @@ pub fn run_mcp_server() -> Result<()> {
     Ok(())
 }
 
+pub fn run_agent(args: &AgentArgs) -> Result<()> {
+    let sessions = control_discovery::discover_sessions(probe_discovered_session)?;
+    let requested_session = args
+        .session
+        .clone()
+        .or_else(|| env::var("GRIDBASH_CONTROL_SESSION").ok());
+    let session = select_discovered_session(&sessions, requested_session.as_deref())?;
+    let (command, token) = match &args.action {
+        AgentAction::Panes => (ControlCommand::Describe, None),
+        AgentAction::Prompt {
+            panes,
+            others,
+            prompt,
+            no_submit,
+        } => (
+            ControlCommand::PromptPanes {
+                panes: parse_pane_targets(panes)?,
+                prompt: read_agent_prompt(prompt.as_deref())?,
+                submit: !no_submit,
+                others: *others,
+            },
+            Some(agent_token(args)?),
+        ),
+    };
+
+    let response = call_control(&session.endpoint, token.as_deref(), command)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response)
+                .context("failed to serialize control response")?
+        );
+    } else if matches!(&args.action, AgentAction::Panes) && response.ok {
+        print_panes(response.data.as_ref());
+    } else {
+        println!("{}", response.message);
+    }
+    if !response.ok {
+        bail!(response.message);
+    }
+    Ok(())
+}
+
 pub fn run_ctl(args: &CtlArgs) -> Result<()> {
     let sessions = control_discovery::discover_sessions(probe_discovered_session)?;
     if matches!(&args.action, CtlAction::List) {
@@ -374,7 +423,7 @@ pub fn run_ctl(args: &CtlArgs) -> Result<()> {
                 serde_json::to_string_pretty(&sessions).context("failed to serialize sessions")?
             );
         } else if sessions.is_empty() {
-            println!("gridbash: no opted-in running sessions found");
+            println!("gridbash: no running sessions with agent control found");
         } else {
             println!("ID\tPID\tENDPOINT\tSTARTED");
             for session in &sessions {
@@ -480,7 +529,9 @@ fn select_discovered_session<'a>(
     }
 
     match sessions {
-        [] => Err(anyhow!("no opted-in running GridBash sessions found")),
+        [] => Err(anyhow!(
+            "no running GridBash sessions with agent control found"
+        )),
         [session] => Ok(session),
         _ => Err(anyhow!(
             "multiple GridBash sessions are running; pass --session <id-or-prefix>"
@@ -499,11 +550,51 @@ fn ctl_token(args: &CtlArgs) -> Result<String> {
         })
 }
 
+fn agent_token(args: &AgentArgs) -> Result<String> {
+    args.token
+        .clone()
+        .or_else(|| env::var("GRIDBASH_CONTROL_TOKEN").ok())
+        .ok_or_else(|| {
+            anyhow!("prompting panes requires the current pane's GRIDBASH_CONTROL_TOKEN or --token")
+        })
+}
+
 fn parse_pane_targets(values: &[String]) -> Result<Vec<PaneTarget>> {
     values
         .iter()
         .map(|value| PaneTarget::parse(value))
         .collect()
+}
+
+fn read_agent_prompt(argument: Option<&str>) -> Result<String> {
+    let prompt = if let Some(argument) = argument {
+        argument.to_string()
+    } else {
+        let mut stdin = io::stdin();
+        if stdin.is_terminal() {
+            bail!("provide prompt text as an argument or pipe it through stdin");
+        }
+        let mut prompt = String::new();
+        stdin
+            .read_to_string(&mut prompt)
+            .context("failed to read the pane prompt from stdin")?;
+        trim_one_trailing_line_ending(&mut prompt);
+        prompt
+    };
+
+    if prompt.trim().is_empty() {
+        bail!("pane prompt cannot be empty");
+    }
+    Ok(prompt)
+}
+
+fn trim_one_trailing_line_ending(value: &mut String) {
+    if value.ends_with('\n') {
+        value.pop();
+        if value.ends_with('\r') {
+            value.pop();
+        }
+    }
 }
 
 fn print_panes(data: Option<&Value>) {
@@ -514,6 +605,7 @@ fn print_panes(data: Option<&Value>) {
     for pane in panes.into_iter().flatten() {
         let mut states = Vec::new();
         for (field, label) in [
+            ("is_self", "self"),
             ("focused", "focused"),
             ("selected", "selected"),
             ("sleeping", "sleeping"),
@@ -683,6 +775,42 @@ fn tools_list_result() -> Value {
                 }
             },
             {
+                "name": "gridbash_prompt_panes",
+                "title": "Prompt Agent Panes",
+                "description": "Send a prompt to explicit stable pane targets, or set other_panes to prompt every available pane except the caller. Use this for manager and delegation workflows.",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "targets": {
+                            "type": "array",
+                            "description": "Stable pane target strings from the latest grid snapshot, such as pane-4-gen-2. Omit when other_panes is true.",
+                            "items": {
+                                "type": "string",
+                                "pattern": "^pane-[0-9]+-gen-[0-9]+$"
+                            },
+                            "minItems": 1
+                        },
+                        "other_panes": {
+                            "type": "boolean",
+                            "description": "When true, prompt every available pane in the current grid except this calling pane.",
+                            "default": false
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Prompt text to write into each target agent pane.",
+                            "minLength": 1
+                        },
+                        "submit": {
+                            "type": "boolean",
+                            "description": "When true, append Enter after the prompt.",
+                            "default": true
+                        }
+                    },
+                    "required": ["prompt"]
+                }
+            },
+            {
                 "name": "gridbash_set_status",
                 "title": "Set Status",
                 "description": "Set the GridBash status bar text for the current session.",
@@ -835,6 +963,34 @@ fn tool_arguments_to_command(tool_name: &str, arguments: Value) -> Result<Contro
                 submit: args.submit.unwrap_or(true),
             })
         }
+        "gridbash_prompt_panes" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Args {
+                #[serde(default)]
+                targets: Vec<String>,
+                #[serde(default)]
+                other_panes: bool,
+                prompt: String,
+                submit: Option<bool>,
+            }
+
+            let args: Args = serde_json::from_value(arguments).context("invalid prompt args")?;
+            if args.prompt.trim().is_empty() {
+                return Err(anyhow!("pane prompt cannot be empty"));
+            }
+            if args.other_panes != args.targets.is_empty() {
+                return Err(anyhow!(
+                    "provide stable pane targets or set other_panes to true"
+                ));
+            }
+            Ok(ControlCommand::PromptPanes {
+                panes: parse_pane_targets(&args.targets)?,
+                prompt: args.prompt,
+                submit: args.submit.unwrap_or(true),
+                others: args.other_panes,
+            })
+        }
         "gridbash_set_status" => {
             #[derive(Deserialize)]
             struct Args {
@@ -922,9 +1078,9 @@ fn absolute_tool_path(path: PathBuf) -> Result<PathBuf> {
 
 fn call_gridbash_control(command: ControlCommand) -> Result<ControlResponse> {
     let endpoint = env::var("GRIDBASH_CONTROL_ADDR")
-        .context("GRIDBASH_CONTROL_ADDR is not set; start GridBash with --agent-api")?;
+        .context("GRIDBASH_CONTROL_ADDR is not set; run this tool inside a GridBash pane")?;
     let token = env::var("GRIDBASH_CONTROL_TOKEN")
-        .context("GRIDBASH_CONTROL_TOKEN is not set; start GridBash with --agent-api")?;
+        .context("GRIDBASH_CONTROL_TOKEN is not set; run this tool inside a GridBash pane")?;
     call_control(&endpoint, Some(&token), command)
 }
 
@@ -1040,6 +1196,7 @@ mod tests {
                 "gridbash_get_grid_snapshot",
                 "gridbash_read_pane_output",
                 "gridbash_send_command",
+                "gridbash_prompt_panes",
                 "gridbash_set_status",
                 "gridbash_capture_output",
                 "gridbash_start_logging",
@@ -1121,6 +1278,77 @@ mod tests {
                 submit: true
             } if panes == vec![PaneTarget::Number(2)] && command == "cargo test"
         ));
+    }
+
+    #[test]
+    fn pane_prompt_accepts_stable_targets_or_every_other_pane() {
+        let targeted = tool_arguments_to_command(
+            "gridbash_prompt_panes",
+            json!({
+                "targets": ["pane-4-gen-2"],
+                "prompt": "Review the current diff"
+            }),
+        )
+        .expect("targeted prompt");
+        assert!(matches!(
+            targeted,
+            ControlCommand::PromptPanes {
+                panes,
+                prompt,
+                submit: true,
+                others: false
+            } if panes == vec![PaneTarget::Stable { pane_id: 4, generation: 2 }]
+                && prompt == "Review the current diff"
+        ));
+
+        let others = tool_arguments_to_command(
+            "gridbash_prompt_panes",
+            json!({
+                "other_panes": true,
+                "prompt": "Report your status",
+                "submit": false
+            }),
+        )
+        .expect("other pane prompt");
+        assert!(matches!(
+            others,
+            ControlCommand::PromptPanes {
+                panes,
+                prompt,
+                submit: false,
+                others: true
+            } if panes.is_empty() && prompt == "Report your status"
+        ));
+    }
+
+    #[test]
+    fn pane_prompt_requires_exactly_one_target_mode() {
+        for arguments in [
+            json!({ "prompt": "status" }),
+            json!({
+                "targets": ["pane-4-gen-2"],
+                "other_panes": true,
+                "prompt": "status"
+            }),
+        ] {
+            assert!(
+                tool_arguments_to_command("gridbash_prompt_panes", arguments)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("stable pane targets")
+            );
+        }
+    }
+
+    #[test]
+    fn piped_prompts_drop_one_shell_line_ending() {
+        let mut windows = "first\r\nsecond\r\n".to_string();
+        trim_one_trailing_line_ending(&mut windows);
+        assert_eq!(windows, "first\r\nsecond");
+
+        let mut unix = "review this\n".to_string();
+        trim_one_trailing_line_ending(&mut unix);
+        assert_eq!(unix, "review this");
     }
 
     #[test]
