@@ -150,6 +150,10 @@ child panes receive `GRIDBASH_CONTROL_ADDR`, `GRIDBASH_CONTROL_TOKEN`,
 `GRIDBASH_CONTROL_SESSION`, the initial 1-based `GRIDBASH_PANE_INDEX`, a stable
 `GRIDBASH_PANE_ID`, and a concise `GRIDBASH_AGENT_TOOLS` discovery hint. The
 stable pane ID continues to identify the same live pane after reordering.
+`GRIDBASH_AGENT_TOOLS` is human-readable help containing the three primary
+command forms separated by ` | `. Its presence tells a coding agent that
+pane-local coordination is available, but it is not a versioned protocol and
+scripts should invoke `gridbash agent --help` instead of parsing its value.
 
 ```powershell
 gridbash agent panes

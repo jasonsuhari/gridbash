@@ -2517,7 +2517,7 @@ impl App {
                 columns: 3,
             });
         let (control_handle, control_rx) =
-            start_agent_control(!cli.no_agent_api, cli.agent_api_port)?;
+            start_agent_control(cli.agent_control_enabled(), cli.agent_api_port)?;
         let base_status = if config.keys.is_empty() {
             default_status(mouse_enabled)
         } else {

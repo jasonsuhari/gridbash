@@ -95,7 +95,7 @@ fn main() -> Result<()> {
             config,
             record,
             !cli.no_mouse,
-            !cli.no_agent_api,
+            cli.agent_control_enabled(),
             cli.agent_api_port,
         )?;
         return app.run();
@@ -108,7 +108,7 @@ fn main() -> Result<()> {
             config,
             recovery,
             !cli.no_mouse,
-            !cli.no_agent_api,
+            cli.agent_control_enabled(),
             cli.agent_api_port,
         )?;
         return app.run();

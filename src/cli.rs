@@ -79,6 +79,10 @@ pub struct Cli {
 }
 
 impl Cli {
+    pub fn agent_control_enabled(&self) -> bool {
+        !self.no_agent_api
+    }
+
     pub fn allows_automatic_recovery(&self) -> bool {
         self.command.is_none()
             && self.grid.is_none()
@@ -255,6 +259,7 @@ mod tests {
     #[test]
     fn automatic_recovery_only_applies_to_plain_launches() {
         let plain = Cli::parse_from(["gridbash"]);
+        assert!(plain.agent_control_enabled());
         assert!(plain.allows_automatic_recovery());
 
         let worktrees = Cli::parse_from(["gridbash", "--worktrees"]);
@@ -264,7 +269,13 @@ mod tests {
         assert!(!agent_api.allows_automatic_recovery());
 
         let no_agent_api = Cli::parse_from(["gridbash", "--no-agent-api"]);
+        assert!(!no_agent_api.agent_control_enabled());
         assert!(!no_agent_api.allows_automatic_recovery());
+
+        assert!(
+            Cli::try_parse_from(["gridbash", "--no-agent-api", "--agent-api-port", "4321"])
+                .is_err()
+        );
     }
 
     #[test]
