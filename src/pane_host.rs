@@ -35,6 +35,10 @@ const HOST_START_TIMEOUT: Duration = Duration::from_secs(8);
 const HOST_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const HOST_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a keep-running host waits for a replacement GridBash to reattach
+/// after the process that owned it disappeared. Long enough to survive a crash
+/// and relaunch, short enough that nothing lingers for hours.
+const ORPHAN_REATTACH_GRACE: Duration = Duration::from_secs(600);
 const BACKGROUND_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const PANE_HOST_PROTOCOL_VERSION: u16 = 1;
 
@@ -676,6 +680,9 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
     let mut active_client_id = None::<u64>;
     let mut next_client_id = 1_u64;
     let mut keep_running = spec.keep_running;
+    // Survives disconnection so an abruptly-dead owner can still be detected.
+    let mut last_owner_pid = None::<u32>;
+    let mut client_lost_at = None::<Instant>;
     let mut background_output = Vec::new();
     let mut last_exit_poll = Instant::now();
     let initial_client_deadline = Instant::now() + HOST_START_TIMEOUT;
@@ -709,6 +716,8 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
                         accepted_client_once = true;
                         keep_running = connected.keep_running;
                         active_client_id = Some(connected.client.id);
+                        last_owner_pid = connected.client.owner_pid;
+                        client_lost_at = None;
                         client = Some(connected.client);
                         next_client_id = next_client_id.wrapping_add(1);
                     }
@@ -790,6 +799,7 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
                         keep_running = value;
                         disconnect_client(&mut client);
                         active_client_id = None;
+                        client_lost_at = Some(Instant::now());
                         if !keep_running {
                             pane.terminate();
                             return Ok(());
@@ -804,6 +814,7 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
                 HostInputMessage::Closed => {
                     disconnect_client(&mut client);
                     active_client_id = None;
+                    client_lost_at = Some(Instant::now());
                     if !keep_running {
                         pane.terminate();
                         return Ok(());
@@ -850,14 +861,20 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
 
         if last_exit_poll.elapsed() >= HOST_EXIT_POLL_INTERVAL {
             if pane.poll_exit() {
+                pane.exited = true;
                 send_to_client(&mut client, &HostEvent::Exited);
             }
             last_exit_poll = Instant::now();
         }
 
         if client.is_none()
-            && !keep_running
             && (accepted_client_once || Instant::now() >= initial_client_deadline)
+            && should_shut_down_detached_host(
+                keep_running,
+                pane.exited,
+                client_process_is_gone(last_owner_pid),
+                client_lost_at.map(|at| at.elapsed()),
+            )
         {
             pane.terminate();
             return Ok(());
@@ -1104,6 +1121,25 @@ fn send_to_client(client: &mut Option<HostClient>, event: &HostEvent) {
     }
 }
 
+/// Decide whether a host with no attached client should exit.
+///
+/// A keep-running host deliberately outlives a clean disconnect so a later
+/// GridBash can reattach to it. It must still exit once nothing is left to
+/// reattach to: a dead PTY child has no session to resume, and an owner that
+/// vanished without a replacement would otherwise leave the host — and its
+/// pseudoconsole — running indefinitely.
+fn should_shut_down_detached_host(
+    keep_running: bool,
+    child_exited: bool,
+    owner_gone: bool,
+    detached_for: Option<Duration>,
+) -> bool {
+    if !keep_running || child_exited {
+        return true;
+    }
+    owner_gone && detached_for.is_some_and(|elapsed| elapsed >= ORPHAN_REATTACH_GRACE)
+}
+
 fn disconnect_client(client: &mut Option<HostClient>) {
     if let Some(client) = client.take() {
         let _ = client.stream.shutdown(Shutdown::Both);
@@ -1241,6 +1277,46 @@ mod tests {
     use super::*;
 
     static PANE_HOST_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn detached_hosts_without_keep_running_exit_immediately() {
+        assert!(should_shut_down_detached_host(false, false, false, None));
+    }
+
+    #[test]
+    fn keep_running_hosts_stay_for_a_live_owner() {
+        assert!(!should_shut_down_detached_host(true, false, false, None));
+        assert!(!should_shut_down_detached_host(
+            true,
+            false,
+            false,
+            Some(ORPHAN_REATTACH_GRACE * 2)
+        ));
+    }
+
+    #[test]
+    fn keep_running_hosts_exit_once_their_child_is_gone() {
+        // The leak that stranded pane hosts for hours: the child had exited and
+        // the owning GridBash was gone, but keep_running held the host open.
+        assert!(should_shut_down_detached_host(true, true, false, None));
+        assert!(should_shut_down_detached_host(true, true, true, None));
+    }
+
+    #[test]
+    fn keep_running_hosts_outlive_a_dead_owner_only_for_the_reattach_grace() {
+        assert!(!should_shut_down_detached_host(
+            true,
+            false,
+            true,
+            Some(ORPHAN_REATTACH_GRACE / 2)
+        ));
+        assert!(should_shut_down_detached_host(
+            true,
+            false,
+            true,
+            Some(ORPHAN_REATTACH_GRACE)
+        ));
+    }
 
     struct TestHostFiles {
         directory: PathBuf,
