@@ -3976,17 +3976,39 @@ fn refresh_screen_cache(
     cache.buffer = buffer;
 }
 
+/// Copy a cached pane buffer into the frame at `area`.
+///
+/// Rendering must never take GridBash down. A pane rect can outlive the frame it
+/// was measured against — the terminal can shrink between layout and draw — and
+/// both `Buffer::index_of` and slice indexing panic outright on an out-of-range
+/// position. Because those checks were only `debug_assert!`s, a release build
+/// aborted the whole process. Clamping to what the two buffers actually cover
+/// makes a stale rect drop cells for one frame instead.
 fn blit_buffer(source: &Buffer, target: &mut Buffer, area: Rect) {
     debug_assert_eq!(source.area.width, area.width);
     debug_assert_eq!(source.area.height, area.height);
-    debug_assert_eq!(area.intersection(target.area), area);
 
-    let width = area.width as usize;
-    for row in 0..area.height {
-        let source_start = row as usize * width;
-        let target_start = target.index_of(area.x, area.y + row);
-        target.content[target_start..target_start + width]
-            .clone_from_slice(&source.content[source_start..source_start + width]);
+    let area = area.intersection(target.area);
+    let source_stride = source.area.width as usize;
+    let width = (area.width as usize).min(source_stride);
+    if width == 0 {
+        return;
+    }
+
+    // Index arithmetic mirrors Buffer::index_of without its out-of-range panic.
+    let target_stride = target.area.width as usize;
+    let target_column = area.x.saturating_sub(target.area.x) as usize;
+    for row in 0..area.height.min(source.area.height) {
+        let source_start = row as usize * source_stride;
+        let target_start =
+            (area.y.saturating_sub(target.area.y) + row) as usize * target_stride + target_column;
+        let Some(source_row) = source.content.get(source_start..source_start + width) else {
+            break;
+        };
+        let Some(target_row) = target.content.get_mut(target_start..target_start + width) else {
+            break;
+        };
+        target_row.clone_from_slice(source_row);
     }
 }
 
@@ -4824,6 +4846,36 @@ mod tests {
         assert_eq!(target[(3, 2)].symbol(), "C");
         assert_eq!(target[(4, 2)].symbol(), "D");
         assert_eq!(target[(2, 1)].symbol(), " ");
+    }
+
+    #[test]
+    fn blitting_a_pane_rect_wider_than_the_frame_clamps_instead_of_panicking() {
+        // A rect measured before the terminal shrank: the release build used to
+        // panic here in Buffer::index_of and take the whole process down.
+        let mut source = Buffer::empty(Rect::new(0, 0, 4, 3));
+        for x in 0..4 {
+            for y in 0..3 {
+                source[(x, y)].set_symbol("S");
+            }
+        }
+        let mut target = Buffer::empty(Rect::new(0, 0, 3, 2));
+
+        blit_buffer(&source, &mut target, Rect::new(2, 1, 4, 3));
+
+        assert_eq!(target[(2, 1)].symbol(), "S");
+        assert_eq!(target[(0, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn blitting_a_pane_rect_fully_outside_the_frame_is_a_no_op() {
+        let mut source = Buffer::empty(Rect::new(0, 0, 2, 2));
+        source[(0, 0)].set_symbol("S");
+        let mut target = Buffer::empty(Rect::new(0, 0, 4, 4));
+        let untouched = target.clone();
+
+        blit_buffer(&source, &mut target, Rect::new(9, 9, 2, 2));
+
+        assert_eq!(target, untouched);
     }
 
     #[test]
