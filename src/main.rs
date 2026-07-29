@@ -8,6 +8,7 @@ mod config;
 mod control;
 mod control_discovery;
 mod copy_mode;
+mod diagnostics;
 mod image_preview;
 mod keybindings;
 mod layout;
@@ -42,6 +43,19 @@ use crate::{
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Installed before anything else can fail so the crash report survives the
+    // terminal. App::run chains its terminal-restoring hook onto this one.
+    let role = if cli.pane_host.is_some() {
+        "pane-host"
+    } else {
+        "tui"
+    };
+    diagnostics::install_panic_logger(role);
+
+    run(cli).inspect_err(|error| diagnostics::record_error_exit(role, error))
+}
+
+fn run(cli: Cli) -> Result<()> {
     if let Some(spec_path) = cli.pane_host.as_deref() {
         return pane_host::run_pane_host(spec_path);
     }
