@@ -1,5 +1,10 @@
 use ratatui::layout::Rect;
 
+/// Upper bound on panes in a single grid. Every path that turns a number into
+/// per-pane allocations clamps to this, so an out-of-range grid size can never
+/// become an allocation the process cannot satisfy.
+pub const MAX_PANES: usize = 100;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PaneId(pub usize);
 
@@ -36,25 +41,30 @@ impl GridSize {
     }
 
     pub fn from_count(count: usize) -> Self {
-        let count = count.clamp(1, 100);
-        let columns = (count as f64).sqrt().ceil() as usize;
+        let count = count.clamp(1, MAX_PANES);
+        let columns = ((count as f64).sqrt().ceil() as usize).clamp(1, MAX_PANES);
         let rows = count.div_ceil(columns);
         Self { rows, columns }
     }
 
     pub fn new(rows: usize, columns: usize) -> Option<Self> {
-        if rows == 0 || columns == 0 || rows * columns > 100 {
+        // `rows * columns` would overflow for values parsed straight out of a
+        // `--grid` argument, and a wrapped product can slip past the cap and
+        // reach `vec![1000; rows]`.
+        if rows == 0 || columns == 0 || rows.checked_mul(columns)? > MAX_PANES {
             return None;
         }
         Some(Self { rows, columns })
     }
 
     pub fn count(self) -> usize {
-        self.rows * self.columns
+        self.rows.saturating_mul(self.columns)
     }
 
     pub fn compact_for_count(self, count: usize) -> Self {
-        let count = count.clamp(1, self.count());
+        // A caller-built `GridSize` can hold zero rows or columns, and
+        // `clamp(1, 0)` panics.
+        let count = count.clamp(1, self.count().max(1));
         let mut compact = self;
 
         while compact.columns > 1 && compact.rows * (compact.columns - 1) >= count {
@@ -72,8 +82,8 @@ impl GridLayout {
     pub fn new(size: GridSize) -> Self {
         Self {
             size,
-            row_weights: vec![1000; size.rows],
-            column_weights: vec![1000; size.columns],
+            row_weights: vec![1000; size.rows.min(MAX_PANES)],
+            column_weights: vec![1000; size.columns.min(MAX_PANES)],
         }
     }
 
@@ -83,8 +93,8 @@ impl GridLayout {
 
     pub fn set_size(&mut self, size: GridSize) {
         self.size = size;
-        resize_weights(&mut self.row_weights, size.rows);
-        resize_weights(&mut self.column_weights, size.columns);
+        resize_weights(&mut self.row_weights, size.rows.min(MAX_PANES));
+        resize_weights(&mut self.column_weights, size.columns.min(MAX_PANES));
     }
 
     pub fn rects(&self, area: Rect, count: usize) -> Vec<Rect> {
@@ -162,6 +172,11 @@ fn weighted_grid_rects(
     column_weights: &[u16],
     count: usize,
 ) -> Vec<Rect> {
+    // `count` reaches here from pane bookkeeping; honouring it verbatim would
+    // turn a bad number into an allocation failure rather than an empty grid.
+    // `GridSize::new` already caps a valid grid at `MAX_PANES`, so this only
+    // bites a size a caller built by hand.
+    let count = count.min(MAX_PANES);
     let mut rects = Vec::with_capacity(count);
     if grid.rows == 0 || grid.columns == 0 {
         return rects;
@@ -277,6 +292,51 @@ mod tests {
     fn auto_grid_caps_at_hundred() {
         let grid = GridSize::from_count(100);
         assert_eq!(grid.count(), 100);
+    }
+
+    /// `rows * columns` overflows for numbers a `--grid` argument can carry, and
+    /// a wrapped product used to slip past the pane cap and reach an allocation
+    /// the process cannot satisfy.
+    #[test]
+    fn grid_dimensions_that_overflow_are_rejected() {
+        assert_eq!(GridSize::new(usize::MAX, usize::MAX), None);
+        assert_eq!(GridSize::new(usize::MAX, 2), None);
+        assert_eq!(GridSize::parse("18446744073709551615x2"), None);
+        let huge = (1_usize << 40).to_string();
+        assert_eq!(GridSize::parse(&format!("{huge}x{huge}")), None);
+    }
+
+    /// A caller-built `GridSize` can hold zero rows, and the old
+    /// `clamp(1, self.count())` panicked on the crossed bounds.
+    #[test]
+    fn compacting_an_empty_grid_does_not_panic() {
+        let empty = GridSize {
+            rows: 0,
+            columns: 0,
+        };
+
+        assert_eq!(empty.count(), 0);
+        assert_eq!(empty.compact_for_count(4), empty);
+        assert_eq!(empty.compact_for_count(0), empty);
+    }
+
+    /// An out-of-range `GridSize` must not turn into a huge per-row allocation.
+    #[test]
+    fn layout_weights_stay_bounded_for_an_absurd_grid() {
+        let absurd = GridSize {
+            rows: usize::MAX,
+            columns: usize::MAX,
+        };
+
+        let mut layout = GridLayout::new(absurd);
+        assert!(layout.rects(Rect::new(0, 0, 40, 10), 4).len() <= 4);
+        layout.set_size(absurd);
+        assert!(
+            layout
+                .rects(Rect::new(0, 0, 40, 10), usize::MAX)
+                .len()
+                <= MAX_PANES
+        );
     }
 
     #[test]

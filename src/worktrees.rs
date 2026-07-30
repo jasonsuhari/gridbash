@@ -19,6 +19,63 @@ pub struct ManagedPaneWorktree {
     pub branch_name: String,
 }
 
+/// Whether a folder can back one managed git worktree per pane right now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeReadiness {
+    Ready { base_slug: String },
+    Blocked { reason: String },
+}
+
+impl WorktreeReadiness {
+    pub fn base_slug(&self) -> Option<&str> {
+        match self {
+            Self::Ready { base_slug } => Some(base_slug),
+            Self::Blocked { .. } => None,
+        }
+    }
+
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            Self::Ready { .. } => None,
+            Self::Blocked { reason } => Some(reason),
+        }
+    }
+}
+
+/// Answer the same questions `ensure_pane_worktrees` asks, without touching the
+/// repository. The composer polls this so it can show why worktrees are or are
+/// not available before anything is launched.
+pub fn probe_worktree_readiness(cwd: &Path) -> WorktreeReadiness {
+    if git_output(cwd, args(&["rev-parse", "--git-dir"])).is_err() {
+        return blocked("not a git repository");
+    }
+    let Ok(repo) = GitRepo::from_cwd(cwd) else {
+        return blocked("repository has no commit to branch from");
+    };
+    if ensure_clean_tracked_checkout(&repo.root).is_err() {
+        return blocked("uncommitted tracked changes in the base checkout");
+    }
+
+    WorktreeReadiness::Ready {
+        base_slug: repo.base_slug,
+    }
+}
+
+/// Branch name `ensure_pane_worktrees` will create for a zero-based pane index.
+pub fn managed_branch_name(prefix: &str, base_slug: &str, index: usize) -> String {
+    format!("{prefix}/{base_slug}-pane-{:02}", index + 1)
+}
+
+fn blocked(reason: &str) -> WorktreeReadiness {
+    WorktreeReadiness::Blocked {
+        reason: reason.into(),
+    }
+}
+
 #[derive(Debug)]
 struct GitRepo {
     root: PathBuf,
@@ -104,10 +161,7 @@ fn ensure_pane_worktree(
     index: usize,
 ) -> Result<ManagedPaneWorktree> {
     let pane_number = index + 1;
-    let branch_name = format!(
-        "{}/{}-pane-{pane_number:02}",
-        options.prefix, repo.base_slug
-    );
+    let branch_name = managed_branch_name(&options.prefix, &repo.base_slug, index);
     if let Some(worktree) = existing
         .iter()
         .find(|worktree| worktree.branch.as_deref() == Some(branch_name.as_str()))
@@ -434,6 +488,43 @@ mod tests {
             .to_string();
 
         assert!(error.contains("tracked changes are present"));
+    }
+
+    #[test]
+    fn readiness_probe_reports_the_base_branch_and_blocking_reasons() {
+        let repo = TempRepo::new("readiness");
+        let cwd = repo.root.join("crates").join("cli");
+
+        assert_eq!(
+            probe_worktree_readiness(&cwd),
+            WorktreeReadiness::Ready {
+                base_slug: "main".into()
+            }
+        );
+        assert_eq!(
+            managed_branch_name("gridbash", "main", 2),
+            "gridbash/main-pane-03"
+        );
+
+        fs::write(cwd.join("README.md"), "dirty\n").expect("dirty file");
+        let dirty = probe_worktree_readiness(&cwd);
+        assert!(!dirty.is_ready());
+        assert_eq!(
+            dirty.reason(),
+            Some("uncommitted tracked changes in the base checkout")
+        );
+
+        let plain = std::env::temp_dir().join(format!(
+            "gridbash-readiness-plain-{}-{}",
+            std::process::id(),
+            unique_suffix()
+        ));
+        fs::create_dir_all(&plain).expect("plain dir");
+        assert_eq!(
+            probe_worktree_readiness(&plain).reason(),
+            Some("not a git repository")
+        );
+        let _ = fs::remove_dir_all(plain);
     }
 
     fn unique_suffix() -> u128 {

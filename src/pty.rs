@@ -39,6 +39,10 @@ const MAX_REPLAY_OUTPUT_CHARS: usize = 18_000;
 const MAX_OSC_SCAN: usize = 4096;
 const PTY_READ_BUFFER_BYTES: usize = 32 * 1024;
 const PTY_WRITE_QUEUE_MESSAGES: usize = 256;
+/// PTY reader/writer threads only shuttle bytes between a pipe and a channel,
+/// so the platform default stack (1 MiB on Windows, 8 MiB on glibc) is reserved
+/// for nothing. The reader keeps a `PTY_READ_BUFFER_BYTES` array on its stack.
+const PTY_WORKER_STACK_BYTES: usize = 128 * 1024;
 const CHILD_REAP_GRACE: Duration = Duration::from_millis(100);
 const CHILD_REAP_AFTER_FORCE: Duration = Duration::from_millis(400);
 const CHILD_REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -255,12 +259,28 @@ pub(crate) struct PtyView {
     input_revision: u64,
     output_tail: String,
     output_tail_chars: usize,
+    tracks_history: bool,
 }
 
 impl PtyView {
     pub(crate) fn new(cwd: PathBuf, scrollback_rows: usize) -> Self {
+        Self::with_history(cwd, scrollback_rows.clamp(1_000, 50_000), true)
+    }
+
+    /// View for a process that never renders the pane: the pane host.
+    ///
+    /// The host answers cursor-position queries and tracks the working
+    /// directory, so it still needs a parser for the visible grid, but the
+    /// GridBash client keeps the only copy of the scrollback and the plain-text
+    /// tail that anything actually reads. Keeping a second copy per pane host
+    /// costs `scrollback_rows * cols * 32` bytes for nothing.
+    pub(crate) fn headless(cwd: PathBuf) -> Self {
+        Self::with_history(cwd, 0, false)
+    }
+
+    fn with_history(cwd: PathBuf, scrollback_rows: usize, tracks_history: bool) -> Self {
         Self {
-            parser: Parser::new(24, 80, scrollback_rows.clamp(1_000, 50_000)),
+            parser: Parser::new(24, 80, scrollback_rows),
             screen_revision: 0,
             cwd,
             rows: 24,
@@ -273,6 +293,7 @@ impl PtyView {
             input_revision: 0,
             output_tail: String::new(),
             output_tail_chars: 0,
+            tracks_history,
         }
     }
 
@@ -317,10 +338,13 @@ impl PtyView {
     pub(crate) fn process_output(&mut self, bytes: &[u8]) -> String {
         self.update_cwd_from_osc7(bytes);
         self.parser.process(bytes);
-        let (plain, plain_chars) = plain_terminal_text_with_char_count(bytes);
-        self.append_plain_output(&plain, plain_chars);
         self.screen_revision = self.screen_revision.wrapping_add(1);
         self.output_activity.record_output(Instant::now());
+        if !self.tracks_history {
+            return String::new();
+        }
+        let (plain, plain_chars) = plain_terminal_text_with_char_count(bytes);
+        self.append_plain_output(&plain, plain_chars);
         plain
     }
 
@@ -334,6 +358,9 @@ impl PtyView {
 
     pub(crate) fn record_input(&mut self, bytes: &[u8]) {
         self.record_input_activity(bytes);
+        if !self.tracks_history {
+            return;
+        }
         record_input_bytes(bytes, &mut self.pending_input, &mut self.input_history);
     }
 
@@ -358,9 +385,20 @@ impl PtyView {
     }
 
     pub(crate) fn restore_history_display(&mut self, output_tail: &str, input_history: &[String]) {
+        self.restore_history_state(output_tail, input_history);
+
+        let replay = history_replay_text(&self.output_tail, &self.input_history);
+        if !replay.is_empty() {
+            self.parser.process(replay.as_bytes());
+            self.screen_revision = self.screen_revision.wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn restore_history_state(&mut self, output_tail: &str, input_history: &[String]) {
         self.output_tail = output_tail.to_string();
         trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
         self.output_tail_chars = self.output_tail.chars().count();
+        release_string_slack(&mut self.output_tail);
         self.input_history = input_history
             .iter()
             .filter(|line| !line.trim().is_empty())
@@ -369,12 +407,6 @@ impl PtyView {
             .cloned()
             .collect::<Vec<_>>();
         self.input_history.reverse();
-
-        let replay = history_replay_text(&self.output_tail, &self.input_history);
-        if !replay.is_empty() {
-            self.parser.process(replay.as_bytes());
-            self.screen_revision = self.screen_revision.wrapping_add(1);
-        }
     }
 
     pub(crate) fn resize_view(&mut self, rows: u16, cols: u16) -> bool {
@@ -392,17 +424,24 @@ impl PtyView {
         if self.osc_scan_tail.is_empty() && !bytes.contains(&0x1b) {
             return;
         }
-        let mut scan = Vec::with_capacity(self.osc_scan_tail.len() + bytes.len());
-        scan.extend_from_slice(&self.osc_scan_tail);
-        scan.extend_from_slice(bytes);
+        // Most chunks carry no partial OSC sequence from the previous read, so
+        // borrow them instead of copying every read buffer onto the heap.
+        let scan = if self.osc_scan_tail.is_empty() {
+            Cow::Borrowed(bytes)
+        } else {
+            let mut scan = Vec::with_capacity(self.osc_scan_tail.len() + bytes.len());
+            scan.extend_from_slice(&self.osc_scan_tail);
+            scan.extend_from_slice(bytes);
+            Cow::Owned(scan)
+        };
 
-        for payload in osc_payloads(&scan) {
+        for payload in osc_payloads(scan.as_ref()) {
             if let Some(path) = cwd_from_osc7_payload(payload) {
                 self.cwd = path;
             }
         }
 
-        self.osc_scan_tail = incomplete_osc_tail(&scan);
+        self.osc_scan_tail = incomplete_osc_tail(scan.as_ref());
     }
 
     fn append_plain_output(&mut self, plain: &str, plain_chars: usize) {
@@ -415,6 +454,7 @@ impl PtyView {
         if self.output_tail_chars > OUTPUT_TAIL_TRIM_AT_CHARS {
             trim_string_tail(&mut self.output_tail, MAX_OUTPUT_TAIL_CHARS);
             self.output_tail_chars = self.output_tail.chars().count();
+            release_string_slack(&mut self.output_tail);
         }
     }
 }
@@ -432,7 +472,6 @@ impl PtyPane {
         cwd: &Path,
         extra_env: &[(OsString, OsString)],
         codex_sqlite_lease: Option<CodexSqliteLease>,
-        scrollback_rows: usize,
         process_priority: PaneProcessPriority,
         workload_policy: PaneWorkloadPolicy,
         event_tx: mpsc::Sender<PtyEvent>,
@@ -491,8 +530,8 @@ impl PtyPane {
             .master
             .take_writer()
             .context("failed to open PTY writer")?;
-        let writer = spawn_writer(id, generation, event_tx.clone(), writer);
-        spawn_reader(id, generation, event_tx, reader);
+        let writer = spawn_writer(id, generation, event_tx.clone(), writer)?;
+        spawn_reader(id, generation, event_tx, reader)?;
 
         let mut pane = Self {
             id,
@@ -502,7 +541,7 @@ impl PtyPane {
             writer,
             workload,
             workload_error,
-            view: PtyView::new(cwd.to_path_buf(), scrollback_rows),
+            view: PtyView::headless(cwd.to_path_buf()),
             active: false,
             exited: false,
             child_reaped: false,
@@ -589,6 +628,10 @@ impl PtyPane {
     pub fn restore_history_display(&mut self, output_tail: &str, input_history: &[String]) {
         self.view
             .restore_history_display(output_tail, input_history);
+    }
+
+    pub fn restore_history_state(&mut self, output_tail: &str, input_history: &[String]) {
+        self.view.restore_history_state(output_tail, input_history);
     }
 
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
@@ -754,10 +797,10 @@ fn screen_history_lines(screen: &mut Screen) -> Vec<String> {
     let original_scrollback = screen.scrollback();
     let (rows, columns) = screen.size();
     let page_rows = usize::from(rows).max(1);
-    let mut lines = Vec::new();
 
     screen.set_scrollback(usize::MAX);
     let history_rows = screen.scrollback();
+    let mut lines = Vec::with_capacity(history_rows + page_rows);
     let mut history_start = 0;
     while history_start < history_rows {
         screen.set_scrollback(history_rows - history_start);
@@ -773,7 +816,13 @@ fn screen_history_lines(screen: &mut Screen) -> Vec<String> {
     let first_content = lines.iter().position(|line| !line.is_empty());
     let last_content = lines.iter().rposition(|line| !line.is_empty());
     match (first_content, last_content) {
-        (Some(first), Some(last)) => lines[first..=last].to_vec(),
+        // Trim in place: cloning the slice would briefly hold two copies of the
+        // whole scrollback, which for a full 50 000-row pane is tens of MB.
+        (Some(first), Some(last)) => {
+            lines.truncate(last + 1);
+            lines.drain(..first);
+            lines
+        }
         _ => vec![String::new()],
     }
 }
@@ -862,29 +911,34 @@ fn spawn_reader(
     generation: u64,
     event_tx: mpsc::Sender<PtyEvent>,
     mut reader: Box<dyn Read + Send>,
-) {
-    thread::spawn(move || {
-        let mut buffer = [0_u8; PTY_READ_BUFFER_BYTES];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => {
-                    let _ = event_tx.blocking_send(PtyEvent::Exited { pane, generation });
-                    break;
-                }
-                Ok(n) => {
-                    let _ = event_tx.blocking_send(PtyEvent::Output {
-                        pane,
-                        generation,
-                        bytes: buffer[..n].to_vec(),
-                    });
-                }
-                Err(_) => {
-                    let _ = event_tx.blocking_send(PtyEvent::Exited { pane, generation });
-                    break;
+) -> Result<()> {
+    thread::Builder::new()
+        .name("gridbash-pty-read".into())
+        .stack_size(PTY_WORKER_STACK_BYTES)
+        .spawn(move || {
+            let mut buffer = vec![0_u8; PTY_READ_BUFFER_BYTES];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => {
+                        let _ = event_tx.blocking_send(PtyEvent::Exited { pane, generation });
+                        break;
+                    }
+                    Ok(n) => {
+                        let _ = event_tx.blocking_send(PtyEvent::Output {
+                            pane,
+                            generation,
+                            bytes: buffer[..n].to_vec(),
+                        });
+                    }
+                    Err(_) => {
+                        let _ = event_tx.blocking_send(PtyEvent::Exited { pane, generation });
+                        break;
+                    }
                 }
             }
-        }
-    });
+        })
+        .context("failed to start PTY reader")?;
+    Ok(())
 }
 
 fn spawn_writer(
@@ -892,51 +946,55 @@ fn spawn_writer(
     generation: u64,
     event_tx: mpsc::Sender<PtyEvent>,
     mut writer: Box<dyn Write + Send>,
-) -> PtyWriterQueue {
+) -> Result<PtyWriterQueue> {
     let (tx, rx) = sync_channel::<PtyWrite>(PTY_WRITE_QUEUE_MESSAGES);
     let status = Arc::new(Mutex::new(PtyWriterStatus::Open));
     let worker_status = status.clone();
-    thread::spawn(move || {
-        while let Ok(write) = rx.recv() {
-            let result = writer
-                .write_all(&write.bytes)
-                .and_then(|()| writer.flush())
-                .context("failed to write to PTY");
-            match result {
-                Ok(()) => {
-                    if let Some(token) = write.token {
-                        let _ = event_tx.blocking_send(PtyEvent::WriteSucceeded {
-                            pane,
-                            generation,
-                            token,
-                        });
+    thread::Builder::new()
+        .name("gridbash-pty-write".into())
+        .stack_size(PTY_WORKER_STACK_BYTES)
+        .spawn(move || {
+            while let Ok(write) = rx.recv() {
+                let result = writer
+                    .write_all(&write.bytes)
+                    .and_then(|()| writer.flush())
+                    .context("failed to write to PTY");
+                match result {
+                    Ok(()) => {
+                        if let Some(token) = write.token {
+                            let _ = event_tx.blocking_send(PtyEvent::WriteSucceeded {
+                                pane,
+                                generation,
+                                token,
+                            });
+                        }
                     }
-                }
-                Err(error) => {
-                    let error = format!("{error:#}");
-                    let queued = fail_writer_queue(&worker_status, &rx);
-                    let _ = event_tx.blocking_send(PtyEvent::WriteFailed {
-                        pane,
-                        generation,
-                        token: write.token,
-                        error: error.clone(),
-                    });
-                    for queued in queued.into_iter().filter(|queued| queued.token.is_some()) {
+                    Err(error) => {
+                        let error = format!("{error:#}");
+                        let queued = fail_writer_queue(&worker_status, &rx);
                         let _ = event_tx.blocking_send(PtyEvent::WriteFailed {
                             pane,
                             generation,
-                            token: queued.token,
-                            error: format!(
-                                "PTY writer stopped before queued input was written: {error}"
-                            ),
+                            token: write.token,
+                            error: error.clone(),
                         });
+                        for queued in queued.into_iter().filter(|queued| queued.token.is_some()) {
+                            let _ = event_tx.blocking_send(PtyEvent::WriteFailed {
+                                pane,
+                                generation,
+                                token: queued.token,
+                                error: format!(
+                                    "PTY writer stopped before queued input was written: {error}"
+                                ),
+                            });
+                        }
+                        break;
                     }
-                    break;
                 }
             }
-        }
-    });
-    PtyWriterQueue { sender: tx, status }
+        })
+        .context("failed to start PTY writer")?;
+    Ok(PtyWriterQueue { sender: tx, status })
 }
 
 fn fail_writer_queue(
@@ -1187,7 +1245,7 @@ fn plain_terminal_text_with_char_count(bytes: &[u8]) -> (String, usize) {
     let raw = String::from_utf8_lossy(bytes);
     let bytes = raw.as_bytes();
     let mut plain = String::with_capacity(bytes.len());
-    let mut plain_chars = 0;
+    let mut plain_chars = 0_usize;
     let mut index = 0;
 
     while index < bytes.len() {
@@ -1207,7 +1265,7 @@ fn plain_terminal_text_with_char_count(bytes: &[u8]) -> (String, usize) {
             }
             0x08 => {
                 if plain.pop().is_some() {
-                    plain_chars -= 1;
+                    plain_chars = plain_chars.saturating_sub(1);
                 }
                 index += 1;
             }
@@ -1221,14 +1279,21 @@ fn plain_terminal_text_with_char_count(bytes: &[u8]) -> (String, usize) {
                 {
                     index += 1;
                 }
-                plain.push_str(&raw[start..index]);
-                plain_chars += index - start;
+                // Every byte in this run is ASCII, so both ends are character
+                // boundaries; `get` keeps a desynced index from panicking.
+                if let Some(run) = raw.get(start..index) {
+                    plain.push_str(run);
+                    plain_chars += run.chars().count();
+                }
             }
             _ => {
-                let ch = raw[index..]
-                    .chars()
-                    .next()
-                    .expect("index remains on a UTF-8 character boundary");
+                // The arms above only ever stop on ASCII bytes, so `index` is on
+                // a character boundary. Skipping a byte beats panicking here:
+                // this runs on every chunk of pane output.
+                let Some(ch) = raw.get(index..).and_then(|rest| rest.chars().next()) else {
+                    index += 1;
+                    continue;
+                };
                 if !ch.is_control() {
                     plain.push(ch);
                     plain_chars += 1;
@@ -1307,6 +1372,19 @@ fn incomplete_osc_tail(buffer: &[u8]) -> Vec<u8> {
         };
     }
     Vec::new()
+}
+
+/// Drop capacity a `String` no longer needs.
+///
+/// `String::drain` keeps the buffer it grew into, so a pane that once printed a
+/// burst of wide output would pin that peak allocation for the rest of the
+/// session. Half the buffer is kept as headroom so steady-state appends do not
+/// reallocate on every trim.
+fn release_string_slack(value: &mut String) {
+    let target = value.len().saturating_add(value.len() / 2);
+    if value.capacity() > target {
+        value.shrink_to(target);
+    }
 }
 
 fn trim_string_tail(value: &mut String, max_chars: usize) {
@@ -1537,7 +1615,8 @@ mod tests {
             7,
             event_tx,
             Box::new(SharedWriter(output.clone())),
-        );
+        )
+        .expect("spawn writer");
         writer
             .try_send(PtyWrite::untracked(b"first"))
             .expect("first write");
@@ -1555,7 +1634,8 @@ mod tests {
     #[test]
     fn writer_worker_reports_asynchronous_failures() {
         let (event_tx, mut event_rx) = mpsc::channel(4);
-        let writer = spawn_writer(PaneId(4), 2, event_tx, Box::new(FailingWriter));
+        let writer =
+            spawn_writer(PaneId(4), 2, event_tx, Box::new(FailingWriter)).expect("spawn writer");
         let token = PtyWriteToken(42);
         writer
             .try_send(PtyWrite::tracked(b"input", token))
@@ -1586,7 +1666,8 @@ mod tests {
                 entered: entered_tx,
                 release: release_rx,
             }),
-        );
+        )
+        .expect("spawn writer");
         let first = PtyWriteToken(101);
         let queued = PtyWriteToken(102);
         writer
@@ -1633,7 +1714,8 @@ mod tests {
             3,
             event_tx,
             Box::new(SharedWriter(output.clone())),
-        );
+        )
+        .expect("spawn writer");
         let token = PtyWriteToken(99);
         writer
             .try_send(PtyWrite::tracked(b"tracked", token))
@@ -1813,6 +1895,104 @@ mod tests {
     }
 
     #[test]
+    fn restoring_history_state_does_not_repaint_plain_text_into_the_terminal() {
+        let mut view = PtyView::new(PathBuf::from("workspace"), 1_000);
+
+        view.restore_history_state("old agent output", &["previous command".into()]);
+
+        assert_eq!(view.output_tail(), "old agent output");
+        assert_eq!(view.input_history(), ["previous command"]);
+        assert!(!view.screen().contents().contains("old agent output"));
+        assert!(
+            !view
+                .screen()
+                .contents()
+                .contains("GridBash resumed pane history")
+        );
+    }
+
+    #[test]
+    fn headless_view_keeps_no_scrollback_and_no_plain_text_history() {
+        let mut view = PtyView::headless(PathBuf::from("workspace"));
+        view.resize_view(4, 20);
+
+        for index in 0..500 {
+            assert!(
+                view.process_output(format!("line {index}\r\n").as_bytes())
+                    .is_empty()
+            );
+        }
+        view.record_input(b"cargo test\r");
+
+        // Nothing scrolled off is retained, so `set_scrollback` clamps to zero.
+        assert!(!view.scroll_view(100));
+        assert_eq!(view.screen().scrollback(), 0);
+        assert!(view.output_tail().is_empty());
+        assert!(view.input_history().is_empty());
+        // The visible grid still tracks the pane so cursor queries stay correct.
+        assert!(view.screen().contents().contains("line 499"));
+    }
+
+    #[test]
+    fn headless_view_still_tracks_the_working_directory() {
+        let mut view = PtyView::headless(PathBuf::from("workspace"));
+
+        #[cfg(windows)]
+        let (report, expected) = (
+            "\x1b]7;file://localhost/C:/Users/Jason/repo\x07",
+            PathBuf::from("C:/Users/Jason/repo"),
+        );
+        #[cfg(not(windows))]
+        let (report, expected) = (
+            "\x1b]7;file://localhost/home/jason/repo\x07",
+            PathBuf::from("/home/jason/repo"),
+        );
+
+        view.process_output(report.as_bytes());
+
+        assert_eq!(view.cwd(), expected);
+    }
+
+    #[test]
+    fn split_osc_reports_survive_the_borrowed_scan_fast_path() {
+        let mut view = PtyView::headless(PathBuf::from("workspace"));
+
+        #[cfg(windows)]
+        let (head, tail, expected) = (
+            "\x1b]7;file://localhost/C:/Users/Jason/spl",
+            "it\x07",
+            PathBuf::from("C:/Users/Jason/split"),
+        );
+        #[cfg(not(windows))]
+        let (head, tail, expected) = (
+            "\x1b]7;file://localhost/home/jason/spl",
+            "it\x07",
+            PathBuf::from("/home/jason/split"),
+        );
+
+        view.process_output(head.as_bytes());
+        view.process_output(tail.as_bytes());
+
+        assert_eq!(view.cwd(), expected);
+    }
+
+    #[test]
+    fn trimming_the_output_tail_releases_the_peak_allocation() {
+        let mut view = PtyView::new(PathBuf::from("workspace"), 1_000);
+        let wide = "x".repeat(OUTPUT_TAIL_TRIM_AT_CHARS * 4);
+
+        view.process_output(wide.as_bytes());
+
+        assert!(view.output_tail().chars().count() <= MAX_OUTPUT_TAIL_CHARS);
+        assert!(
+            view.output_tail.capacity() < wide.len(),
+            "trimmed tail kept {} bytes of capacity for {} bytes of text",
+            view.output_tail.capacity(),
+            view.output_tail.len()
+        );
+    }
+
+    #[test]
     fn plain_output_character_count_matches_filtered_unicode() {
         for input in [
             "plain ASCII output",
@@ -1848,7 +2028,6 @@ mod tests {
             &cwd,
             &[],
             None,
-            10_000,
             PaneProcessPriority::BelowNormal,
             PaneWorkloadPolicy::Adaptive,
             event_tx,
@@ -1912,7 +2091,6 @@ mod tests {
             &cwd,
             &[],
             None,
-            10_000,
             PaneProcessPriority::BelowNormal,
             PaneWorkloadPolicy::Adaptive,
             event_tx,

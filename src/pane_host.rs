@@ -1,14 +1,15 @@
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     ffi::{OsString, OsString as PlatformString},
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex, mpsc as std_mpsc},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use std::{error::Error as StdError, fmt};
 
@@ -28,19 +29,36 @@ use crate::{
     layout::PaneId,
     process_priority::PaneWorkloadClass,
     pty::{PtyEvent, PtyPane as LocalPtyPane, PtyView, PtyWriteToken},
+    session::process_is_running,
 };
 
 const HOST_START_TIMEOUT: Duration = Duration::from_secs(8);
-const HOST_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const HOST_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const HOST_EVENT_QUEUE_CAPACITY: usize = 256;
+const HOST_EVENT_DRAIN_LIMIT: usize = 256;
+const HOST_WORKER_STACK_BYTES: usize = 256 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a keep-running host waits for a replacement GridBash to reattach
+/// after the process that owned it disappeared. Long enough to survive a crash
+/// and relaunch, short enough that nothing lingers for hours.
+const ORPHAN_REATTACH_GRACE: Duration = Duration::from_secs(600);
 const BACKGROUND_OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
 const PANE_HOST_PROTOCOL_VERSION: u16 = 1;
+/// A PTY read is capped at 32 KiB, which base64-encodes and JSON-escapes into
+/// roughly 44 KiB. Scratch buffers keep that much capacity between messages and
+/// release anything larger so one oversized burst is not pinned forever.
+const WIRE_SCRATCH_KEEP_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PtyHostRef {
     pub endpoint: String,
     pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_sqlite_home: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -73,6 +91,8 @@ enum HostCommand {
         protocol_version: u16,
         token: String,
         keep_running: bool,
+        #[serde(default)]
+        client_pid: Option<u32>,
     },
     Write {
         data: String,
@@ -102,9 +122,15 @@ enum HostEvent {
     Ready {
         #[serde(default)]
         protocol_version: u16,
+        #[serde(default)]
+        host_process_id: Option<u32>,
         background_output: String,
         cwd: PathBuf,
         exited: bool,
+        #[serde(default)]
+        codex_sqlite_home: Option<PathBuf>,
+        #[serde(default)]
+        started_at_ms: Option<u64>,
     },
     Output {
         data: String,
@@ -125,6 +151,17 @@ enum HostEvent {
         host_version: u16,
     },
     Busy,
+}
+
+/// Wire-identical to [`HostEvent::Output`], but borrows its payload.
+///
+/// The output event is the only message on the hot path, so encoding into a
+/// reused buffer avoids one allocation per PTY read for the life of the pane.
+#[derive(Serialize)]
+struct HostOutputEvent<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    data: &'a str,
 }
 
 #[derive(Debug)]
@@ -177,6 +214,7 @@ pub struct PtyPane {
     generation: u64,
     connection: Arc<Mutex<TcpStream>>,
     host: PtyHostRef,
+    host_process_id: Option<u32>,
     view: PtyView,
     keep_running: bool,
     pub active: bool,
@@ -270,6 +308,7 @@ impl PtyPane {
             thread::sleep(Duration::from_millis(20));
         };
         let _ = fs::remove_file(&ready_path);
+        let host_process_id = child.id();
         thread::spawn(move || {
             let _ = child.wait();
         });
@@ -277,6 +316,9 @@ impl PtyPane {
         let host = PtyHostRef {
             endpoint: ready.endpoint,
             token,
+            process_id: Some(host_process_id),
+            codex_sqlite_home: None,
+            started_at_ms: None,
         };
         Self::connect(
             host,
@@ -318,7 +360,7 @@ impl PtyPane {
 
     #[allow(clippy::too_many_arguments)]
     fn connect(
-        host: PtyHostRef,
+        mut host: PtyHostRef,
         id: PaneId,
         generation: u64,
         fallback_cwd: &Path,
@@ -334,6 +376,8 @@ impl PtyPane {
             .with_context(|| format!("invalid pane host endpoint {}", host.endpoint))?;
         let mut stream = TcpStream::connect_timeout(&endpoint, HANDSHAKE_TIMEOUT)
             .with_context(|| format!("failed to connect to pane host {}", host.endpoint))?;
+        prevent_stream_inheritance(&stream)
+            .context("failed to protect pane host connection from child-process inheritance")?;
         stream.set_nodelay(true).ok();
         stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).ok();
         send_json(
@@ -342,12 +386,15 @@ impl PtyPane {
                 protocol_version: PANE_HOST_PROTOCOL_VERSION,
                 token: host.token.clone(),
                 keep_running,
+                client_pid: Some(std::process::id()),
             },
         )?;
 
         let reader_stream = stream
             .try_clone()
             .context("failed to clone pane host connection")?;
+        prevent_stream_inheritance(&reader_stream)
+            .context("failed to protect pane host reader from child-process inheritance")?;
         let mut reader = BufReader::new(reader_stream);
         let mut line = String::new();
         reader
@@ -358,13 +405,32 @@ impl PtyPane {
         }
         let ready = serde_json::from_str::<HostEvent>(&line)
             .context("failed to parse pane host handshake")?;
-        let (protocol_version, background_output, cwd, exited) = match ready {
+        let (
+            protocol_version,
+            host_process_id,
+            background_output,
+            cwd,
+            exited,
+            codex_sqlite_home,
+            started_at_ms,
+        ) = match ready {
             HostEvent::Ready {
                 protocol_version,
+                host_process_id,
                 background_output,
                 cwd,
                 exited,
-            } => (protocol_version, background_output, cwd, exited),
+                codex_sqlite_home,
+                started_at_ms,
+            } => (
+                protocol_version,
+                host_process_id,
+                background_output,
+                cwd,
+                exited,
+                codex_sqlite_home,
+                started_at_ms,
+            ),
             HostEvent::Error { error } => {
                 return Err(PaneHostRejected { reason: error }.into());
             }
@@ -392,12 +458,22 @@ impl PtyPane {
             view.process_output(&background_output);
         }
 
+        if host_process_id.is_some() {
+            host.process_id = host_process_id;
+        }
+        if codex_sqlite_home.is_some() {
+            host.codex_sqlite_home = codex_sqlite_home;
+        }
+        if started_at_ms.is_some() {
+            host.started_at_ms = started_at_ms;
+        }
         spawn_client_reader(reader, id, generation, event_tx);
         Ok(Self {
             id,
             generation,
             connection: Arc::new(Mutex::new(stream)),
             host,
+            host_process_id,
             view,
             keep_running,
             active: !background_output.is_empty(),
@@ -415,6 +491,18 @@ impl PtyPane {
 
     pub fn host_ref(&self) -> PtyHostRef {
         self.host.clone()
+    }
+
+    pub fn host_process_id(&self) -> Option<u32> {
+        self.host_process_id
+    }
+
+    pub fn codex_thread_id(&self, cwd: &Path) -> Option<String> {
+        let home = self.host.codex_sqlite_home.as_deref()?;
+        let started_at_ms = self.host.started_at_ms?;
+        crate::codex_sqlite::latest_thread_id(home, cwd, started_at_ms)
+            .ok()
+            .flatten()
     }
 
     pub fn cwd(&self) -> &Path {
@@ -487,6 +575,10 @@ impl PtyPane {
             .restore_history_display(output_tail, input_history);
     }
 
+    pub fn restore_history_state(&mut self, output_tail: &str, input_history: &[String]) {
+        self.view.restore_history_state(output_tail, input_history);
+    }
+
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
         self.send(&HostCommand::Write {
             data: BASE64.encode(bytes),
@@ -540,6 +632,73 @@ impl PtyPane {
     }
 }
 
+pub fn terminate_saved_host(host: &PtyHostRef) -> Result<()> {
+    let endpoint = host
+        .endpoint
+        .parse::<SocketAddr>()
+        .with_context(|| format!("invalid pane host endpoint {}", host.endpoint))?;
+    let mut stream = match TcpStream::connect_timeout(&endpoint, HANDSHAKE_TIMEOUT) {
+        Ok(stream) => stream,
+        Err(error) if pane_host_is_gone(&error) => return Ok(()),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to connect to pane host {}", host.endpoint));
+        }
+    };
+    prevent_stream_inheritance(&stream)
+        .context("failed to protect pane host connection from child-process inheritance")?;
+    stream.set_nodelay(true).ok();
+    stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT)).ok();
+    send_json(
+        &mut stream,
+        &HostCommand::Hello {
+            protocol_version: PANE_HOST_PROTOCOL_VERSION,
+            token: host.token.clone(),
+            keep_running: false,
+            client_pid: Some(std::process::id()),
+        },
+    )?;
+
+    let reader_stream = stream
+        .try_clone()
+        .context("failed to clone pane host connection")?;
+    prevent_stream_inheritance(&reader_stream)
+        .context("failed to protect pane host reader from child-process inheritance")?;
+    let mut reader = BufReader::new(reader_stream);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .context("failed to read pane host handshake")?;
+    if line.is_empty() {
+        return Ok(());
+    }
+
+    match serde_json::from_str::<HostEvent>(&line).context("failed to parse pane host handshake")? {
+        HostEvent::Ready { .. } => {
+            send_json(&mut stream, &HostCommand::Terminate)?;
+            let _ = stream.shutdown(Shutdown::Both);
+            Ok(())
+        }
+        HostEvent::Busy => Err(PaneHostBusy.into()),
+        HostEvent::Incompatible { host_version } => {
+            Err(PaneHostIncompatible { host_version }.into())
+        }
+        HostEvent::Error { error } => Err(PaneHostRejected { reason: error }.into()),
+        _ => bail!("pane host rejected the termination request"),
+    }
+}
+
+fn pane_host_is_gone(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::NotFound
+            | io::ErrorKind::AddrNotAvailable
+    )
+}
+
 impl Drop for PtyPane {
     fn drop(&mut self) {
         let command = if self.exited {
@@ -564,9 +723,8 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
     let _ = fs::remove_file(spec_path);
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).context("failed to bind pane host")?;
-    listener
-        .set_nonblocking(true)
-        .context("failed to make pane host listener nonblocking")?;
+    prevent_listener_inheritance(&listener)
+        .context("failed to protect pane host listener from child-process inheritance")?;
     let endpoint = listener
         .local_addr()
         .context("failed to read pane host endpoint")?;
@@ -583,15 +741,17 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
 
     let PaneCodexSqlite {
         env: codex_env,
+        home: codex_sqlite_home,
         lease,
     } = CodexSqlitePool::new()?.for_pane(&spec.env)?;
+    let started_at_ms = now_millis();
     let mut extra_env = spec
         .extra_env
         .iter()
         .map(|(name, value)| (PlatformString::from(name), PlatformString::from(value)))
         .collect::<Vec<_>>();
     extra_env.extend(codex_env);
-    let (event_tx, mut event_rx) = mpsc::channel(256);
+    let (event_tx, event_rx) = mpsc::channel(256);
     let mut pane = LocalPtyPane::spawn(
         &spec.profile_name,
         PaneId(spec.pane_id),
@@ -602,187 +762,261 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
         &spec.cwd,
         &extra_env,
         lease,
-        spec.scrollback_rows,
         spec.process_priority,
         spec.workload_policy,
         event_tx,
     )?;
 
-    let (command_tx, command_rx) = std_mpsc::channel::<HostInput>();
+    let (loop_tx, loop_rx) = std_mpsc::sync_channel::<HostLoopEvent>(HOST_EVENT_QUEUE_CAPACITY);
+    spawn_host_acceptor(listener, loop_tx.clone())?;
+    spawn_pty_event_forwarder(event_rx, loop_tx.clone())?;
     let mut client = None::<HostClient>;
+    let mut active_client_id = None::<u64>;
     let mut next_client_id = 1_u64;
     let mut keep_running = spec.keep_running;
+    // Survives disconnection so an abruptly-dead owner can still be detected.
+    let mut last_owner_pid = None::<u32>;
+    let mut client_lost_at = None::<Instant>;
     let mut background_output = Vec::new();
+    let mut output_scratch = String::new();
     let mut last_exit_poll = Instant::now();
 
     loop {
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                if client.is_none() {
-                    if let Some(connected) = accept_client(
-                        stream,
-                        next_client_id,
-                        &spec.token,
-                        &pane,
-                        &mut background_output,
-                        command_tx.clone(),
-                    )? {
-                        keep_running = connected.keep_running;
-                        client = Some(connected.client);
-                        next_client_id = next_client_id.wrapping_add(1);
-                    }
-                } else {
-                    stream.set_nonblocking(false).ok();
-                    stream
-                        .set_read_timeout(Some(Duration::from_millis(250)))
-                        .ok();
-                    if let Ok(reader_stream) = stream.try_clone() {
-                        let mut reader = BufReader::new(reader_stream);
-                        let mut hello = String::new();
-                        let _ = reader.read_line(&mut hello);
-                    }
-                    let _ = send_json(&mut stream, &HostEvent::Busy);
-                    let _ = stream.shutdown(Shutdown::Both);
-                }
+        let wait = HOST_EXIT_POLL_INTERVAL.saturating_sub(last_exit_poll.elapsed());
+        let mut next_event = match loop_rx.recv_timeout(wait) {
+            Ok(event) => Some(event),
+            Err(std_mpsc::RecvTimeoutError::Timeout) => None,
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("pane host event loop stopped unexpectedly")
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error).context("failed to accept pane host client"),
-        }
+        };
 
-        while let Ok(input) = command_rx.try_recv() {
-            if client.as_ref().map(|value| value.id) != Some(input.client_id) {
-                continue;
-            }
-            match input.message {
-                HostInputMessage::Command(command) => match command {
-                    HostCommand::Hello { .. } => {}
-                    HostCommand::Write { data, token } => {
-                        let decoded = BASE64.decode(data).context("invalid pane input payload")?;
-                        let tracked_token = token
-                            .map(|token| {
-                                token
-                                    .parse::<u128>()
-                                    .context("invalid tracked pane input token")
-                            })
-                            .transpose()?;
-                        let write_result = if let Some(token) = tracked_token {
-                            pane.write_tracked(&decoded, PtyWriteToken(token))
-                        } else {
-                            pane.write(&decoded)
-                        };
-                        if let Err(error) = write_result {
-                            send_to_client(
-                                &mut client,
-                                &HostEvent::WriteFailed {
-                                    token: tracked_token.map(|token| token.to_string()),
-                                    error: error.to_string(),
-                                },
-                            );
-                        }
-                    }
-                    HostCommand::Resize { rows, cols } => {
-                        if let Err(error) = pane.resize(rows, cols) {
-                            send_to_client(
-                                &mut client,
-                                &HostEvent::Error {
-                                    error: error.to_string(),
-                                },
-                            );
-                        }
-                    }
-                    HostCommand::ApplyWorkload { policy, class } => {
-                        if let Err(error) = pane.apply_workload(policy, class) {
-                            send_to_client(
-                                &mut client,
-                                &HostEvent::Error {
-                                    error: error.to_string(),
-                                },
-                            );
-                        }
-                    }
-                    HostCommand::SetKeepRunning {
-                        keep_running: value,
-                    } => keep_running = value,
-                    HostCommand::Disconnect {
-                        keep_running: value,
-                    } => {
-                        keep_running = value;
-                        disconnect_client(&mut client);
-                        if !keep_running {
-                            pane.terminate();
-                            return Ok(());
-                        }
-                    }
-                    HostCommand::Terminate => {
-                        pane.terminate();
-                        send_to_client(&mut client, &HostEvent::Exited);
-                        return Ok(());
-                    }
+        for _ in 0..HOST_EVENT_DRAIN_LIMIT {
+            let event = match next_event.take() {
+                Some(event) => event,
+                None => match loop_rx.try_recv() {
+                    Ok(event) => event,
+                    Err(_) => break,
                 },
-                HostInputMessage::Closed => {
-                    disconnect_client(&mut client);
-                    if !keep_running {
-                        pane.terminate();
-                        return Ok(());
-                    }
-                }
-            }
-        }
+            };
 
-        while let Ok(event) = event_rx.try_recv() {
             match event {
-                PtyEvent::Output { bytes, .. } => {
-                    pane.process_output(&bytes);
-                    if client.is_some() {
-                        send_to_client(
-                            &mut client,
-                            &HostEvent::Output {
-                                data: BASE64.encode(&bytes),
-                            },
-                        );
+                HostLoopEvent::Connection(mut stream) => {
+                    prevent_stream_inheritance(&stream).context(
+                    "failed to protect accepted pane host connection from child-process inheritance",
+                )?;
+                    if client
+                        .as_ref()
+                        .is_some_and(|client| client_process_is_gone(client.owner_pid))
+                    {
+                        disconnect_client(&mut client);
                     }
                     if client.is_none() {
-                        append_background_output(&mut background_output, &bytes);
+                        if let Some(connected) = accept_client(
+                            stream,
+                            next_client_id,
+                            &spec.token,
+                            &pane,
+                            codex_sqlite_home.as_deref(),
+                            started_at_ms,
+                            &mut background_output,
+                            loop_tx.clone(),
+                        )? {
+                            keep_running = connected.keep_running;
+                            active_client_id = Some(connected.client.id);
+                            last_owner_pid = connected.client.owner_pid;
+                            client_lost_at = None;
+                            client = Some(connected.client);
+                            next_client_id = next_client_id.wrapping_add(1);
+                        }
+                    } else {
+                        stream.set_nonblocking(false).ok();
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(250)))
+                            .ok();
+                        if let Ok(reader_stream) = stream.try_clone() {
+                            let mut reader = BufReader::new(reader_stream);
+                            let mut hello = String::new();
+                            let _ = reader.read_line(&mut hello);
+                        }
+                        let _ = send_json(&mut stream, &HostEvent::Busy);
+                        let _ = stream.shutdown(Shutdown::Both);
                     }
                 }
-                PtyEvent::Exited { .. } => {
-                    pane.exited = true;
-                    send_to_client(&mut client, &HostEvent::Exited);
+                HostLoopEvent::Input(input) => {
+                    if active_client_id != Some(input.client_id) {
+                        continue;
+                    }
+                    match input.message {
+                        HostInputMessage::Command(command) => match command {
+                            HostCommand::Hello { .. } => {}
+                            HostCommand::Write { data, token } => {
+                                let decoded =
+                                    BASE64.decode(data).context("invalid pane input payload")?;
+                                let tracked_token = token
+                                    .map(|token| {
+                                        token
+                                            .parse::<u128>()
+                                            .context("invalid tracked pane input token")
+                                    })
+                                    .transpose()?;
+                                let write_result = if let Some(token) = tracked_token {
+                                    pane.write_tracked(&decoded, PtyWriteToken(token))
+                                } else {
+                                    pane.write(&decoded)
+                                };
+                                if let Err(error) = write_result {
+                                    send_to_client(
+                                        &mut client,
+                                        &HostEvent::WriteFailed {
+                                            token: tracked_token.map(|token| token.to_string()),
+                                            error: error.to_string(),
+                                        },
+                                    );
+                                }
+                            }
+                            HostCommand::Resize { rows, cols } => {
+                                if let Err(error) = pane.resize(rows, cols) {
+                                    send_to_client(
+                                        &mut client,
+                                        &HostEvent::Error {
+                                            error: error.to_string(),
+                                        },
+                                    );
+                                }
+                            }
+                            HostCommand::ApplyWorkload { policy, class } => {
+                                if let Err(error) = pane.apply_workload(policy, class) {
+                                    send_to_client(
+                                        &mut client,
+                                        &HostEvent::Error {
+                                            error: error.to_string(),
+                                        },
+                                    );
+                                }
+                            }
+                            HostCommand::SetKeepRunning {
+                                keep_running: value,
+                            } => keep_running = value,
+                            HostCommand::Disconnect {
+                                keep_running: value,
+                            } => {
+                                keep_running = value;
+                                disconnect_client(&mut client);
+                                active_client_id = None;
+                                client_lost_at = Some(Instant::now());
+                                if !keep_running {
+                                    pane.terminate();
+                                    return Ok(());
+                                }
+                            }
+                            HostCommand::Terminate => {
+                                pane.terminate();
+                                send_to_client(&mut client, &HostEvent::Exited);
+                                return Ok(());
+                            }
+                        },
+                        HostInputMessage::Closed => {
+                            disconnect_client(&mut client);
+                            active_client_id = None;
+                            client_lost_at = Some(Instant::now());
+                            if !keep_running {
+                                pane.terminate();
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
-                PtyEvent::WriteFailed { token, error, .. } => send_to_client(
-                    &mut client,
-                    &HostEvent::WriteFailed {
-                        token: token.map(|token| token.0.to_string()),
-                        error,
-                    },
-                ),
-                PtyEvent::WriteSucceeded { token, .. } => send_to_client(
-                    &mut client,
-                    &HostEvent::WriteSucceeded {
-                        token: token.0.to_string(),
-                    },
-                ),
+                HostLoopEvent::Pty(event) => match event {
+                    PtyEvent::Output { bytes, .. } => {
+                        pane.process_output(&bytes);
+                        if client.is_some() {
+                            // Reuse one encode buffer: this runs for every PTY
+                            // read for the life of the pane.
+                            output_scratch.clear();
+                            BASE64.encode_string(&bytes, &mut output_scratch);
+                            send_to_client(
+                                &mut client,
+                                &HostOutputEvent {
+                                    kind: "output",
+                                    data: &output_scratch,
+                                },
+                            );
+                            release_line_slack(&mut output_scratch);
+                        }
+                        if client.is_none() {
+                            append_background_output(&mut background_output, &bytes);
+                        }
+                    }
+                    PtyEvent::Exited { .. } => {
+                        pane.exited = true;
+                        send_to_client(&mut client, &HostEvent::Exited);
+                    }
+                    PtyEvent::WriteFailed { token, error, .. } => send_to_client(
+                        &mut client,
+                        &HostEvent::WriteFailed {
+                            token: token.map(|token| token.0.to_string()),
+                            error,
+                        },
+                    ),
+                    PtyEvent::WriteSucceeded { token, .. } => send_to_client(
+                        &mut client,
+                        &HostEvent::WriteSucceeded {
+                            token: token.0.to_string(),
+                        },
+                    ),
+                },
+                HostLoopEvent::ListenerFailed(error) => {
+                    return Err(error).context("failed to accept pane host client");
+                }
             }
         }
 
         if last_exit_poll.elapsed() >= HOST_EXIT_POLL_INTERVAL {
             if pane.poll_exit() {
+                pane.exited = true;
                 send_to_client(&mut client, &HostEvent::Exited);
             }
             last_exit_poll = Instant::now();
         }
 
-        if client.is_none() && !keep_running {
+        if client.is_none()
+            && should_shut_down_detached_host(
+                keep_running,
+                pane.exited,
+                client_process_is_gone(last_owner_pid),
+                client_lost_at.map(|at| at.elapsed()),
+            )
+        {
             pane.terminate();
             return Ok(());
         }
-        thread::sleep(HOST_POLL_INTERVAL);
     }
+}
+
+/// Decide whether a host with no attached client should exit.
+///
+/// A keep-running host deliberately outlives a clean disconnect so a later
+/// GridBash can reattach to it. It must still exit once nothing is left to
+/// reattach to: a dead PTY child has no session to resume, and an owner that
+/// vanished without a replacement would otherwise leave the host — and its
+/// pseudoconsole — running indefinitely.
+fn should_shut_down_detached_host(
+    keep_running: bool,
+    child_exited: bool,
+    owner_gone: bool,
+    detached_for: Option<Duration>,
+) -> bool {
+    if !keep_running || child_exited {
+        return true;
+    }
+    owner_gone && detached_for.is_some_and(|elapsed| elapsed >= ORPHAN_REATTACH_GRACE)
 }
 
 struct HostClient {
     id: u64,
     stream: TcpStream,
+    owner_pid: Option<u32>,
 }
 
 struct AcceptedClient {
@@ -800,13 +1034,66 @@ enum HostInputMessage {
     Closed,
 }
 
+enum HostLoopEvent {
+    Connection(TcpStream),
+    Input(HostInput),
+    Pty(PtyEvent),
+    ListenerFailed(io::Error),
+}
+
+fn spawn_host_acceptor(
+    listener: TcpListener,
+    sender: std_mpsc::SyncSender<HostLoopEvent>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name("gridbash-host-accept".into())
+        .stack_size(HOST_WORKER_STACK_BYTES)
+        .spawn(move || {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if sender.send(HostLoopEvent::Connection(stream)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(HostLoopEvent::ListenerFailed(error));
+                        return;
+                    }
+                }
+            }
+        })
+        .context("failed to start pane host accept worker")?;
+    Ok(())
+}
+
+fn spawn_pty_event_forwarder(
+    mut receiver: mpsc::Receiver<PtyEvent>,
+    sender: std_mpsc::SyncSender<HostLoopEvent>,
+) -> Result<()> {
+    thread::Builder::new()
+        .name("gridbash-host-pty".into())
+        .stack_size(HOST_WORKER_STACK_BYTES)
+        .spawn(move || {
+            while let Some(event) = receiver.blocking_recv() {
+                if sender.send(HostLoopEvent::Pty(event)).is_err() {
+                    return;
+                }
+            }
+        })
+        .context("failed to start pane host PTY event worker")?;
+    Ok(())
+}
+
 fn accept_client(
     mut stream: TcpStream,
     client_id: u64,
     expected_token: &str,
     pane: &LocalPtyPane,
+    codex_sqlite_home: Option<&Path>,
+    started_at_ms: u64,
     background_output: &mut Vec<u8>,
-    command_tx: std_mpsc::Sender<HostInput>,
+    command_tx: std_mpsc::SyncSender<HostLoopEvent>,
 ) -> Result<Option<AcceptedClient>> {
     stream
         .set_nonblocking(false)
@@ -816,6 +1103,8 @@ fn accept_client(
     let reader_stream = stream
         .try_clone()
         .context("failed to clone pane host client")?;
+    prevent_stream_inheritance(&reader_stream)
+        .context("failed to protect pane host client reader from child-process inheritance")?;
     let mut reader = BufReader::new(reader_stream);
     let mut line = String::new();
     reader
@@ -825,6 +1114,7 @@ fn accept_client(
         protocol_version,
         token,
         keep_running,
+        client_pid,
     }) = serde_json::from_str::<HostCommand>(&line)
     else {
         let _ = send_json(
@@ -858,52 +1148,67 @@ fn accept_client(
         &mut stream,
         &HostEvent::Ready {
             protocol_version: PANE_HOST_PROTOCOL_VERSION,
+            host_process_id: Some(std::process::id()),
             background_output: BASE64.encode(&*background_output),
             cwd: pane.cwd().to_path_buf(),
             exited: pane.exited,
+            codex_sqlite_home: codex_sqlite_home.map(Path::to_path_buf),
+            started_at_ms: Some(started_at_ms),
         },
     )?;
-    background_output.clear();
+    release_background_output(background_output);
     reader.get_mut().set_read_timeout(None).ok();
     spawn_host_reader(reader, client_id, command_tx);
     Ok(Some(AcceptedClient {
         client: HostClient {
             id: client_id,
             stream,
+            owner_pid: client_pid,
         },
         keep_running,
     }))
 }
 
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 fn spawn_host_reader(
     mut reader: BufReader<TcpStream>,
     client_id: u64,
-    sender: std_mpsc::Sender<HostInput>,
+    sender: std_mpsc::SyncSender<HostLoopEvent>,
 ) {
     thread::spawn(move || {
+        let mut line = String::new();
         loop {
-            let mut line = String::new();
+            line.clear();
+            release_line_slack(&mut line);
             match reader.read_line(&mut line) {
                 Ok(0) => break,
                 Ok(_) => match serde_json::from_str::<HostCommand>(&line) {
                     Ok(command) => {
                         if sender
-                            .send(HostInput {
+                            .send(HostLoopEvent::Input(HostInput {
                                 client_id,
                                 message: HostInputMessage::Command(command),
-                            })
+                            }))
                             .is_err()
                         {
                             return;
                         }
                     }
                     Err(error) => {
-                        let _ = sender.send(HostInput {
+                        let _ = sender.send(HostLoopEvent::Input(HostInput {
                             client_id,
                             message: HostInputMessage::Command(HostCommand::Disconnect {
                                 keep_running: false,
                             }),
-                        });
+                        }));
                         let _ = error;
                         return;
                     }
@@ -911,10 +1216,10 @@ fn spawn_host_reader(
                 Err(_) => break,
             }
         }
-        let _ = sender.send(HostInput {
+        let _ = sender.send(HostLoopEvent::Input(HostInput {
             client_id,
             message: HostInputMessage::Closed,
-        });
+        }));
     });
 }
 
@@ -925,8 +1230,10 @@ fn spawn_client_reader(
     event_tx: mpsc::Sender<PtyEvent>,
 ) {
     thread::spawn(move || {
+        let mut line = String::new();
         loop {
-            let mut line = String::new();
+            line.clear();
+            release_line_slack(&mut line);
             let event = match reader.read_line(&mut line) {
                 Ok(0) => break,
                 Ok(_) => serde_json::from_str::<HostEvent>(&line),
@@ -986,7 +1293,7 @@ fn spawn_client_reader(
     });
 }
 
-fn send_to_client(client: &mut Option<HostClient>, event: &HostEvent) {
+fn send_to_client(client: &mut Option<HostClient>, event: &impl Serialize) {
     let failed = client
         .as_mut()
         .is_some_and(|client| send_json(&mut client.stream, event).is_err());
@@ -1001,6 +1308,53 @@ fn disconnect_client(client: &mut Option<HostClient>) {
     }
 }
 
+fn client_process_is_gone(owner_pid: Option<u32>) -> bool {
+    owner_pid.is_some_and(|owner_pid| !process_is_running(owner_pid))
+}
+
+#[cfg(windows)]
+fn prevent_stream_inheritance(stream: &TcpStream) -> io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    prevent_socket_inheritance(stream.as_raw_socket())
+}
+
+#[cfg(not(windows))]
+fn prevent_stream_inheritance(_stream: &TcpStream) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn prevent_listener_inheritance(listener: &TcpListener) -> io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    prevent_socket_inheritance(listener.as_raw_socket())
+}
+
+#[cfg(not(windows))]
+fn prevent_listener_inheritance(_listener: &TcpListener) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn prevent_socket_inheritance(socket: std::os::windows::io::RawSocket) -> io::Result<()> {
+    use windows_sys::Win32::Foundation::{HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation};
+
+    let result = unsafe { SetHandleInformation(socket as HANDLE, HANDLE_FLAG_INHERIT, 0) };
+    if result == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Hand back the detached-mode backlog buffer once a client has taken it.
+///
+/// Clearing in place would keep `BACKGROUND_OUTPUT_LIMIT` bytes of dead
+/// capacity for the rest of the host's life. It reallocates only if the pane
+/// detaches again.
+fn release_background_output(buffer: &mut Vec<u8>) {
+    *buffer = Vec::new();
+}
+
 fn append_background_output(buffer: &mut Vec<u8>, bytes: &[u8]) {
     buffer.extend_from_slice(bytes);
     if buffer.len() > BACKGROUND_OUTPUT_LIMIT {
@@ -1010,11 +1364,38 @@ fn append_background_output(buffer: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 fn send_json(stream: &mut TcpStream, value: &impl Serialize) -> Result<()> {
-    serde_json::to_writer(&mut *stream, value).context("failed to encode pane host message")?;
-    stream
-        .write_all(b"\n")
-        .context("failed to write pane host message")?;
+    thread_local! {
+        static SEND_SCRATCH: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    }
+
+    // Serializing straight into the socket issues a syscall per JSON token, so
+    // encode into a reused buffer and send the framed line in one write.
+    SEND_SCRATCH.with(|scratch| {
+        let mut buffer = scratch.borrow_mut();
+        buffer.clear();
+        serde_json::to_writer(&mut *buffer, value).context("failed to encode pane host message")?;
+        buffer.push(b'\n');
+        let result = stream
+            .write_all(&buffer)
+            .context("failed to write pane host message");
+        release_vec_slack(&mut buffer);
+        result
+    })?;
     stream.flush().context("failed to flush pane host message")
+}
+
+/// Return capacity a reused wire buffer grew past its steady-state size.
+fn release_vec_slack(buffer: &mut Vec<u8>) {
+    if buffer.capacity() > WIRE_SCRATCH_KEEP_BYTES {
+        buffer.shrink_to(WIRE_SCRATCH_KEEP_BYTES);
+    }
+}
+
+/// Return capacity a reused line buffer grew past its steady-state size.
+fn release_line_slack(line: &mut String) {
+    if line.capacity() > WIRE_SCRATCH_KEEP_BYTES {
+        line.shrink_to(WIRE_SCRATCH_KEEP_BYTES);
+    }
 }
 
 fn random_token() -> Result<String> {
@@ -1093,6 +1474,48 @@ fn spawn_detached_host(spec_path: &Path) -> Result<std::process::Child> {
 mod tests {
     use super::*;
 
+    static PANE_HOST_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn detached_hosts_without_keep_running_exit_immediately() {
+        assert!(should_shut_down_detached_host(false, false, false, None));
+    }
+
+    #[test]
+    fn keep_running_hosts_stay_for_a_live_owner() {
+        assert!(!should_shut_down_detached_host(true, false, false, None));
+        assert!(!should_shut_down_detached_host(
+            true,
+            false,
+            false,
+            Some(ORPHAN_REATTACH_GRACE * 2)
+        ));
+    }
+
+    #[test]
+    fn keep_running_hosts_exit_once_their_child_is_gone() {
+        // The leak that stranded pane hosts for hours: the child had exited and
+        // the owning GridBash was gone, but keep_running held the host open.
+        assert!(should_shut_down_detached_host(true, true, false, None));
+        assert!(should_shut_down_detached_host(true, true, true, None));
+    }
+
+    #[test]
+    fn keep_running_hosts_outlive_a_dead_owner_only_for_the_reattach_grace() {
+        assert!(!should_shut_down_detached_host(
+            true,
+            false,
+            true,
+            Some(ORPHAN_REATTACH_GRACE / 2)
+        ));
+        assert!(should_shut_down_detached_host(
+            true,
+            false,
+            true,
+            Some(ORPHAN_REATTACH_GRACE)
+        ));
+    }
+
     struct TestHostFiles {
         directory: PathBuf,
         spec: PathBuf,
@@ -1136,6 +1559,62 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_output_event_is_wire_identical_to_the_owned_variant() {
+        let encoded = BASE64.encode(b"hello\0\x1b[31m");
+        let owned = serde_json::to_string(&HostEvent::Output {
+            data: encoded.clone(),
+        })
+        .expect("serialize owned event");
+        let borrowed = serde_json::to_string(&HostOutputEvent {
+            kind: "output",
+            data: &encoded,
+        })
+        .expect("serialize borrowed event");
+
+        assert_eq!(owned, borrowed);
+        // Clients built against the released protocol must still parse it.
+        let HostEvent::Output { data } =
+            serde_json::from_str::<HostEvent>(&borrowed).expect("parse borrowed event")
+        else {
+            panic!("wrong event kind");
+        };
+        assert_eq!(BASE64.decode(data).expect("decode"), b"hello\0\x1b[31m");
+    }
+
+    #[test]
+    fn wire_scratch_buffers_release_oversized_bursts() {
+        let mut buffer = Vec::with_capacity(WIRE_SCRATCH_KEEP_BYTES * 8);
+        release_vec_slack(&mut buffer);
+        assert!(buffer.capacity() <= WIRE_SCRATCH_KEEP_BYTES);
+
+        let mut line = String::with_capacity(WIRE_SCRATCH_KEEP_BYTES * 8);
+        release_line_slack(&mut line);
+        assert!(line.capacity() <= WIRE_SCRATCH_KEEP_BYTES);
+
+        // Steady-state buffers are left alone so appends do not reallocate.
+        let mut steady = Vec::with_capacity(WIRE_SCRATCH_KEEP_BYTES);
+        release_vec_slack(&mut steady);
+        assert_eq!(steady.capacity(), WIRE_SCRATCH_KEEP_BYTES);
+    }
+
+    #[test]
+    fn hello_protocol_accepts_clients_without_owner_pid() {
+        let raw = r#"{"type":"hello","protocol_version":1,"token":"secret","keep_running":true}"#;
+        let command = serde_json::from_str::<HostCommand>(raw).expect("parse legacy hello");
+        let HostCommand::Hello { client_pid, .. } = command else {
+            panic!("wrong command kind");
+        };
+        assert_eq!(client_pid, None);
+    }
+
+    #[test]
+    fn stale_client_detection_requires_a_known_dead_owner() {
+        assert!(!client_process_is_gone(None));
+        assert!(!client_process_is_gone(Some(std::process::id())));
+        assert!(client_process_is_gone(Some(u32::MAX)));
+    }
+
+    #[test]
     fn background_output_keeps_a_bounded_tail() {
         let mut output = vec![b'a'; BACKGROUND_OUTPUT_LIMIT];
         append_background_output(&mut output, b"latest");
@@ -1144,7 +1623,20 @@ mod tests {
     }
 
     #[test]
+    fn reattaching_releases_the_background_output_buffer() {
+        let mut output = vec![b'a'; BACKGROUND_OUTPUT_LIMIT];
+
+        release_background_output(&mut output);
+
+        assert_eq!(output.capacity(), 0);
+        // A later detach still buffers normally.
+        append_background_output(&mut output, b"after reattach");
+        assert_eq!(output, b"after reattach");
+    }
+
+    #[test]
     fn pane_host_survives_disconnect_and_accepts_reattach() {
+        let _guard = PANE_HOST_TEST_LOCK.lock().expect("lock pane host test");
         let files = TestHostFiles::new();
         let host_token = random_token().expect("host token");
         #[cfg(windows)]
@@ -1185,6 +1677,9 @@ mod tests {
         let host = PtyHostRef {
             endpoint: ready.endpoint,
             token: host_token,
+            process_id: None,
+            codex_sqlite_home: None,
+            started_at_ms: None,
         };
         let (first_tx, mut first_rx) = mpsc::channel(32);
         let first = PtyPane::attach(
@@ -1254,6 +1749,104 @@ mod tests {
             .expect("pane host exits cleanly");
     }
 
+    #[test]
+    fn pane_host_replaces_a_client_owned_by_a_dead_process() {
+        let _guard = PANE_HOST_TEST_LOCK.lock().expect("lock pane host test");
+        let files = TestHostFiles::new();
+        let host_token = random_token().expect("host token");
+        #[cfg(windows)]
+        let (profile_name, command, args, line_ending) = (
+            "cmd",
+            PathBuf::from("cmd.exe"),
+            vec!["/d".to_string(), "/q".to_string()],
+            "\r",
+        );
+        #[cfg(unix)]
+        let (profile_name, command, args, line_ending) =
+            ("sh", PathBuf::from("/bin/sh"), vec!["-i".to_string()], "\n");
+        let spec = HostLaunchSpec {
+            token: host_token.clone(),
+            ready_path: files.ready.clone(),
+            profile_name: profile_name.into(),
+            pane_id: 8,
+            generation: 0,
+            command,
+            args,
+            env: BTreeMap::new(),
+            cwd: std::env::current_dir().expect("current directory"),
+            extra_env: Vec::new(),
+            scrollback_rows: 1_000,
+            process_priority: PaneProcessPriority::Normal,
+            workload_policy: PaneWorkloadPolicy::Unrestricted,
+            keep_running: true,
+        };
+        fs::write(
+            &files.spec,
+            serde_json::to_vec(&spec).expect("serialize host spec"),
+        )
+        .expect("write host spec");
+        let spec_path = files.spec.clone();
+        let host_thread = thread::spawn(move || run_pane_host(&spec_path));
+
+        let ready = wait_for_ready(&files.ready);
+        let mut stale = TcpStream::connect(&ready.endpoint).expect("connect stale client");
+        send_json(
+            &mut stale,
+            &HostCommand::Hello {
+                protocol_version: PANE_HOST_PROTOCOL_VERSION,
+                token: host_token.clone(),
+                keep_running: true,
+                client_pid: Some(u32::MAX),
+            },
+        )
+        .expect("send stale hello");
+        let mut stale_reader = BufReader::new(stale.try_clone().expect("clone stale client"));
+        let mut hello = String::new();
+        stale_reader
+            .read_line(&mut hello)
+            .expect("read stale client handshake");
+        assert!(matches!(
+            serde_json::from_str::<HostEvent>(&hello).expect("parse stale handshake"),
+            HostEvent::Ready { .. }
+        ));
+
+        let host = PtyHostRef {
+            endpoint: ready.endpoint,
+            token: host_token,
+            process_id: None,
+            codex_sqlite_home: None,
+            started_at_ms: None,
+        };
+        let (replacement_tx, mut replacement_rx) = mpsc::channel(8);
+        let mut replacement = PtyPane::attach(
+            host,
+            PaneId(8),
+            0,
+            &spec.cwd,
+            1_000,
+            true,
+            "",
+            &[],
+            replacement_tx,
+        )
+        .expect("replacement client takes over");
+        replacement
+            .write(format!("exit{line_ending}").as_bytes())
+            .expect("exit replacement shell");
+        assert_pane_exits(&mut replacement_rx);
+        replacement
+            .set_keep_running(false)
+            .expect("disable host persistence");
+        drop(replacement);
+        drop(stale_reader);
+        drop(stale);
+
+        host_thread
+            .join()
+            .expect("join pane host")
+            .expect("pane host exits cleanly");
+    }
+
     fn wait_for_ready(path: &Path) -> HostReadyFile {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -1286,5 +1879,20 @@ mod tests {
             }
         }
         panic!("expected output {expected:?}, got {output:?}");
+    }
+
+    fn assert_pane_exits(receiver: &mut mpsc::Receiver<PtyEvent>) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            match receiver.try_recv() {
+                Ok(PtyEvent::Exited { .. }) => return,
+                Ok(PtyEvent::WriteFailed { error, .. }) => panic!("pane write failed: {error}"),
+                Ok(_) | Err(mpsc::error::TryRecvError::Empty) => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        panic!("expected pane to exit");
     }
 }

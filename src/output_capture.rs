@@ -3,7 +3,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -12,6 +12,8 @@ use directories::ProjectDirs;
 use crate::layout::PaneId;
 
 const OUTPUT_FILE_ATTEMPTS: usize = 1_000;
+const PANE_LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
+const PANE_LOG_FLUSH_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PaneLogKey {
@@ -58,6 +60,8 @@ pub fn capture_output(directory: &Path, pane_number: usize, plain_text: &str) ->
 struct PaneLogger {
     path: PathBuf,
     writer: Box<dyn Write + Send>,
+    pending_bytes: usize,
+    last_flush: Instant,
 }
 
 impl std::fmt::Debug for PaneLogger {
@@ -75,6 +79,8 @@ impl PaneLogger {
         Ok(Self {
             path,
             writer: Box::new(BufWriter::new(file)),
+            pending_bytes: 0,
+            last_flush: Instant::now(),
         })
     }
 
@@ -83,6 +89,8 @@ impl PaneLogger {
         Self {
             path,
             writer: Box::new(writer),
+            pending_bytes: 0,
+            last_flush: Instant::now(),
         }
     }
 
@@ -93,15 +101,33 @@ impl PaneLogger {
         self.writer
             .write_all(plain_text.as_bytes())
             .with_context(|| format!("failed to append log {}", self.path.display()))?;
+        self.pending_bytes = self.pending_bytes.saturating_add(plain_text.len());
+        if self.pending_bytes >= PANE_LOG_FLUSH_BYTES {
+            self.flush()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn flush_if_due(&mut self, now: Instant) -> Result<()> {
+        if self.pending_bytes == 0 || now.duration_since(self.last_flush) < PANE_LOG_FLUSH_INTERVAL
+        {
+            return Ok(());
+        }
+        self.flush()
+    }
+
+    fn flush(&mut self) -> Result<()> {
         self.writer
             .flush()
-            .with_context(|| format!("failed to flush log {}", self.path.display()))
+            .with_context(|| format!("failed to flush log {}", self.path.display()))?;
+        self.pending_bytes = 0;
+        self.last_flush = Instant::now();
+        Ok(())
     }
 
     fn finish(&mut self) -> Result<()> {
-        self.writer
-            .flush()
-            .with_context(|| format!("failed to flush log {}", self.path.display()))
+        self.flush()
     }
 }
 
@@ -147,6 +173,22 @@ impl OutputLogs {
             self.active.remove(&key);
         }
         result
+    }
+
+    pub fn flush_due(&mut self) -> Result<()> {
+        let now = Instant::now();
+        let mut failure = None;
+        for (key, logger) in &mut self.active {
+            if let Err(error) = logger.flush_if_due(now) {
+                failure = Some((*key, error));
+                break;
+            }
+        }
+        if let Some((key, error)) = failure {
+            self.active.remove(&key);
+            return Err(error);
+        }
+        Ok(())
     }
 
     pub fn is_active(&self, key: PaneLogKey) -> bool {
@@ -251,6 +293,31 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct CountingWriterState {
+        bytes: Vec<u8>,
+        flushes: usize,
+    }
+
+    #[derive(Clone)]
+    struct CountingWriter(Arc<Mutex<CountingWriterState>>);
+
+    impl Write for CountingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("counting writer lock")
+                .bytes
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.0.lock().expect("counting writer lock").flushes += 1;
+            Ok(())
+        }
+    }
+
     struct FailingWriter;
 
     impl Write for FailingWriter {
@@ -305,6 +372,29 @@ mod tests {
             String::from_utf8(bytes.lock().expect("bytes lock").clone()).expect("utf8"),
             "first\nsecond\n"
         );
+    }
+
+    #[test]
+    fn logger_batches_small_flushes_and_flushes_large_batches_immediately() {
+        let state = Arc::new(Mutex::new(CountingWriterState::default()));
+        let writer = CountingWriter(state.clone());
+        let mut logger = PaneLogger::with_writer(PathBuf::from("batched.log"), writer);
+
+        logger.append("first\n").expect("first append");
+        logger.append("second\n").expect("second append");
+        assert_eq!(state.lock().expect("state lock").flushes, 0);
+
+        logger
+            .append(&"x".repeat(PANE_LOG_FLUSH_BYTES))
+            .expect("large append");
+        assert_eq!(state.lock().expect("state lock").flushes, 1);
+
+        logger.append("tail\n").expect("tail append");
+        logger.finish().expect("finish");
+        let state = state.lock().expect("state lock");
+        assert_eq!(state.flushes, 2);
+        assert!(state.bytes.starts_with(b"first\nsecond\n"));
+        assert!(state.bytes.ends_with(b"tail\n"));
     }
 
     #[test]

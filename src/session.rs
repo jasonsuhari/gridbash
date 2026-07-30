@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -17,8 +17,9 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use crate::{
     auth::AgentKind,
     cli::ResumeArgs,
-    layout::GridSize,
-    pane_host::{PtyHostRef, PtyPane},
+    layout::{GridSize, MAX_PANES},
+    pane_host::{PtyHostRef, PtyPane, terminate_saved_host},
+    ports::roots_with_descendant_named,
     profiles::Profile,
     setup::{LaunchPlan, PaneLaunchSpec, folder_display_name},
 };
@@ -78,6 +79,8 @@ pub struct SavedPane {
     #[serde(default)]
     pub history: SavedPaneHistory,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<PtyHostRef>,
 }
 
@@ -111,11 +114,29 @@ pub struct InterruptedRecovery {
     pub tabs: Vec<SavedTab>,
     pub session_count: usize,
     pub pane_count: usize,
+    pub claim: InterruptedRecoveryClaim,
+}
+
+#[derive(Debug, Clone)]
+pub struct InterruptedRecoveryClaim {
+    sources: Vec<RecoverySource>,
+}
+
+#[derive(Debug, Clone)]
+struct RecoverySource {
+    path: PathBuf,
+    id: String,
 }
 
 pub struct SessionRecorder {
     path: PathBuf,
     session: SavedSession,
+    /// Digest of the last session written to disk.
+    ///
+    /// The serialized session embeds every pane's output tail, so keeping the
+    /// text itself pinned a multi-megabyte copy for the life of the process.
+    /// Only the change check needs it, and a digest answers that in 8 bytes.
+    last_saved_digest: Option<u64>,
 }
 
 impl SessionRecord {
@@ -151,7 +172,7 @@ impl SavedSession {
                 .iter()
                 .enumerate()
                 .map(|(index, spec)| {
-                    SavedPane::from_spec(index, spec, SavedPaneHistory::default(), None)
+                    SavedPane::from_spec(index, spec, SavedPaneHistory::default(), None, None)
                 })
                 .collect(),
             background_panes: Vec::new(),
@@ -179,6 +200,7 @@ impl SavedSession {
         self.running = false;
         self.owner_pid = None;
         self.recovered_at = Some(now_seconds());
+        self.updated_at = now_seconds();
     }
 
     fn has_agent_pane(&self) -> bool {
@@ -198,7 +220,6 @@ impl SavedSession {
         background_panes: Vec<SavedBackgroundPane>,
     ) {
         self.version = SESSION_VERSION;
-        self.updated_at = now_seconds();
         self.title = title.to_string();
         self.grid = plan.grid.into();
         self.panes = saved_panes_from_live(plan, panes);
@@ -285,27 +306,28 @@ fn launch_plan_from_saved(
             saved_grid.columns
         )
     })?;
-    let panes = panes
-        .iter()
-        .map(|pane| PaneLaunchSpec {
-            profile_name: pane.profile_name.clone(),
-            command: pane.command.clone(),
-            env: BTreeMap::new(),
-            cwd: pane.cwd.clone(),
-            folder_name: pane.folder_name.clone(),
-            worktree_name: pane.worktree_name.clone(),
-            auth_name: pane.auth_name.clone(),
-            auth_kind: pane.auth_kind,
-            auth_dir: None,
-        })
-        .collect::<Vec<_>>();
+    let panes = panes.iter().map(SavedPane::launch_spec).collect::<Vec<_>>();
     if panes.is_empty() {
         bail!("saved session {id} has no panes");
+    }
+    // A grid can never hold more than `MAX_PANES`, so a file claiming more is
+    // damaged. Refusing it here keeps the count from becoming per-pane
+    // allocations and PTY spawns.
+    if panes.len() > MAX_PANES {
+        bail!(
+            "saved session {id} claims {} panes; the maximum is {MAX_PANES}",
+            panes.len()
+        );
     }
     Ok(LaunchPlan { panes, grid })
 }
 
 fn saved_panes_from_live(plan: &LaunchPlan, panes: &[PtyPane]) -> Vec<SavedPane> {
+    let host_processes = panes
+        .iter()
+        .filter_map(PtyPane::host_process_id)
+        .collect::<Vec<_>>();
+    let codex_roots = roots_with_descendant_named(&host_processes, "codex").ok();
     plan.panes
         .iter()
         .enumerate()
@@ -313,7 +335,20 @@ fn saved_panes_from_live(plan: &LaunchPlan, panes: &[PtyPane]) -> Vec<SavedPane>
             let live = panes.get(index);
             let history = live.map(SavedPaneHistory::from_pane).unwrap_or_default();
             let host = live.map(PtyPane::host_ref);
-            let mut saved = SavedPane::from_spec(index, spec, history, host);
+            let codex_running = live.is_some_and(|pane| {
+                pane.host_process_id().is_some_and(|process_id| {
+                    codex_roots
+                        .as_ref()
+                        .is_some_and(|roots| roots.contains(&process_id))
+                }) || (spec.command.agent_kind == Some(AgentKind::Codex) && !pane.exited)
+            });
+            let codex_thread_id = codex_running
+                .then(|| {
+                    codex_resume_id(&spec.command, &history.input_history)
+                        .or_else(|| live.and_then(|pane| pane.codex_thread_id(pane.cwd())))
+                })
+                .flatten();
+            let mut saved = SavedPane::from_spec(index, spec, history, codex_thread_id, host);
             if let Some(live) = live {
                 saved.cwd = live.cwd().to_path_buf();
                 saved.folder_name = folder_display_name(&saved.cwd);
@@ -325,9 +360,14 @@ fn saved_panes_from_live(plan: &LaunchPlan, panes: &[PtyPane]) -> Vec<SavedPane>
 
 impl SavedPane {
     pub fn launch_spec(&self) -> PaneLaunchSpec {
+        let (profile_name, command) = self
+            .codex_thread_id
+            .as_deref()
+            .map(|thread_id| codex_resume_profile(&self.profile_name, &self.command, thread_id))
+            .unwrap_or_else(|| (self.profile_name.clone(), self.command.clone()));
         PaneLaunchSpec {
-            profile_name: self.profile_name.clone(),
-            command: self.command.clone(),
+            profile_name,
+            command,
             env: BTreeMap::new(),
             cwd: self.cwd.clone(),
             folder_name: self.folder_name.clone(),
@@ -343,13 +383,14 @@ impl SavedPane {
         history: SavedPaneHistory,
         host: Option<PtyHostRef>,
     ) -> Self {
-        Self::from_spec(0, spec, history, host)
+        Self::from_spec(0, spec, history, None, host)
     }
 
     fn from_spec(
         index: usize,
         spec: &PaneLaunchSpec,
         history: SavedPaneHistory,
+        codex_thread_id: Option<String>,
         host: Option<PtyHostRef>,
     ) -> Self {
         Self {
@@ -362,9 +403,101 @@ impl SavedPane {
             auth_name: spec.auth_name.clone(),
             auth_kind: spec.auth_kind,
             history,
+            codex_thread_id,
             host,
         }
     }
+}
+
+fn codex_resume_profile(
+    profile_name: &str,
+    command: &Profile,
+    thread_id: &str,
+) -> (String, Profile) {
+    if command.agent_kind == Some(AgentKind::Codex) && is_direct_codex_command(&command.command) {
+        let mut command = command.clone();
+        if let Some(resume_index) = command
+            .args
+            .iter()
+            .position(|argument| argument == "resume")
+        {
+            if command
+                .args
+                .get(resume_index + 1)
+                .is_some_and(|argument| looks_like_thread_id(argument))
+            {
+                command.args[resume_index + 1] = thread_id.to_string();
+            } else {
+                command.args.insert(resume_index + 1, thread_id.to_string());
+            }
+        } else {
+            command.args.extend(["resume".into(), thread_id.into()]);
+        }
+        return (profile_name.to_string(), command);
+    }
+    if codex_resume_id(command, &[]).as_deref() == Some(thread_id) {
+        return (profile_name.to_string(), command.clone());
+    }
+
+    (
+        "codex".into(),
+        Profile {
+            command: "codex".into(),
+            args: vec!["resume".into(), thread_id.into()],
+            title: Some("Codex".into()),
+            agent_kind: Some(AgentKind::Codex),
+        },
+    )
+}
+
+fn codex_resume_id(command: &Profile, input_history: &[String]) -> Option<String> {
+    command
+        .args
+        .windows(2)
+        .find_map(|arguments| {
+            (arguments[0] == "resume" && looks_like_thread_id(&arguments[1]))
+                .then(|| arguments[1].clone())
+        })
+        .or_else(|| {
+            command
+                .args
+                .iter()
+                .rev()
+                .find_map(|argument| resume_id_in_text(argument))
+        })
+        .or_else(|| {
+            input_history
+                .iter()
+                .rev()
+                .find_map(|input| resume_id_in_text(input))
+        })
+}
+
+fn resume_id_in_text(value: &str) -> Option<String> {
+    let tokens = value
+        .split_whitespace()
+        .map(|token| {
+            token.trim_matches(|character: char| matches!(character, '"' | '\'' | ';' | ','))
+        })
+        .collect::<Vec<_>>();
+    tokens.windows(2).find_map(|tokens| {
+        (tokens[0] == "resume" && looks_like_thread_id(tokens[1])).then(|| tokens[1].to_string())
+    })
+}
+
+fn is_direct_codex_command(command: &str) -> bool {
+    Path::new(command)
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("codex"))
+}
+
+fn looks_like_thread_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_hexdigit(),
+        })
 }
 
 impl SavedPaneHistory {
@@ -389,9 +522,10 @@ impl SessionRecorder {
     pub fn start_new(title: &str, plan: &LaunchPlan) -> Result<Self> {
         let id = new_session_id();
         let path = session_file_path(&id)?;
-        let recorder = Self {
+        let mut recorder = Self {
             path,
             session: SavedSession::new(id, title, plan),
+            last_saved_digest: None,
         };
         recorder.save()?;
         prune_old_sessions()?;
@@ -399,10 +533,14 @@ impl SessionRecorder {
     }
 
     pub fn continue_record(mut record: SessionRecord) -> Self {
+        let last_saved_digest = toml::to_string_pretty(&record.session)
+            .ok()
+            .map(|raw| session_digest(&raw));
         record.session.begin_run();
         Self {
             path: record.path,
             session: record.session,
+            last_saved_digest,
         }
     }
 
@@ -418,8 +556,29 @@ impl SessionRecorder {
             .update_from_live(title, plan, panes, tabs, background_panes);
     }
 
-    pub fn save(&self) -> Result<()> {
-        save_session_to_path(&self.path, &self.session)
+    pub fn save(&mut self) -> Result<()> {
+        self.save_if_changed().map(|_| ())
+    }
+
+    pub fn save_if_changed(&mut self) -> Result<bool> {
+        let raw = toml::to_string_pretty(&self.session).context("failed to serialize session")?;
+        let unchanged = self.last_saved_digest == Some(session_digest(&raw));
+        // Release the probe before serializing again; the two copies of a
+        // session carrying every pane's output tail are the peak of this path.
+        drop(raw);
+        if unchanged {
+            return Ok(false);
+        }
+
+        self.session.updated_at = now_seconds();
+        let raw = toml::to_string_pretty(&self.session).context("failed to serialize session")?;
+        write_session_raw(&self.path, raw.as_bytes())?;
+        self.last_saved_digest = Some(session_digest(&raw));
+        Ok(true)
+    }
+
+    pub fn resume_command(&self) -> String {
+        format!("gridbash resume {}", self.session.id)
     }
 
     pub fn finish(&mut self) -> Result<()> {
@@ -429,23 +588,49 @@ impl SessionRecorder {
 }
 
 pub fn claim_interrupted_recovery() -> Result<Option<InterruptedRecovery>> {
+    with_session_state_lock(claim_interrupted_recovery_locked)
+}
+
+pub fn complete_interrupted_recovery(claim: &InterruptedRecoveryClaim) -> Result<()> {
+    with_session_state_lock(|| {
+        for source in &claim.sources {
+            let mut record = load_session_record(&source.path)?;
+            if record.session.id != source.id {
+                bail!(
+                    "saved recovery session {} changed identity while it was claimed",
+                    source.id
+                );
+            }
+            if record.session.running
+                && record.session.owner_pid == Some(std::process::id())
+                && record.session.recovered_at.is_none()
+            {
+                record.session.mark_recovered();
+                save_session_to_path(&record.path, &record.session)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+fn with_session_state_lock<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
     let directory = sessions_dir()?;
     create_private_dir_all(&directory)
         .with_context(|| format!("failed to create session directory {}", directory.display()))?;
-    let lock_path = directory.join(".recovery.lock");
+    let lock_path = directory.join(".sessions.lock");
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true);
     #[cfg(unix)]
     options.mode(0o600);
     let lock = options
         .open(&lock_path)
-        .with_context(|| format!("failed to open recovery lock {}", lock_path.display()))?;
+        .with_context(|| format!("failed to open session lock {}", lock_path.display()))?;
     FileExt::lock(&lock)
-        .with_context(|| format!("failed to lock recovery state {}", lock_path.display()))?;
+        .with_context(|| format!("failed to lock session state {}", lock_path.display()))?;
 
-    let result = claim_interrupted_recovery_locked();
+    let result = operation();
     let unlock_result = FileExt::unlock(&lock)
-        .with_context(|| format!("failed to unlock recovery state {}", lock_path.display()));
+        .with_context(|| format!("failed to unlock session state {}", lock_path.display()));
     match (result, unlock_result) {
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
@@ -463,7 +648,7 @@ fn claim_interrupted_recovery_locked() -> Result<Option<InterruptedRecovery>> {
     };
 
     for record in &mut records {
-        record.session.mark_recovered();
+        record.session.begin_run();
         save_session_to_path(&record.path, &record.session)?;
     }
     Ok(Some(recovery))
@@ -531,6 +716,15 @@ fn build_interrupted_recovery(records: &[SessionRecord]) -> Option<InterruptedRe
         tabs,
         session_count: records.len(),
         pane_count,
+        claim: InterruptedRecoveryClaim {
+            sources: records
+                .iter()
+                .map(|record| RecoverySource {
+                    path: record.path.clone(),
+                    id: record.session.id.clone(),
+                })
+                .collect(),
+        },
     })
 }
 
@@ -554,15 +748,106 @@ pub fn select_resume_session(args: &ResumeArgs) -> Result<Option<SessionRecord>>
         return Ok(None);
     }
 
-    if let Some(query) = args.session.as_deref() {
-        return find_session(&sessions, query).map(Some);
+    if args.delete {
+        let query = args
+            .session
+            .as_deref()
+            .ok_or_else(|| anyhow!("--delete requires a session id or unique id prefix"))?;
+        let record = find_session(&sessions, query)?;
+        let id = record.session.id.clone();
+        delete_saved_session(&record)?;
+        println!("gridbash: deleted saved session {id}");
+        return Ok(None);
     }
 
-    if args.latest || sessions.len() == 1 {
-        return Ok(sessions.into_iter().next());
+    let selected = if let Some(query) = args.session.as_deref() {
+        Some(find_session(&sessions, query)?)
+    } else if args.latest {
+        sessions
+            .iter()
+            .find(|record| live_owner_pid(record).is_none())
+            .cloned()
+            .or_else(|| sessions.first().cloned())
+    } else {
+        prompt_for_session(&sessions)?
+    };
+
+    selected.map(claim_resume_session).transpose()
+}
+
+fn claim_resume_session(record: SessionRecord) -> Result<SessionRecord> {
+    with_session_state_lock(|| claim_resume_session_locked(record))
+}
+
+fn claim_resume_session_locked(record: SessionRecord) -> Result<SessionRecord> {
+    let mut current = load_session_record(&record.path)?;
+    if current.session.id != record.session.id {
+        bail!(
+            "saved session {} changed identity while it was selected",
+            record.session.id
+        );
+    }
+    current = ensure_session_is_resumable(current)?;
+    current.session.begin_run();
+    save_session_to_path(&current.path, &current.session)?;
+    Ok(current)
+}
+
+pub fn delete_saved_session(record: &SessionRecord) -> Result<()> {
+    with_session_state_lock(|| {
+        let current = match load_session_record(&record.path) {
+            Ok(current) => current,
+            Err(_) if !record.path.exists() => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if current.session.id != record.session.id {
+            bail!(
+                "saved session {} changed identity while it was selected for deletion",
+                record.session.id
+            );
+        }
+        delete_saved_session_locked(&current)
+    })
+}
+
+fn delete_saved_session_locked(record: &SessionRecord) -> Result<()> {
+    if let Some(owner_pid) = live_owner_pid(record) {
+        bail!(
+            "session {} is open in GridBash (PID {owner_pid}); close that client before deleting it",
+            record.session.id
+        );
     }
 
-    prompt_for_session(&sessions)
+    let mut hosts = BTreeMap::<String, PtyHostRef>::new();
+    for pane in record
+        .session
+        .panes
+        .iter()
+        .chain(record.session.tabs.iter().flat_map(|tab| tab.panes.iter()))
+        .chain(record.session.background_panes.iter().map(|job| &job.pane))
+    {
+        if let Some(host) = pane.host.as_ref() {
+            hosts
+                .entry(host.endpoint.clone())
+                .or_insert_with(|| host.clone());
+        }
+    }
+
+    for host in hosts.values() {
+        terminate_saved_host(host).with_context(|| {
+            format!(
+                "failed to stop a detached terminal for session {}",
+                record.session.id
+            )
+        })?;
+    }
+
+    match fs::remove_file(&record.path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to delete saved session {}", record.session.id)),
+    }
 }
 
 pub fn load_recent_sessions() -> Result<Vec<SessionRecord>> {
@@ -631,6 +916,33 @@ fn find_session(sessions: &[SessionRecord], query: &str) -> Result<SessionRecord
 }
 
 fn prompt_for_session(sessions: &[SessionRecord]) -> Result<Option<SessionRecord>> {
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        return crate::resume_picker::select_session(sessions);
+    }
+
+    prompt_for_session_plain(sessions)
+}
+
+fn live_owner_pid(record: &SessionRecord) -> Option<u32> {
+    record
+        .session
+        .running
+        .then_some(record.session.owner_pid)
+        .flatten()
+        .filter(|owner_pid| process_is_running(*owner_pid))
+}
+
+fn ensure_session_is_resumable(record: SessionRecord) -> Result<SessionRecord> {
+    if let Some(owner_pid) = live_owner_pid(&record) {
+        bail!(
+            "session {} is already open in GridBash (PID {owner_pid}); switch to that client or close it before resuming",
+            record.session.id
+        );
+    }
+    Ok(record)
+}
+
+fn prompt_for_session_plain(sessions: &[SessionRecord]) -> Result<Option<SessionRecord>> {
     println!("Recent GridBash sessions:");
     for (index, record) in sessions.iter().take(20).enumerate() {
         println!(
@@ -669,11 +981,38 @@ fn prompt_for_session(sessions: &[SessionRecord]) -> Result<Option<SessionRecord
 }
 
 fn prune_old_sessions() -> Result<()> {
-    let sessions = load_recent_sessions()?;
-    for record in sessions.into_iter().skip(MAX_SAVED_SESSIONS) {
-        let _ = fs::remove_file(record.path);
-    }
-    Ok(())
+    with_session_state_lock(|| {
+        let sessions = load_recent_sessions()?;
+        let mut excess = sessions.len().saturating_sub(MAX_SAVED_SESSIONS);
+        if excess == 0 {
+            return Ok(());
+        }
+
+        for record in sessions.into_iter().rev() {
+            if excess == 0 {
+                break;
+            }
+            if live_owner_pid(&record).is_some() || session_has_live_host(&record.session) {
+                continue;
+            }
+            match fs::remove_file(&record.path) {
+                Ok(()) => excess -= 1,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => excess -= 1,
+                Err(_) => {}
+            }
+        }
+        Ok(())
+    })
+}
+
+fn session_has_live_host(session: &SavedSession) -> bool {
+    session
+        .panes
+        .iter()
+        .chain(session.tabs.iter().flat_map(|tab| tab.panes.iter()))
+        .chain(session.background_panes.iter().map(|job| &job.pane))
+        .filter_map(|pane| pane.host.as_ref())
+        .any(|host| host.process_id.map(process_is_running).unwrap_or(true))
 }
 
 fn sessions_dir() -> Result<PathBuf> {
@@ -726,15 +1065,42 @@ fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
+/// Fingerprint a serialized session so autosave can skip unchanged writes
+/// without keeping the serialized text around.
+fn session_digest(raw: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    raw.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn save_session_to_path(path: &Path, session: &SavedSession) -> Result<()> {
+    let raw = toml::to_string_pretty(session).context("failed to serialize session")?;
+    write_session_raw(path, raw.as_bytes())
+}
+
+fn write_session_raw(path: &Path, raw: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         create_private_dir_all(parent)
             .with_context(|| format!("failed to create session directory {}", parent.display()))?;
     }
-
-    let raw = toml::to_string_pretty(session).context("failed to serialize session")?;
-    write_private_file(path, raw.as_bytes())
+    write_private_file(path, raw)
         .with_context(|| format!("failed to write session {}", path.display()))
+}
+
+fn load_session_record(path: &Path) -> Result<SessionRecord> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read saved session {}", path.display()))?;
+    let session = toml::from_str::<SavedSession>(&raw)
+        .with_context(|| format!("failed to parse saved session {}", path.display()))?;
+    if session.version != SESSION_VERSION || session.id.is_empty() {
+        bail!("saved session {} has an unsupported format", path.display());
+    }
+    Ok(SessionRecord {
+        path: path.to_path_buf(),
+        session,
+    })
 }
 
 fn session_file_path(id: &str) -> Result<PathBuf> {
@@ -761,7 +1127,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 #[cfg(unix)]
-fn process_is_running(process_id: u32) -> bool {
+pub(crate) fn process_is_running(process_id: u32) -> bool {
     let Ok(process_id) = i32::try_from(process_id) else {
         return false;
     };
@@ -774,7 +1140,7 @@ fn process_is_running(process_id: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn process_is_running(process_id: u32) -> bool {
+pub(crate) fn process_is_running(process_id: u32) -> bool {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, ERROR_ACCESS_DENIED, STILL_ACTIVE},
         System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
@@ -795,7 +1161,7 @@ fn process_is_running(process_id: u32) -> bool {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn process_is_running(_process_id: u32) -> bool {
+pub(crate) fn process_is_running(_process_id: u32) -> bool {
     true
 }
 
@@ -874,6 +1240,80 @@ mod tests {
     }
 
     #[test]
+    fn saved_codex_thread_relaunches_with_resume() {
+        let mut pane = pane("fluent", "codex");
+        pane.command.agent_kind = Some(AgentKind::Codex);
+        pane.command.args = vec!["--dangerously-bypass-approvals-and-sandbox".into()];
+        pane.codex_thread_id = Some("019f7b81-de49-7782-8186-a3dc2c644c61".into());
+
+        let launch = pane.launch_spec();
+
+        assert_eq!(launch.profile_name, "codex");
+        assert_eq!(
+            launch.command.args,
+            [
+                "--dangerously-bypass-approvals-and-sandbox",
+                "resume",
+                "019f7b81-de49-7782-8186-a3dc2c644c61",
+            ]
+        );
+    }
+
+    #[test]
+    fn shell_running_codex_becomes_a_resumable_codex_pane() {
+        let mut pane = pane("fluent", "git-bash");
+        pane.codex_thread_id = Some("019f7b81-e026-7d12-a013-25f4763f4bce".into());
+
+        let launch = pane.launch_spec();
+
+        assert_eq!(launch.profile_name, "codex");
+        assert_eq!(launch.command.command, "codex");
+        assert_eq!(
+            launch.command.args,
+            ["resume", "019f7b81-e026-7d12-a013-25f4763f4bce"]
+        );
+        assert_eq!(launch.command.agent_kind, Some(AgentKind::Codex));
+    }
+
+    #[test]
+    fn extracts_codex_resume_id_from_shell_history() {
+        let command = Profile {
+            command: "bash".into(),
+            args: Vec::new(),
+            title: Some("Git Bash".into()),
+            agent_kind: None,
+        };
+
+        assert_eq!(
+            codex_resume_id(
+                &command,
+                &["codex resume 019f7b81-e2cd-71c1-84dd-9f09622cf74e".into()]
+            )
+            .as_deref(),
+            Some("019f7b81-e2cd-71c1-84dd-9f09622cf74e")
+        );
+    }
+
+    #[test]
+    fn preserves_a_wrapper_that_already_resumes_the_saved_thread() {
+        let thread_id = "019f7b81-de49-7782-8186-a3dc2c644c61";
+        let command = Profile {
+            command: "powershell.exe".into(),
+            args: vec![
+                "-Command".into(),
+                format!("& codex --dangerously-bypass-approvals-and-sandbox resume {thread_id}"),
+            ],
+            title: Some("Codex".into()),
+            agent_kind: Some(AgentKind::Codex),
+        };
+
+        let (profile_name, restored) = codex_resume_profile("codex", &command, thread_id);
+        assert_eq!(profile_name, "codex");
+        assert_eq!(restored.command, command.command);
+        assert_eq!(restored.args, command.args);
+    }
+
+    #[test]
     fn summarizes_unique_folders_and_profiles() {
         let session = SavedSession {
             version: SESSION_VERSION,
@@ -911,6 +1351,9 @@ mod tests {
         background_pane.host = Some(PtyHostRef {
             endpoint: "127.0.0.1:32123".into(),
             token: "secret".into(),
+            process_id: None,
+            codex_sqlite_home: None,
+            started_at_ms: None,
         });
         let mut session = SavedSession {
             version: SESSION_VERSION,
@@ -1048,6 +1491,87 @@ mod tests {
     }
 
     #[test]
+    fn resume_rejects_only_sessions_with_live_owners() {
+        let mut session = recovery_session("live", vec![pane("alpha", "codex")]);
+        session.running = true;
+        session.owner_pid = Some(std::process::id());
+        let record = SessionRecord {
+            path: PathBuf::from("live.toml"),
+            session,
+        };
+
+        let error = ensure_session_is_resumable(record.clone()).expect_err("live owner rejected");
+        assert!(error.to_string().contains("already open"));
+
+        let mut interrupted = record;
+        interrupted.session.owner_pid = Some(u32::MAX);
+        ensure_session_is_resumable(interrupted).expect("dead owner can be recovered");
+    }
+
+    #[test]
+    fn resume_claim_is_persisted_before_the_session_is_returned() {
+        let directory = env::temp_dir().join(format!(
+            "gridbash-resume-claim-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("create test directory");
+        let path = directory.join("claim.toml");
+        let record = SessionRecord {
+            path: path.clone(),
+            session: recovery_session("claim", vec![pane("alpha", "codex")]),
+        };
+        save_session_to_path(&path, &record.session).expect("save unclaimed session");
+
+        let claimed = claim_resume_session_locked(record.clone()).expect("claim session");
+        assert!(claimed.session.running);
+        assert_eq!(claimed.session.owner_pid, Some(std::process::id()));
+
+        let error = claim_resume_session_locked(record).expect_err("second claim rejected");
+        assert!(error.to_string().contains("already open"));
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn deleting_a_saved_session_removes_its_snapshot() {
+        let directory = env::temp_dir().join(format!(
+            "gridbash-delete-session-test-{}-{}",
+            std::process::id(),
+            now_seconds()
+        ));
+        fs::create_dir_all(&directory).expect("create test directory");
+        let path = directory.join("saved.toml");
+        let record = SessionRecord {
+            path: path.clone(),
+            session: recovery_session("saved", vec![pane("alpha", "codex")]),
+        };
+        save_session_to_path(&path, &record.session).expect("write session snapshot");
+
+        delete_saved_session(&record).expect("delete saved session");
+
+        assert!(!path.exists());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn deleting_an_open_session_is_refused() {
+        let mut session = recovery_session("open", vec![pane("alpha", "codex")]);
+        session.running = true;
+        session.owner_pid = Some(std::process::id());
+        let record = SessionRecord {
+            path: PathBuf::from("open.toml"),
+            session,
+        };
+
+        let error = delete_saved_session(&record).expect_err("open session must be protected");
+
+        assert!(error.to_string().contains("close that client"));
+    }
+
+    #[test]
     fn interrupted_sessions_are_grouped_into_directory_named_tabs() {
         let alpha = PathBuf::from("workspaces").join("alpha");
         let beta = PathBuf::from("workspaces").join("beta");
@@ -1105,6 +1629,55 @@ mod tests {
             recovery.tabs[0].panes[0].history.output_tail,
             "first conversation"
         );
+        assert_eq!(recovery.claim.sources.len(), 2);
+    }
+
+    #[test]
+    fn session_recorder_skips_unchanged_snapshots() {
+        let directory = env::temp_dir().join(format!(
+            "gridbash-session-dirty-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).expect("create test directory");
+        let path = directory.join("session.toml");
+        let mut recorder = SessionRecorder {
+            path: path.clone(),
+            session: recovery_session("dirty", vec![pane("alpha", "codex")]),
+            last_saved_digest: None,
+        };
+
+        assert!(recorder.save_if_changed().expect("first save"));
+        let first = fs::read(&path).expect("first snapshot");
+        assert!(!recorder.save_if_changed().expect("unchanged save"));
+        assert_eq!(fs::read(&path).expect("unchanged snapshot"), first);
+
+        recorder.session.title = "Changed".into();
+        assert!(recorder.save_if_changed().expect("changed save"));
+        assert_ne!(fs::read(&path).expect("changed snapshot"), first);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn live_and_legacy_hosts_are_protected_from_pruning() {
+        let mut session = recovery_session("host", vec![pane("alpha", "codex")]);
+        session.panes[0].host = Some(PtyHostRef {
+            endpoint: "127.0.0.1:12345".into(),
+            token: "token".into(),
+            process_id: Some(std::process::id()),
+            codex_sqlite_home: None,
+            started_at_ms: None,
+        });
+        assert!(session_has_live_host(&session));
+
+        session.panes[0].host.as_mut().expect("host").process_id = Some(u32::MAX);
+        assert!(!session_has_live_host(&session));
+
+        session.panes[0].host.as_mut().expect("host").process_id = None;
+        assert!(session_has_live_host(&session));
     }
 
     fn recovery_session(id: &str, panes: Vec<SavedPane>) -> SavedSession {
@@ -1140,6 +1713,7 @@ mod tests {
             auth_name: None,
             auth_kind: None,
             history: SavedPaneHistory::default(),
+            codex_thread_id: None,
             host: None,
         }
     }

@@ -12,6 +12,8 @@ use std::process::Stdio;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::{env, path::PathBuf};
 
+use crate::diagnostics;
+
 #[cfg(target_os = "linux")]
 use crate::voice_model;
 
@@ -157,7 +159,13 @@ impl VoiceInput {
         let event_tx = self.event_tx.clone();
 
         thread::spawn(move || {
-            if let Some(outcome) = recognize(cancel_rx) {
+            // A panicking recognizer would otherwise leave the request in flight
+            // and the microphone indicator on for the rest of the session.
+            let outcome = match diagnostics::recovering("dictation", || Ok(recognize(cancel_rx))) {
+                Ok(outcome) => outcome,
+                Err(error) => Some(VoiceOutcome::Error(error)),
+            };
+            if let Some(outcome) = outcome {
                 let _ = event_tx.send(VoiceEvent {
                     request_id,
                     outcome,

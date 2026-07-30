@@ -37,7 +37,10 @@ pub struct UiConfig {
         skip_serializing_if = "UiConfig::activity_badges_enabled"
     )]
     pub activity_badges: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default = "UiConfig::default_confirm_quit",
+        skip_serializing_if = "UiConfig::confirm_quit_enabled"
+    )]
     pub confirm_quit: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_terminals_running: bool,
@@ -92,7 +95,7 @@ impl Default for UiConfig {
         Self {
             compact_titles: false,
             activity_badges: Self::default_activity_badges(),
-            confirm_quit: false,
+            confirm_quit: Self::default_confirm_quit(),
             keep_terminals_running: false,
             scrollback_rows: Self::default_scrollback_rows(),
             refresh_ms: Self::default_refresh_ms(),
@@ -103,6 +106,10 @@ impl Default for UiConfig {
 
 impl UiConfig {
     pub fn default_activity_badges() -> bool {
+        true
+    }
+
+    pub fn default_confirm_quit() -> bool {
         true
     }
 
@@ -117,7 +124,7 @@ impl UiConfig {
     fn is_empty(&self) -> bool {
         !self.compact_titles
             && self.activity_badges == Self::default_activity_badges()
-            && !self.confirm_quit
+            && self.confirm_quit == Self::default_confirm_quit()
             && !self.keep_terminals_running
             && self.scrollback_rows == Self::default_scrollback_rows()
             && self.refresh_ms == Self::default_refresh_ms()
@@ -125,6 +132,10 @@ impl UiConfig {
     }
 
     fn activity_badges_enabled(value: &bool) -> bool {
+        *value
+    }
+
+    fn confirm_quit_enabled(value: &bool) -> bool {
         *value
     }
 
@@ -553,6 +564,26 @@ mod tests {
         let round_trip: Config = toml::from_str(&serialized).expect("round trip UI config");
         assert_eq!(round_trip.ui.palette, config.ui.palette);
         assert_eq!(round_trip.ui.refresh_ms, 32);
+    }
+
+    #[test]
+    fn quit_confirmation_defaults_on_and_can_be_disabled() {
+        let defaults: Config = toml::from_str("").expect("parse default config");
+        assert!(defaults.ui.confirm_quit);
+        assert!(
+            !toml::to_string(&defaults)
+                .expect("serialize default config")
+                .contains("confirm_quit")
+        );
+
+        let disabled: Config = toml::from_str("[ui]\nconfirm_quit = false\n")
+            .expect("parse disabled quit confirmation");
+        assert!(!disabled.ui.confirm_quit);
+        assert!(
+            toml::to_string(&disabled)
+                .expect("serialize disabled quit confirmation")
+                .contains("confirm_quit = false")
+        );
     }
 
     #[test]

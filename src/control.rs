@@ -393,7 +393,8 @@ pub fn run_ctl(args: &CtlArgs) -> Result<()> {
         .or_else(|| env::var("GRIDBASH_CONTROL_SESSION").ok());
     let session = select_discovered_session(&sessions, requested_session.as_deref())?;
     let (command, token) = match &args.action {
-        CtlAction::List => unreachable!("list returned above"),
+        // Handled by the early return above.
+        CtlAction::List => return Ok(()),
         CtlAction::Panes => (ControlCommand::Describe, None),
         CtlAction::Send {
             panes,

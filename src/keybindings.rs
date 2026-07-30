@@ -12,11 +12,13 @@ pub enum Action {
     FocusUp,
     FocusDown,
     ToggleSelection,
+    ToggleGridSelection,
     SelectAll,
     SleepPanes,
     RestartPanes,
     NextTab,
     NewTab,
+    CloseGrid,
     ResizeGrid,
     SwapPanes,
     ZoomPane,
@@ -31,6 +33,7 @@ pub enum Action {
     Settings,
     PreviousPanes,
     PaneActivity,
+    Ports,
     CopyMode,
     BackgroundPanes,
     BackgroundJobs,
@@ -45,9 +48,11 @@ const ACTIONS: &[Action] = &[
     Action::FocusUp,
     Action::FocusDown,
     Action::ToggleSelection,
+    Action::ToggleGridSelection,
     Action::SelectAll,
     Action::NewTab,
     Action::NextTab,
+    Action::CloseGrid,
     Action::RenameTab,
     Action::CommandLine,
     Action::CommandPalette,
@@ -55,6 +60,7 @@ const ACTIONS: &[Action] = &[
     Action::CaptureOutput,
     Action::ToggleOutputLogging,
     Action::PaneActivity,
+    Action::Ports,
     Action::PreviousPanes,
     Action::CopyMode,
     Action::BackgroundPanes,
@@ -88,11 +94,13 @@ impl Action {
             Self::FocusUp => "focus-up",
             Self::FocusDown => "focus-down",
             Self::ToggleSelection => "toggle-selection",
+            Self::ToggleGridSelection => "toggle-grid-selection",
             Self::SelectAll => "select-all",
             Self::SleepPanes => "sleep-panes",
             Self::RestartPanes => "restart-panes",
             Self::NextTab => "next-tab",
             Self::NewTab => "new-tab",
+            Self::CloseGrid => "close-grid",
             Self::ResizeGrid => "resize-grid",
             Self::SwapPanes => "swap-panes",
             Self::ZoomPane => "zoom-pane",
@@ -107,6 +115,7 @@ impl Action {
             Self::Settings => "settings",
             Self::PreviousPanes => "previous-panes",
             Self::PaneActivity => "pane-activity",
+            Self::Ports => "ports",
             Self::CopyMode => "copy-mode",
             Self::BackgroundPanes => "background-panes",
             Self::BackgroundJobs => "background-jobs",
@@ -125,13 +134,15 @@ impl Action {
             Self::FocusUp => "focus pane above",
             Self::FocusDown => "focus pane below",
             Self::ToggleSelection => "toggle pane selection",
+            Self::ToggleGridSelection => "toggle current grid selection",
             Self::SelectAll => "select or clear all panes",
             Self::SleepPanes => "sleep or wake panes",
             Self::RestartPanes => "restart exited panes",
             Self::NextTab => "switch to next tab",
             Self::NewTab => "open a new tab",
+            Self::CloseGrid => "close current grid",
             Self::ResizeGrid => "resize the grid",
-            Self::SwapPanes => "swap selected panes",
+            Self::SwapPanes => "swap selected panes or grids",
             Self::ZoomPane => "zoom or restore focused pane",
             Self::CommandLine => "expand or close command line",
             Self::CommandPalette => "open searchable command palette",
@@ -144,6 +155,7 @@ impl Action {
             Self::Settings => "open settings and profiles",
             Self::PreviousPanes => "show previous panes",
             Self::PaneActivity => "show focused-pane activity",
+            Self::Ports => "show ports used by coding agents",
             Self::CopyMode => "search and copy pane scrollback",
             Self::BackgroundPanes => "background selected or focused panes",
             Self::BackgroundJobs => "show background agents",
@@ -166,11 +178,13 @@ impl Action {
             Self::FocusUp => "alt+up",
             Self::FocusDown => "alt+down",
             Self::ToggleSelection => "alt+s",
+            Self::ToggleGridSelection => "alt+shift+s",
             Self::SelectAll => "alt+a",
             Self::SleepPanes => "alt+z",
             Self::RestartPanes => "alt+shift+t",
             Self::NextTab => "alt+t",
             Self::NewTab => "alt+n",
+            Self::CloseGrid => "alt+w",
             Self::ResizeGrid => "alt+l",
             Self::SwapPanes => "alt+x",
             Self::ZoomPane => "alt+f",
@@ -185,6 +199,7 @@ impl Action {
             Self::Settings => "alt+o",
             Self::PreviousPanes => "alt+shift+p",
             Self::PaneActivity => "alt+p",
+            Self::Ports => "ctrl+alt+p",
             Self::CopyMode => "alt+b",
             Self::BackgroundPanes => "alt+shift+b",
             Self::BackgroundJobs => "ctrl+alt+b",
@@ -308,9 +323,11 @@ fn parse_key(value: &str) -> Result<ShortcutKey> {
         "right" => Ok(ShortcutKey::Right),
         "up" => Ok(ShortcutKey::Up),
         "down" => Ok(ShortcutKey::Down),
-        value if value.len() == 1 => Ok(ShortcutKey::Char(
-            value.chars().next().expect("one-character shortcut"),
-        )),
+        value if value.len() == 1 => value
+            .chars()
+            .next()
+            .map(ShortcutKey::Char)
+            .ok_or_else(|| anyhow!("unknown shortcut key '{value}'")),
         value if value.starts_with('f') => {
             let number = value[1..]
                 .parse::<u8>()
@@ -388,13 +405,17 @@ impl KeyBindings {
             .iter()
             .copied()
             .map(|action| {
-                let shortcut = self.bindings[&action];
-                let label = match action {
-                    Action::Quit if shortcut != fallback_quit_shortcut() => {
-                        format!("{} / Alt+Q", shortcut.label())
-                    }
-                    Action::Help => format!("{} / F1", shortcut.label()),
-                    _ => shortcut.label(),
+                // `from_overrides` seeds every action, but indexing a map that
+                // is one action short would panic instead of degrading.
+                let label = match self.shortcut_for(action) {
+                    None => "unbound".to_string(),
+                    Some(shortcut) => match action {
+                        Action::Quit if shortcut != fallback_quit_shortcut() => {
+                            format!("{} / Alt+Q", shortcut.label())
+                        }
+                        Action::Help => format!("{} / F1", shortcut.label()),
+                        _ => shortcut.label(),
+                    },
                 };
                 (label, action.description())
             })
@@ -402,7 +423,15 @@ impl KeyBindings {
     }
 
     pub fn label_for(&self, action: Action) -> String {
-        self.bindings[&action].label()
+        self.shortcut_for(action)
+            .map_or_else(|| "unbound".to_string(), Shortcut::label)
+    }
+
+    fn shortcut_for(&self, action: Action) -> Option<Shortcut> {
+        self.bindings
+            .get(&action)
+            .copied()
+            .or_else(|| Shortcut::parse(action.default_chord()).ok())
     }
 }
 
@@ -442,6 +471,24 @@ mod tests {
             .iter()
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect()
+    }
+
+    /// The help overlay and every shortcut label used to index the binding map
+    /// directly, which panics for an action the map is missing.
+    #[test]
+    fn labels_survive_a_binding_map_that_is_missing_an_action() {
+        let mut bindings = KeyBindings::from_overrides(&overrides(&[])).expect("default bindings");
+        bindings.bindings.clear();
+
+        assert_eq!(
+            bindings.label_for(Action::ZoomPane),
+            Shortcut::parse(Action::ZoomPane.default_chord())
+                .expect("default chord")
+                .label(),
+            "a missing binding falls back to the action's default chord"
+        );
+        assert_eq!(bindings.help_entries().len(), ACTIONS.len());
+        assert!(bindings.action_for(&KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT)).is_none());
     }
 
     #[test]
@@ -509,5 +556,38 @@ mod tests {
             .map(|action| action.name())
             .collect::<BTreeSet<_>>();
         assert_eq!(names.len(), ACTIONS.len());
+    }
+
+    #[test]
+    fn grid_selection_has_a_pane_selection_companion_shortcut() {
+        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
+        assert_eq!(
+            bindings.action_for(&KeyEvent::new(
+                KeyCode::Char('S'),
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+            )),
+            Some(Action::ToggleGridSelection)
+        );
+    }
+
+    #[test]
+    fn close_grid_has_a_modeless_default_shortcut() {
+        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
+        assert_eq!(
+            bindings.action_for(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT)),
+            Some(Action::CloseGrid)
+        );
+    }
+
+    #[test]
+    fn agent_ports_has_a_modeless_default_shortcut() {
+        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
+        assert_eq!(
+            bindings.action_for(&KeyEvent::new(
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )),
+            Some(Action::Ports)
+        );
     }
 }

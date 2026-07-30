@@ -43,8 +43,8 @@ use that release's matching native artifact until npm publication catches up.
 
 - **Precise input routing.** Type into the focused pane, a selected set, or the
   entire grid.
-- **Managed agent launch.** Choose the agent, auth profile, project, layout, and
-  worktree policy before GridBash starts any panes.
+- **Four-field launch.** Rows, columns, a grid name, and a project folder with
+  Tab completion. Worktrees and the shell profile are assumed for you.
 - **Real terminals underneath.** Run up to 100 PTY-backed panes across tabbed
   grids, with raw shell grids still available as a secondary path.
 - **Safer parallel work.** Give every pane an isolated repo-local git worktree.
@@ -67,6 +67,7 @@ use that release's matching native artifact until npm publication catches up.
 | `gridbash 2x3 --profile codex --worktrees` | Isolate every pane in a git worktree |
 | `gridbash resume` | Choose a saved session to reopen |
 | `gridbash resume --latest` | Reopen the latest saved session |
+| `gridbash resume <id> --delete` | Permanently delete a saved session |
 | `gridbash ctl list --json` | Discover opted-in running grids |
 | `gridbash ctl panes --session ID` | Inspect numbered and stable pane identities |
 | `gridbash --list-profiles` | Show detected profiles and resolved commands |
@@ -85,15 +86,20 @@ agents and shells.
 | --- | --- |
 | Drag mouse | Select and copy text inside one pane |
 | Right-click pane | Add or remove the pane from the selected set |
+| Left-click grid tab | Switch directly to that grid |
+| Right-click grid tab | Add or remove the grid from the selected set |
 | `Alt+k` | Search and run GridBash commands |
 | `Alt` + arrow keys | Move focus between panes |
 | `Alt+s` / `Alt+a` | Toggle the focused pane / select or clear all panes |
+| `Alt+Shift+s` / `Alt+x` | Select the current grid / swap two selected grids |
 | `Alt+c` | Open or close the command line |
 | `Alt+Shift+C` | Save bounded recent output from the target panes |
 | `Alt+Shift+L` | Start or stop continuous target-pane logging |
 | `Alt+d` | Chat with BashBot across all open grids and panes |
 | `Alt+n` / `Alt+t` | Open a new tab / switch tabs |
+| `Alt+w` | Open the current-grid close confirmation |
 | `Alt+p` | Open focused-pane activity |
+| `Ctrl+Alt+p` | Inspect and stop localhost ports launched by agents |
 | `Alt+Shift+A` | Manage auth profiles and assign one to the focused pane |
 | `Alt+f` | Zoom or restore the focused pane |
 | `Alt+b` | Search, select, and copy focused-pane scrollback |
@@ -102,7 +108,7 @@ agents and shells.
 | `Alt+Shift+V` | Dictate one prompt without submitting it |
 | `Alt+o` | Open settings |
 | `Alt+h` or `F1` | Open the full in-app shortcut guide |
-| `Alt+q` | Quit |
+| `Alt+q` | Show the quit confirmation and exact resume command |
 
 See the [full controls reference](docs/REFERENCE.md#controls) for resizing,
 renaming, sleeping, restarting, scrolling, settings, and recovery actions.
@@ -111,6 +117,16 @@ To keep live terminals running after GridBash closes, open Settings with
 `Alt+o` and enable **Keep terminals running**. GridBash returns control to the
 launching shell when you quit; reconnect later with `gridbash resume --latest`
 or select the session with `gridbash resume`.
+
+Running Codex panes are also saved by conversation ID. If their live terminal
+cannot survive a restart or laptop shutdown, `gridbash resume` relaunches them
+with `codex resume <conversation-id>` instead of opening an empty Codex pane.
+
+`Alt+q` snapshots the current workspace and opens a confirmation with the full
+`gridbash resume <session-id>` command for that exact setup. Press `Alt+q` again
+to close GridBash, or any other key to cancel. The same command is printed after
+GridBash returns to the launching shell. Quit confirmation is enabled by default
+and can be disabled in Settings.
 
 If the terminal or GridBash process closes unexpectedly, the next plain
 `gridbash` launch automatically recovers unfinished agent sessions. Saved panes
@@ -121,11 +137,12 @@ start the workspace you requested, and older snapshots remain available through
 
 ## Profiles and configuration
 
-A bare `gridbash` opens the agent-workspace setup. Detected agent profiles are
-listed first; choose a compatible managed auth profile, project folder, grid
-dimensions, and optional worktree isolation, then launch. Built-in shell
-profiles remain available in the same screen as clearly labeled raw-terminal
-options.
+A bare `gridbash`, or `Alt+n` in a running workspace, opens the new-grid screen.
+It asks for rows, columns, a grid name, and a project folder with Tab
+completion, then launches. Managed worktrees are on whenever the repository can
+host them, and panes start in the platform shell (Git Bash on Windows). Choose
+agents per pane afterwards, or launch them straight from the CLI with
+`--profile`.
 
 Managed auth applies to Claude or Codex processes GridBash launches. GridBash
 does not install global shims, replace the normal `codex` or `claude` commands,

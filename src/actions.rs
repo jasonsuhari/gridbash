@@ -16,11 +16,14 @@ fn search_keywords(action: Action) -> &'static str {
         Action::ZoomPane => "maximize fullscreen restore",
         Action::RestartPanes => "exited dead",
         Action::PreviousPanes => "history list switch",
+        Action::CloseGrid => "remove delete tab workspace terminate",
+        Action::Ports => "localhost server listener process pid terminate",
         Action::VoiceInput => "microphone speech",
         Action::AuthProfiles => "accounts credentials profiles",
         Action::CaptureOutput | Action::ToggleOutputLogging => "save terminal logs",
         Action::CopyMode => "scrollback clipboard search",
         Action::BackgroundPanes | Action::BackgroundJobs => "agents pool stash restore swap",
+        Action::SwapPanes => "reorder grids tabs rearrange",
         Action::BashBot => "assistant brief delegate coordinate",
         _ => "",
     }
@@ -66,6 +69,8 @@ mod tests {
         assert!(fuzzy_match_score("rn pane", Action::RenamePane).is_some());
         assert!(fuzzy_match_score("orchestrate", Action::EditGoal).is_some());
         assert!(fuzzy_match_score("tab next", Action::NextTab).is_some());
+        assert!(fuzzy_match_score("delete grid", Action::CloseGrid).is_some());
+        assert!(fuzzy_match_score("reorder grids", Action::SwapPanes).is_some());
         assert!(fuzzy_match_score("unrelated", Action::NextTab).is_none());
     }
 }

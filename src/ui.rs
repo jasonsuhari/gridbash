@@ -1,23 +1,23 @@
 use ratatui::{
     Frame,
     buffer::Buffer,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget},
+    widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
 };
 use vt100::Cell;
 
 use crate::{
     app::{
         App, AssistantMessageRole, BackgroundJobState, BackgroundJobView, BackgroundJobsView,
-        CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog, GoalEditorView, GridPalette,
-        PaneSelection, PaneSettingsTarget, PaneSettingsView, PreviousPaneView, PreviousPanesView,
+        CloseGridConfirmationView, CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog,
+        GoalEditorView, GridPalette, PaneSelection, PaneSettingsTarget, PaneSettingsView,
+        PortInspectorView, PreviousPaneView, PreviousPanesView, QuitConfirmationView,
         RenamePaneView, RenameTabView, SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind,
         TabLabel, WorkspaceAssistantView,
     },
     auth::{AgentKind, AuthProfile},
-    composer::GridPickerMode,
     copy_mode::{CopyCellKind, CopyModeView, TextPoint},
     image_preview::ImagePreview,
 };
@@ -30,10 +30,12 @@ const SETTINGS_SHADOW: Color = Color::Rgb(4, 6, 10);
 const SETTINGS_BORDER: Color = Color::Rgb(58, 210, 210);
 const SETTINGS_MUTED: Color = Color::Rgb(118, 135, 149);
 const SETTINGS_TEXT: Color = Color::Rgb(230, 237, 243);
+const TAB_WAITING_BG: Color = Color::Green;
 
 pub struct DrawState {
     pub grid_area: Rect,
     pub pane_rects: Vec<Rect>,
+    pub tab_rects: Vec<(usize, Rect)>,
     pub previous_panes_button: Option<Rect>,
     pub previous_pane_rows: Vec<(usize, Rect)>,
     pub pane_settings_button: Option<Rect>,
@@ -45,6 +47,8 @@ pub struct DrawState {
     pub pane_settings_stop_goal_button: Option<Rect>,
     pub background_jobs_button: Option<Rect>,
     pub background_job_rows: Vec<(usize, Rect)>,
+    pub ports_button: Option<Rect>,
+    pub port_rows: Vec<(usize, Rect)>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -63,6 +67,7 @@ const PANE_SETTINGS_BUTTON: &str = " Summary ";
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
+    let command_height = command_line_height(app.command_focused());
     let output_height = if app.command_output_expanded() {
         command_output_height(area.height, app.command_output_lines().len())
     } else {
@@ -74,7 +79,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(output_height),
-            Constraint::Length(1),
+            Constraint::Length(command_height),
             Constraint::Length(1),
         ])
         .split(area);
@@ -90,6 +95,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let tab_rename_view = app.rename_tab_view();
     let previous_panes_view = app.previous_panes_view();
     let background_jobs_view = app.background_jobs_view();
+    let port_inspector_view = app.port_inspector_view();
     let follow_up_dialog = app.follow_up_dialog();
     let goal_editor_view = app.goal_editor_view();
     let pane_settings_view = app.pane_settings_view();
@@ -98,6 +104,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let grid_resizer = app.grid_resizer();
     let image_overlay = app.image_overlay_view();
     let assistant_view = app.workspace_assistant_view();
+    let quit_confirmation = app.quit_confirmation_view();
+    let close_grid_confirmation = app.close_grid_confirmation_view();
     let help_open = app.help_open();
     let copy_mode_open = app.copy_mode_open();
     let exited_recovery = if command_palette_view.is_some()
@@ -106,6 +114,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || app.settings_open()
         || previous_panes_view.is_some()
         || background_jobs_view.is_some()
+        || port_inspector_view.is_some()
         || pane_settings_open
         || rename_view.is_some()
         || tab_rename_view.is_some()
@@ -114,6 +123,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || goal_editor_view.is_some()
         || image_overlay.is_some()
         || assistant_view.is_some()
+        || quit_confirmation.is_some()
+        || close_grid_confirmation.is_some()
     {
         None
     } else {
@@ -125,6 +136,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || app.settings_open()
         || previous_panes_view.is_some()
         || background_jobs_view.is_some()
+        || port_inspector_view.is_some()
         || pane_settings_open
         || rename_view.is_some()
         || tab_rename_view.is_some()
@@ -133,6 +145,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || goal_editor_view.is_some()
         || image_overlay.is_some()
         || assistant_view.is_some()
+        || quit_confirmation.is_some()
+        || close_grid_confirmation.is_some()
         || exited_recovery.is_some();
     let mut pane_settings_rename_button = None;
     let mut pane_settings_reload_button = None;
@@ -140,7 +154,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let mut pane_settings_deactivate_button = None;
     let mut pane_settings_goal_button = None;
     let mut pane_settings_stop_goal_button = None;
-    render_tabs(frame, tab_area, &app.tab_labels(), palette);
+    let tab_rects = render_tabs(frame, tab_area, &app.tab_labels(), palette);
 
     for (index, pane) in app.panes().iter().enumerate() {
         let Some(rect) = rects.get(index).copied() else {
@@ -213,6 +227,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let pane_settings_button = pane_settings_button_rect(status_area);
     let background_jobs_button =
         background_jobs_button_rect(status_area, app.background_job_count());
+    let ports_button = ports_button_rect(status_area, app.agent_port_count());
+    let selection_status = if app.selected_grid_count() == 0 {
+        format!("{} panes selected", app.selected().len())
+    } else {
+        format!(
+            "{} panes | {} grids selected",
+            app.selected().len(),
+            app.selected_grid_count()
+        )
+    };
     let status = Line::from(vec![
         Span::styled(
             STATUS_BRAND,
@@ -265,7 +289,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             }),
         ),
         Span::raw(" | "),
-        Span::raw(format!("{} selected", app.selected().len())),
+        Span::raw(selection_status),
         Span::raw(" | "),
         Span::raw(app.status().to_string()),
         Span::raw(" | F1 help | Alt+q quit fallback"),
@@ -274,6 +298,18 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Paragraph::new(status).style(Style::default().bg(APP_BG)),
         status_area,
     );
+    if let Some(button) = ports_button {
+        frame.render_widget(
+            Paragraph::new(ports_button_label(app.agent_port_count()))
+                .alignment(Alignment::Center)
+                .style(ports_button_style(
+                    app.port_inspector_open(),
+                    app.agent_port_count(),
+                    palette,
+                )),
+            button,
+        );
+    }
 
     if app.settings_open() {
         render_settings(frame, area, app, palette);
@@ -298,6 +334,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     } else {
         Vec::new()
     };
+    let port_rows = if let Some(view) = port_inspector_view.as_ref() {
+        render_port_inspector(frame, area, view, palette)
+    } else {
+        Vec::new()
+    };
     if let Some(rename) = rename_view.as_ref() {
         render_rename_pane(frame, area, rename);
     }
@@ -314,7 +355,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         render_exited_recovery(frame, area, recovery, palette);
     }
     if let Some(picker) = grid_resizer {
-        picker.draw(frame, GridPickerMode::Resize, None);
+        picker.draw(frame, None);
     }
     if help_open {
         render_help(frame, area, app, palette);
@@ -325,10 +366,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     if let Some(view) = command_palette_view.as_ref() {
         render_command_palette(frame, area, view, palette);
     }
+    if let Some(confirmation) = quit_confirmation.as_ref() {
+        render_quit_confirmation(frame, area, confirmation, palette);
+    }
+    if let Some(confirmation) = close_grid_confirmation.as_ref() {
+        render_close_grid_confirmation(frame, area, confirmation, palette);
+    }
 
     DrawState {
         grid_area,
         pane_rects: rects,
+        tab_rects,
         previous_panes_button,
         previous_pane_rows,
         pane_settings_button,
@@ -340,6 +388,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         pane_settings_stop_goal_button,
         background_jobs_button,
         background_job_rows,
+        ports_button,
+        port_rows,
     }
 }
 
@@ -386,9 +436,14 @@ fn pane_title(
     truncate_text(&format!(" {} ", parts.join(" | ")), max_width)
 }
 
-fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel], palette: &GridPalette) {
+fn render_tabs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tabs: &[TabLabel],
+    palette: &GridPalette,
+) -> Vec<(usize, Rect)> {
     if area.width == 0 || area.height == 0 {
-        return;
+        return Vec::new();
     }
 
     let mut spans = vec![
@@ -401,14 +456,25 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel], palette: &G
         ),
         Span::raw(" "),
     ];
+    let mut tab_rects = Vec::with_capacity(tabs.len());
+    let mut tab_x = area
+        .x
+        .saturating_add(u16::try_from(Line::from(STATUS_BRAND).width()).unwrap_or(u16::MAX))
+        .saturating_add(1);
+    let area_right = area.x.saturating_add(area.width);
 
     for (index, tab) in tabs.iter().enumerate() {
-        let marker = if tab.exited {
+        let state_marker = if tab.exited {
             "!"
         } else if tab.activity && !tab.active {
             "*"
         } else {
             ""
+        };
+        let marker = if tab.selected {
+            format!("+{state_marker}")
+        } else {
+            state_marker.to_string()
         };
         let label = format!(
             " {}:{}{} ",
@@ -416,10 +482,44 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel], palette: &G
             truncate_text(&tab.title, 18),
             marker
         );
-        let style = if tab.active {
-            Style::default()
+        let label_width = u16::try_from(Line::from(label.as_str()).width()).unwrap_or(u16::MAX);
+        if tab_x < area_right {
+            tab_rects.push((
+                index,
+                Rect::new(
+                    tab_x,
+                    area.y,
+                    label_width.min(area_right.saturating_sub(tab_x)),
+                    1,
+                ),
+            ));
+        }
+        tab_x = tab_x.saturating_add(label_width);
+
+        let style = if tab.waiting {
+            let style = Style::default()
+                .fg(Color::Black)
+                .bg(TAB_WAITING_BG)
+                .add_modifier(Modifier::BOLD);
+            if tab.active {
+                style.add_modifier(Modifier::UNDERLINED)
+            } else {
+                style
+            }
+        } else if tab.active {
+            let style = Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD);
+            if tab.selected {
+                style.add_modifier(Modifier::UNDERLINED)
+            } else {
+                style
+            }
+        } else if tab.selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(palette.selected())
                 .add_modifier(Modifier::BOLD)
         } else if tab.exited {
             Style::default().fg(palette.exited())
@@ -443,6 +543,16 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel], palette: &G
     ));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
+        "Alt+Shift+s select",
+        Style::default().fg(Color::DarkGray),
+    ));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        "Alt+x swap",
+        Style::default().fg(Color::DarkGray),
+    ));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
         "Alt+Shift+r rename",
         Style::default().fg(Color::DarkGray),
     ));
@@ -451,7 +561,14 @@ fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel], palette: &G
         Paragraph::new(Line::from(spans)).style(Style::default().bg(APP_BG)),
         area,
     );
+
+    tab_rects
 }
+
+fn command_line_height(focused: bool) -> u16 {
+    u16::from(focused)
+}
+
 fn command_output_height(total_height: u16, line_count: usize) -> u16 {
     let available = total_height.saturating_sub(3);
     if available < 3 {
@@ -745,6 +862,42 @@ fn background_jobs_button_style(open: bool, palette: &GridPalette) -> Style {
     } else {
         Style::default()
             .fg(palette.accent())
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
+fn ports_button_label(count: usize) -> String {
+    format!(" Ports {count} ")
+}
+
+fn ports_button_rect(status_area: Rect, count: usize) -> Option<Rect> {
+    let width = ports_button_label(count).len() as u16;
+    if status_area.height == 0 || status_area.width < width {
+        return None;
+    }
+    Some(Rect {
+        x: status_area.right().saturating_sub(width),
+        y: status_area.y,
+        width,
+        height: 1,
+    })
+}
+
+fn ports_button_style(open: bool, count: usize, palette: &GridPalette) -> Style {
+    if open {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if count > 0 {
+        Style::default()
+            .fg(Color::Black)
+            .bg(palette.accent())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::DarkGray)
+            .bg(APP_BG)
             .add_modifier(Modifier::BOLD)
     }
 }
@@ -1784,6 +1937,210 @@ fn previous_panes_command_bar(width: u16) -> Line<'static> {
     ])
 }
 
+fn render_port_inspector(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &PortInspectorView,
+    palette: &GridPalette,
+) -> Vec<(usize, Rect)> {
+    let modal = previous_panes_modal_rect(area, view.ports.len().max(1));
+    let shadow = settings_shadow_rect(area, modal);
+    let mut row_hits = Vec::new();
+
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.accent())
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" Agent Ports ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    if inner.width == 0 || inner.height == 0 {
+        return row_hits;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    let count = match view.ports.len() {
+        1 => "1 TCP listener".to_string(),
+        count => format!("{count} TCP listeners"),
+    };
+    let scan_state = if view.refreshing {
+        "  refreshing..."
+    } else {
+        "  launched by GridBash agents"
+    };
+    let header = vec![
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                count,
+                Style::default()
+                    .fg(palette.accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(scan_state, Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(Span::styled(
+            view.error
+                .as_deref()
+                .map(|error| format!("  Scan error: {error}"))
+                .unwrap_or_else(|| "  PORT   PROCESS              PID  PANE / TAB".into()),
+            Style::default().fg(if view.error.is_some() {
+                Color::LightRed
+            } else {
+                SETTINGS_MUTED
+            }),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(header).style(settings_panel_style()),
+        chunks[0],
+    );
+
+    let list_area = chunks[1];
+    if view.ports.is_empty() {
+        let message = if view.refreshing {
+            "  Looking for localhost listeners in agent process trees..."
+        } else {
+            "  No agent-owned localhost listeners are active."
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(message, Style::default().fg(SETTINGS_MUTED)))
+                .style(settings_panel_style()),
+            list_area,
+        );
+    } else {
+        let visible =
+            visible_previous_pane_range(view.ports.len(), view.cursor, list_area.height as usize);
+        let mut rows = Vec::new();
+        for (row_offset, index) in visible.enumerate() {
+            let Some(port) = view.ports.get(index) else {
+                continue;
+            };
+            let row_area = Rect {
+                x: list_area.x,
+                y: list_area.y.saturating_add(row_offset as u16),
+                width: list_area.width,
+                height: 1,
+            };
+            row_hits.push((index, row_area));
+            rows.push(agent_port_line(
+                port.port,
+                port.pid,
+                &port.process,
+                &port.owner,
+                view.cursor == index,
+                view.pending_terminate == Some(port.pid),
+                list_area.width,
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(rows).style(settings_panel_style()),
+            list_area,
+        );
+    }
+
+    frame.render_widget(
+        Paragraph::new(port_inspector_command_bar(
+            chunks[2].width,
+            view.pending_terminate.is_some(),
+        ))
+        .style(settings_panel_style()),
+        chunks[2],
+    );
+    row_hits
+}
+
+#[allow(clippy::too_many_arguments)]
+fn agent_port_line(
+    port: u16,
+    pid: u32,
+    process: &str,
+    owner: &str,
+    active: bool,
+    pending_terminate: bool,
+    width: u16,
+) -> Line<'static> {
+    let process_width = if width < 62 { 12 } else { 18 };
+    let owner = if active && pending_terminate {
+        "Press Enter to terminate"
+    } else {
+        owner
+    };
+    let text = format!(
+        "{} {:>5}   {:<process_width$} {:>7}  {}",
+        if active { ">" } else { " " },
+        port,
+        truncate_text(process, process_width),
+        pid,
+        owner,
+    );
+    let fg = if active && pending_terminate {
+        Color::LightRed
+    } else if active {
+        SETTINGS_TEXT
+    } else {
+        Color::LightCyan
+    };
+    Line::from(Span::styled(
+        fixed_width(&text, width as usize),
+        row_style(fg, active.then_some(SETTINGS_ROW_ACTIVE), active),
+    ))
+}
+
+fn port_inspector_command_bar(width: u16, pending_terminate: bool) -> Line<'static> {
+    if pending_terminate {
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Enter"),
+            Span::styled(" terminate process  ", Style::default().fg(Color::LightRed)),
+            command_key("Esc"),
+            Span::styled(" cancel", Style::default().fg(Color::Gray)),
+        ]);
+    }
+    if width < 60 {
+        return Line::from(vec![
+            Span::raw("  "),
+            command_key("Enter"),
+            Span::styled(" stop  ", Style::default().fg(Color::Gray)),
+            command_key("R"),
+            Span::styled(" refresh  ", Style::default().fg(Color::Gray)),
+            command_key("Esc"),
+            Span::styled(" close", Style::default().fg(Color::Gray)),
+        ]);
+    }
+    Line::from(vec![
+        Span::raw("  "),
+        command_key("Up/Down"),
+        Span::styled(" move  ", Style::default().fg(Color::Gray)),
+        command_key("Enter/Delete"),
+        Span::styled(" terminate  ", Style::default().fg(Color::Gray)),
+        command_key("R"),
+        Span::styled(" refresh  ", Style::default().fg(Color::Gray)),
+        command_key("Esc"),
+        Span::styled(" close", Style::default().fg(Color::Gray)),
+    ])
+}
+
 fn render_background_jobs(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -2296,6 +2653,125 @@ fn render_follow_up_dialog(frame: &mut Frame<'_>, area: Rect, dialog: &FollowUpD
     frame.render_widget(block, modal);
     frame.render_widget(
         Paragraph::new(follow_up_lines(dialog, inner.width)).style(settings_panel_style()),
+        inner,
+    );
+}
+
+fn render_quit_confirmation(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    confirmation: &QuitConfirmationView,
+    palette: &GridPalette,
+) {
+    let modal = quit_confirmation_modal_rect(area);
+    let shadow = settings_shadow_rect(area, modal);
+
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+
+    frame.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.accent())
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" Quit GridBash? ")
+        .title_bottom(" Alt+Q confirms | Any other key cancels ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let behavior = if confirmation.keeps_terminals_running {
+        "Your exact workspace has been saved. Live terminals will stay running."
+    } else {
+        "Your exact workspace has been saved. Pane processes will close with GridBash."
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(behavior, Style::default().fg(SETTINGS_TEXT))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Resume this setup directly with:",
+            Style::default().fg(SETTINGS_MUTED),
+        )),
+        Line::from(Span::styled(
+            confirmation.resume_command.clone(),
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines).style(settings_panel_style()), inner);
+}
+
+fn render_close_grid_confirmation(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    confirmation: &CloseGridConfirmationView,
+    palette: &GridPalette,
+) {
+    let modal = quit_confirmation_modal_rect(area);
+    let shadow = settings_shadow_rect(area, modal);
+
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+
+    frame.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.exited())
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" Close current grid? ")
+        .title_bottom(" Enter / Y closes | Esc / N cancels ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let pane_label = if confirmation.pane_count == 1 {
+        "pane"
+    } else {
+        "panes"
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(
+                "Close \"{}\" and terminate {} {pane_label}?",
+                confirmation.title, confirmation.pane_count
+            ),
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Every visible process in this grid will stop.",
+            Style::default().fg(SETTINGS_TEXT),
+        )),
+        Line::from(Span::styled(
+            "Managed worktrees and branches will stay on disk.",
+            Style::default().fg(SETTINGS_MUTED),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .style(settings_panel_style()),
         inner,
     );
 }
@@ -3410,6 +3886,22 @@ fn follow_up_modal_rect(area: Rect) -> Rect {
     }
 }
 
+fn quit_confirmation_modal_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(4).min(78).max(area.width.min(1));
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(10)
+        .max(area.height.min(1));
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
 fn settings_shadow_rect(area: Rect, modal: Rect) -> Rect {
     let offset_x = if modal.x.saturating_add(modal.width).saturating_add(2)
         <= area.x.saturating_add(area.width)
@@ -3517,11 +4009,15 @@ fn render_sleeping_screen(frame: &mut Frame<'_>, area: Rect) {
 
     let style = Style::default().fg(Color::Black).bg(Color::Black);
     let buffer = frame.buffer_mut();
+    // Indexing a `Buffer` outside its area panics, so clip first and still take
+    // the `Option` path: a pane rect can outlive the frame it was measured in.
+    let area = area.intersection(buffer.area);
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            let cell = &mut buffer[(x, y)];
-            cell.reset();
-            cell.set_style(style);
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.reset();
+                cell.set_style(style);
+            }
         }
     }
 }
@@ -3553,7 +4049,7 @@ fn render_copy_mode(frame: &mut Frame<'_>, area: Rect, view: &CopyModeView, pale
         ..area
     };
     let footer = Rect {
-        y: area.y + body.height,
+        y: area.y.saturating_add(body.height),
         height: footer_height,
         ..area
     };
@@ -3561,39 +4057,47 @@ fn render_copy_mode(frame: &mut Frame<'_>, area: Rect, view: &CopyModeView, pale
         .rows
         .iter()
         .map(|row| {
-            let spans = row
-                .text
-                .chars()
-                .enumerate()
-                .map(|(offset, ch)| {
-                    let point = TextPoint {
-                        line: row.line,
-                        column: view.left_column + offset,
-                    };
-                    let style = match view.cell_kind(point) {
-                        CopyCellKind::Normal => {
-                            Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)
-                        }
-                        CopyCellKind::Match => Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::DarkGray)
-                            .add_modifier(Modifier::BOLD),
-                        CopyCellKind::ActiveMatch => Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                        CopyCellKind::Selection => Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::LightCyan)
-                            .add_modifier(Modifier::BOLD),
-                        CopyCellKind::Cursor => Style::default()
-                            .fg(Color::Black)
-                            .bg(palette.focus())
-                            .add_modifier(Modifier::BOLD),
-                    };
-                    Span::styled(ch.to_string(), style)
-                })
-                .collect::<Vec<_>>();
+            // Coalesce runs of equally styled characters. Rendering is
+            // unchanged, but a full-width row costs a handful of spans instead
+            // of one heap-allocated `Span` per character, every frame.
+            let mut spans = Vec::new();
+            let mut current_style: Option<Style> = None;
+            let mut current_text = String::new();
+            for (offset, ch) in row.text.chars().enumerate() {
+                let point = TextPoint {
+                    line: row.line,
+                    column: view.left_column + offset,
+                };
+                let style = match view.cell_kind(point) {
+                    CopyCellKind::Normal => {
+                        Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)
+                    }
+                    CopyCellKind::Match => Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                    CopyCellKind::ActiveMatch => Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                    CopyCellKind::Selection => Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD),
+                    CopyCellKind::Cursor => Style::default()
+                        .fg(Color::Black)
+                        .bg(palette.focus())
+                        .add_modifier(Modifier::BOLD),
+                };
+                if current_style.is_some_and(|active| active == style) {
+                    current_text.push(ch);
+                    continue;
+                }
+                flush_span(&mut spans, &mut current_style, &mut current_text);
+                current_style = Some(style);
+                current_text.push(ch);
+            }
+            flush_span(&mut spans, &mut current_style, &mut current_text);
             Line::from(spans)
         })
         .collect::<Vec<_>>();
@@ -3664,30 +4168,55 @@ fn refresh_screen_cache(
         .map(|row| render_screen_row(screen, row, width, selection))
         .collect::<Vec<_>>();
     let area = Rect::new(0, 0, width, height);
-    let mut buffer = Buffer::empty(area);
+    // Reuse the cached allocation instead of building a fresh pane-sized buffer
+    // on every screen revision, which for an active pane is once per frame.
+    if cache.buffer.area != area {
+        cache.buffer.resize(area);
+    }
+    cache.buffer.reset();
     Widget::render(
         Paragraph::new(lines).style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
         area,
-        &mut buffer,
+        &mut cache.buffer,
     );
     cache.revision = revision;
     cache.width = width;
     cache.height = height;
     cache.selection = selection;
-    cache.buffer = buffer;
 }
 
+/// Copy a cached pane buffer into the frame at `area`.
+///
+/// Rendering must never take GridBash down. A pane rect can outlive the frame it
+/// was measured against — the terminal can shrink between layout and draw — and
+/// both `Buffer::index_of` and slice indexing panic outright on an out-of-range
+/// position. Clamping to what the two buffers actually cover makes a stale rect
+/// drop cells for one frame instead of killing the process.
 fn blit_buffer(source: &Buffer, target: &mut Buffer, area: Rect) {
     debug_assert_eq!(source.area.width, area.width);
     debug_assert_eq!(source.area.height, area.height);
-    debug_assert_eq!(area.intersection(target.area), area);
 
-    let width = area.width as usize;
-    for row in 0..area.height {
-        let source_start = row as usize * width;
-        let target_start = target.index_of(area.x, area.y + row);
-        target.content[target_start..target_start + width]
-            .clone_from_slice(&source.content[source_start..source_start + width]);
+    let area = area.intersection(target.area);
+    let source_stride = source.area.width as usize;
+    let width = (area.width as usize).min(source_stride);
+    if width == 0 {
+        return;
+    }
+
+    // Index arithmetic mirrors Buffer::index_of without its out-of-range panic.
+    let target_stride = target.area.width as usize;
+    let target_column = area.x.saturating_sub(target.area.x) as usize;
+    for row in 0..area.height.min(source.area.height) {
+        let source_start = row as usize * source_stride;
+        let target_start =
+            (area.y.saturating_sub(target.area.y) + row) as usize * target_stride + target_column;
+        let Some(source_row) = source.content.get(source_start..source_start + width) else {
+            break;
+        };
+        let Some(target_row) = target.content.get_mut(target_start..target_start + width) else {
+            break;
+        };
+        target_row.clone_from_slice(source_row);
     }
 }
 
@@ -3868,6 +4397,8 @@ fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{cli::Cli, config::Config};
+    use clap::Parser;
     use ratatui::{Terminal, backend::TestBackend};
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
@@ -3878,6 +4409,123 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    /// The event loop catches a panic thrown inside `Terminal::draw`, which
+    /// abandons the frame half-written and never swaps the buffers. Resetting the
+    /// current buffer and clearing is what makes the next frame trustworthy.
+    #[test]
+    fn a_frame_abandoned_by_a_panic_redraws_cleanly() {
+        let backend = TestBackend::new(6, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("aaaaaa"), frame.area());
+            })
+            .expect("first frame");
+        assert_eq!(buffer_text(&terminal), "aaaaaa");
+
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = terminal.draw(|frame| {
+                frame.render_widget(Paragraph::new("bbbbbb"), frame.area());
+                panic!("half-drawn frame");
+            });
+        }));
+        std::panic::set_hook(previous_hook);
+        assert!(panicked.is_err(), "the draw must have unwound");
+
+        // What the event loop does on recovery.
+        terminal.current_buffer_mut().reset();
+        terminal.clear().expect("clear after a caught panic");
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("cc"), frame.area());
+            })
+            .expect("frame after recovery");
+        assert_eq!(
+            buffer_text(&terminal),
+            "cc    ",
+            "the abandoned frame must not bleed into the next one"
+        );
+    }
+
+    /// Pane rects are stored between frames, so a rect measured before a resize
+    /// can name cells the current frame does not have. Indexing a `Buffer`
+    /// outside its area panics, and this runs on every sleeping pane.
+    #[test]
+    fn the_sleeping_screen_clips_rects_that_outgrew_the_frame() {
+        let backend = TestBackend::new(10, 4);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| {
+                render_sleeping_screen(frame, Rect::new(0, 0, 200, 200));
+                render_sleeping_screen(frame, Rect::new(8, 3, 40, 40));
+                render_sleeping_screen(frame, Rect::new(50, 50, 4, 4));
+                render_sleeping_screen(frame, Rect::new(0, 0, 0, 0));
+                render_sleeping_screen(frame, Rect::new(u16::MAX, u16::MAX, u16::MAX, u16::MAX));
+            })
+            .expect("drawing a sleeping pane must not panic");
+
+        assert_eq!(buffer_text(&terminal).chars().count(), 40);
+    }
+
+    #[test]
+    fn tab_rendering_returns_click_targets_and_marks_selected_grids() {
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let tabs = vec![
+            TabLabel {
+                title: "Frontend".into(),
+                active: true,
+                selected: false,
+                waiting: false,
+                activity: false,
+                exited: false,
+            },
+            TabLabel {
+                title: "Tests".into(),
+                active: false,
+                selected: true,
+                waiting: false,
+                activity: false,
+                exited: false,
+            },
+            TabLabel {
+                title: "Review".into(),
+                active: false,
+                selected: false,
+                waiting: true,
+                activity: false,
+                exited: false,
+            },
+        ];
+        let mut targets = Vec::new();
+
+        terminal
+            .draw(|frame| {
+                targets = render_tabs(frame, frame.area(), &tabs, &GridPalette::default());
+            })
+            .expect("render tabs");
+
+        assert_eq!(targets.len(), 3);
+        assert_eq!(targets[0].0, 0);
+        assert_eq!(targets[1].0, 1);
+        assert_eq!(targets[0].1.right(), targets[1].1.x);
+        assert_eq!(targets[1].1.right(), targets[2].1.x);
+        assert!(buffer_text(&terminal).contains("2:Tests+"));
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "R" && cell.bg == TAB_WAITING_BG)
+        );
     }
 
     #[test]
@@ -3900,6 +4548,75 @@ mod tests {
         let rendered = buffer_text(&terminal);
         assert!(rendered.contains("GridBash Commands"));
         assert!(rendered.contains("No matching"));
+    }
+
+    #[test]
+    fn quit_confirmation_shows_the_exact_resume_command() {
+        let backend = TestBackend::new(90, 18);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let view = QuitConfirmationView {
+            resume_command: "gridbash resume 1777777777777-42".into(),
+            keeps_terminals_running: true,
+        };
+
+        terminal
+            .draw(|frame| {
+                render_quit_confirmation(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render quit confirmation");
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("Quit GridBash?"));
+        assert!(rendered.contains("gridbash resume 1777777777777-42"));
+        assert!(rendered.contains("Alt+Q confirms"));
+        assert!(rendered.contains("Live terminals will stay running"));
+    }
+
+    #[test]
+    fn close_grid_confirmation_names_the_grid_and_consequences() {
+        let backend = TestBackend::new(90, 18);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let view = CloseGridConfirmationView {
+            title: "Backend agents".into(),
+            pane_count: 3,
+        };
+
+        terminal
+            .draw(|frame| {
+                render_close_grid_confirmation(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render close-grid confirmation");
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("Close current grid?"));
+        assert!(rendered.contains("Backend agents"));
+        assert!(rendered.contains("terminate 3 panes"));
+        assert!(rendered.contains("worktrees and branches will stay on disk"));
+        assert!(rendered.contains("Enter / Y closes"));
+    }
+
+    #[test]
+    fn command_line_is_hidden_until_focused() {
+        assert_eq!(command_line_height(false), 0);
+        assert_eq!(command_line_height(true), 1);
+    }
+
+    #[test]
+    fn hidden_command_line_renders_safely_at_small_terminal_sizes() {
+        let cli = Cli::parse_from(["gridbash"]);
+        let app = App::new(cli, Config::default()).expect("app");
+
+        for (width, height) in [(1, 1), (2, 2), (40, 6)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    draw(frame, &app);
+                })
+                .expect("render hidden command line");
+
+            assert!(!buffer_text(&terminal).contains(" > "));
+        }
     }
 
     #[test]
@@ -4480,5 +5197,43 @@ mod tests {
         assert_eq!(target[(3, 2)].symbol(), "C");
         assert_eq!(target[(4, 2)].symbol(), "D");
         assert_eq!(target[(2, 1)].symbol(), " ");
+    }
+
+    #[test]
+    fn blitting_a_pane_rect_wider_than_the_frame_clamps_instead_of_panicking() {
+        // A rect measured before the terminal shrank: the release build used to
+        // panic here in Buffer::index_of and take the whole process down.
+        let mut source = Buffer::empty(Rect::new(0, 0, 4, 3));
+        for x in 0..4 {
+            for y in 0..3 {
+                source[(x, y)].set_symbol("S");
+            }
+        }
+        let mut target = Buffer::empty(Rect::new(0, 0, 3, 2));
+
+        blit_buffer(&source, &mut target, Rect::new(2, 1, 4, 3));
+
+        assert_eq!(target[(2, 1)].symbol(), "S");
+        assert_eq!(target[(0, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn blitting_a_pane_rect_fully_outside_the_frame_is_a_no_op() {
+        let mut source = Buffer::empty(Rect::new(0, 0, 2, 2));
+        source[(0, 0)].set_symbol("S");
+        let mut target = Buffer::empty(Rect::new(0, 0, 4, 4));
+        let untouched = target.clone();
+
+        blit_buffer(&source, &mut target, Rect::new(9, 9, 2, 2));
+
+        assert_eq!(target, untouched);
+    }
+
+    #[test]
+    fn ports_button_stays_anchored_to_footer_right_edge() {
+        let footer = Rect::new(4, 20, 80, 1);
+        let button = ports_button_rect(footer, 3).expect("ports button");
+        assert_eq!(button.right(), footer.right());
+        assert_eq!(button.width, ports_button_label(3).len() as u16);
     }
 }
