@@ -246,8 +246,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         render_shell_command_center(frame, command_center_area, app, palette);
     }
 
-    let status_buttons =
-        render_status_bar(frame, status_area, &StatusBar::from_app(app), palette);
+    let status_buttons = render_status_bar(frame, status_area, &StatusBar::from_app(app), palette);
     let previous_panes_button = status_buttons.previous_panes;
     let pane_settings_button = status_buttons.pane_settings;
     let background_jobs_button = status_buttons.background_jobs;
@@ -397,11 +396,7 @@ fn tab_label(index: usize, tab: &TabLabel) -> String {
     } else {
         ""
     };
-    format!(
-        " {} {}{marker} ",
-        index + 1,
-        truncate_text(&tab.title, 18)
-    )
+    format!(" {} {}{marker} ", index + 1, truncate_text(&tab.title, 18))
 }
 
 fn tab_style(tab: &TabLabel, palette: &GridPalette) -> Style {
@@ -806,7 +801,11 @@ fn render_pane_frame(
         let leading = pane_header_leading(
             view,
             palette,
-            if fits { budget - trailing_width } else { budget },
+            if fits {
+                budget - trailing_width
+            } else {
+                budget
+            },
         );
         if fits {
             block = block.title_top(trailing.right_aligned());
@@ -1008,19 +1007,16 @@ fn render_status_bar(
         return StatusButtons::default();
     }
 
-    frame.render_widget(
-        Paragraph::new("").style(Style::default().bg(SURFACE)),
-        area,
-    );
+    frame.render_widget(Paragraph::new("").style(Style::default().bg(SURFACE)), area);
 
     let mut buttons = StatusButtons::default();
     let mut spans = vec![Span::styled(STATUS_BRAND, brand_style(palette))];
     let mut cursor = area.x.saturating_add(STATUS_BRAND.chars().count() as u16);
 
     let chip = |spans: &mut Vec<Span<'static>>,
-                    cursor: &mut u16,
-                    label: String,
-                    style: Style|
+                cursor: &mut u16,
+                label: String,
+                style: Style|
      -> Option<Rect> {
         let width = label.chars().count() as u16;
         let rect = (*cursor < area.right()).then(|| {
@@ -4732,32 +4728,61 @@ mod tests {
     }
 
     fn preview_panes() -> Vec<PreviewPane> {
-        let pane = |number: usize,
-                    label: &str,
-                    summary: &str,
-                    state: PaneState,
-                    body: &'static str| PreviewPane {
-            frame: PaneFrame {
-                number,
-                label: label.into(),
-                summary: summary.into(),
-                usage: Some("5h 80% left".into()),
-                state,
-                focused: number == 1,
-                selected: number == 4,
-                logging: number == 6,
-                compact: false,
-            },
-            body,
-        };
+        let pane =
+            |number: usize, label: &str, summary: &str, state: PaneState, body: &'static str| {
+                PreviewPane {
+                    frame: PaneFrame {
+                        number,
+                        label: label.into(),
+                        summary: summary.into(),
+                        usage: Some("5h 80% left".into()),
+                        state,
+                        focused: number == 1,
+                        selected: number == 4,
+                        logging: number == 6,
+                        compact: false,
+                    },
+                    body,
+                }
+            };
 
         vec![
-            pane(1, "api", "editing src/routes.rs", PaneState::Live, "$ cargo test"),
-            pane(2, "web", "waiting for review", PaneState::Waiting, "Continue? [y/N]"),
+            pane(
+                1,
+                "api",
+                "editing src/routes.rs",
+                PaneState::Live,
+                "$ cargo test",
+            ),
+            pane(
+                2,
+                "web",
+                "waiting for review",
+                PaneState::Waiting,
+                "Continue? [y/N]",
+            ),
             pane(3, "docs", "wrote the changelog", PaneState::Idle, "$ "),
-            pane(4, "infra", "terraform plan clean", PaneState::Live, "$ tf apply"),
-            pane(5, "tests", "3 failures remain", PaneState::Waiting, "FAILED 3"),
-            pane(6, "bench", "recording a trace", PaneState::Live, "sampling..."),
+            pane(
+                4,
+                "infra",
+                "terraform plan clean",
+                PaneState::Live,
+                "$ tf apply",
+            ),
+            pane(
+                5,
+                "tests",
+                "3 failures remain",
+                PaneState::Waiting,
+                "FAILED 3",
+            ),
+            pane(
+                6,
+                "bench",
+                "recording a trace",
+                PaneState::Live,
+                "sampling...",
+            ),
             pane(7, "spike", "paused by the user", PaneState::Sleeping, ""),
             pane(8, "old", "process exited", PaneState::Exited, "exit 130"),
             pane(9, "shell", "", PaneState::Live, "$ git status"),
@@ -4810,8 +4835,7 @@ mod tests {
                     let inner = render_pane_frame(frame, rect, &pane.frame, &palette);
                     if inner.width > 0 && inner.height > 0 {
                         frame.render_widget(
-                            Paragraph::new(pane.body)
-                                .style(Style::default().fg(TEXT).bg(APP_BG)),
+                            Paragraph::new(pane.body).style(Style::default().fg(TEXT).bg(APP_BG)),
                             inner,
                         );
                     }
@@ -5575,7 +5599,11 @@ mod tests {
                 let leading = pane_header_leading(
                     &view,
                     &GridPalette::default(),
-                    if fits { budget - trailing_width } else { budget },
+                    if fits {
+                        budget - trailing_width
+                    } else {
+                        budget
+                    },
                 );
 
                 let used = leading.width() as u16 + if fits { trailing_width } else { 0 };

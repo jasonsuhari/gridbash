@@ -480,8 +480,16 @@ mod tests {
             6,
         );
 
-        assert_eq!(rects[1].x, rects[0].right() - 1, "columns must overlap by 1");
-        assert_eq!(rects[2].x, rects[1].right() - 1, "columns must overlap by 1");
+        assert_eq!(
+            rects[1].x,
+            rects[0].right() - 1,
+            "columns must overlap by 1"
+        );
+        assert_eq!(
+            rects[2].x,
+            rects[1].right() - 1,
+            "columns must overlap by 1"
+        );
         assert_eq!(rects[3].y, rects[0].bottom() - 1, "rows must overlap by 1");
     }
 
