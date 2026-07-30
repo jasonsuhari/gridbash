@@ -49,21 +49,21 @@ const SHELL_PREFERENCE: &[&str] = &["zsh", "bash", "fish", "sh", "pwsh"];
 #[cfg(all(not(windows), not(target_os = "macos")))]
 const SHELL_PREFERENCE: &[&str] = &["bash", "zsh", "fish", "sh", "pwsh"];
 
-const CANVAS_BG: Color = Color::Rgb(4, 6, 11);
-const PANEL_BG: Color = Color::Rgb(8, 12, 19);
-const RAISED_BG: Color = Color::Rgb(13, 20, 30);
-const SUNKEN_BG: Color = Color::Rgb(7, 11, 18);
-const HAIRLINE: Color = Color::Rgb(30, 45, 60);
-const HAIRLINE_HI: Color = Color::Rgb(56, 84, 108);
-const MUTED: Color = Color::Rgb(104, 122, 140);
-const TEXT: Color = Color::Rgb(226, 236, 245);
-const TERMINAL_GREEN: Color = Color::Rgb(94, 234, 240);
-const DIM_GREEN: Color = Color::Rgb(182, 140, 255);
-const SOFT_GREEN: Color = Color::Rgb(112, 243, 186);
+const CANVAS_BG: Color = Color::Rgb(0, 5, 2);
+const PANEL_BG: Color = Color::Rgb(1, 10, 5);
+const RAISED_BG: Color = Color::Rgb(2, 16, 8);
+const SUNKEN_BG: Color = Color::Rgb(1, 8, 4);
+const HAIRLINE: Color = Color::Rgb(18, 76, 40);
+const HAIRLINE_HI: Color = Color::Rgb(34, 120, 64);
+const MUTED: Color = Color::Rgb(72, 128, 88);
+const TEXT: Color = Color::Rgb(214, 255, 224);
+const TERMINAL_GREEN: Color = Color::Rgb(91, 255, 139);
+const DIM_GREEN: Color = Color::Rgb(50, 176, 92);
+const SOFT_GREEN: Color = Color::Rgb(159, 255, 183);
 const AMBER: Color = Color::Rgb(255, 196, 92);
 const ALERT_RED: Color = Color::Rgb(255, 118, 118);
-const RESIZE_ACCENT: Color = Color::Rgb(88, 166, 255);
-const RESIZE_FILL: Color = Color::Rgb(14, 32, 58);
+const RESIZE_ACCENT: Color = Color::Rgb(91, 255, 139);
+const RESIZE_FILL: Color = Color::Rgb(5, 35, 18);
 
 /// Three-row wordmark. Every glyph is a box-drawing character, so the banner
 /// occupies exactly 29 single-width columns wherever GridBash can draw borders.
@@ -1493,7 +1493,7 @@ fn text_row(
     let value_style = Style::default().fg(if focused {
         TEXT
     } else {
-        Color::Rgb(176, 190, 205)
+        Color::Rgb(150, 210, 170)
     });
 
     if start > 0 {
@@ -1594,7 +1594,7 @@ fn draw_preview_cell(frame: &mut Frame<'_>, rect: Rect, cell: &PreviewCell) {
     let border = if !cell.revealed {
         HAIRLINE
     } else if cell.shimmer {
-        Color::Rgb(238, 248, 255)
+        Color::Rgb(232, 255, 240)
     } else {
         cell.accent
     };
@@ -1732,9 +1732,9 @@ fn paint_starfield(frame: &mut Frame<'_>, area: Rect, tick: u64, seed: u64) {
                 continue;
             }
             let (glyph, color) = match (noise >> 8).wrapping_add(tick / 6) % 14 {
-                0 => ("*", Color::Rgb(96, 132, 164)),
-                1 | 2 => ("·", Color::Rgb(62, 92, 118)),
-                _ => ("·", Color::Rgb(26, 40, 54)),
+                0 => ("*", Color::Rgb(74, 150, 96)),
+                1 | 2 => ("·", Color::Rgb(44, 104, 62)),
+                _ => ("·", Color::Rgb(16, 52, 30)),
             };
             if let Some(cell) = buffer.cell_mut((x, y)) {
                 cell.set_symbol(glyph).set_fg(color);
@@ -2168,33 +2168,15 @@ fn square_preview_rects(area: Rect, grid: GridSize) -> Vec<Rect> {
         return Vec::new();
     }
 
-    let gap_y = if area.height >= rows.saturating_mul(2).saturating_sub(1) {
-        1
-    } else {
-        0
-    };
-    let gap_x = if area.width >= columns.saturating_mul(4).saturating_sub(2) {
-        2
-    } else if area.width >= columns.saturating_mul(3).saturating_sub(1) {
-        1
-    } else {
-        0
-    };
-
-    let row_gaps = rows.saturating_sub(1).saturating_mul(gap_y);
-    let column_gaps = columns.saturating_sub(1).saturating_mul(gap_x);
-    let height_fit = area.height.saturating_sub(row_gaps) / rows;
-    let width_fit = area.width.saturating_sub(column_gaps) / columns / 2;
+    // Cells sit flush against one another so the preview reads as a single grid
+    // instead of scattered tiles. Each cell draws its own border, so touching
+    // edges look like the interior rules of one table.
+    let height_fit = area.height / rows;
+    let width_fit = area.width / columns / 2;
     let side_height = height_fit.min(width_fit).max(1);
     let side_width = side_height.saturating_mul(2).max(1);
-    let total_height = rows
-        .saturating_mul(side_height)
-        .saturating_add(row_gaps)
-        .min(area.height);
-    let total_width = columns
-        .saturating_mul(side_width)
-        .saturating_add(column_gaps)
-        .min(area.width);
+    let total_height = rows.saturating_mul(side_height).min(area.height);
+    let total_width = columns.saturating_mul(side_width).min(area.width);
     let start_y = area
         .y
         .saturating_add(area.height.saturating_sub(total_height) / 2);
@@ -2206,8 +2188,8 @@ fn square_preview_rects(area: Rect, grid: GridSize) -> Vec<Rect> {
     for row in 0..rows {
         for column in 0..columns {
             rects.push(Rect {
-                x: start_x.saturating_add(column.saturating_mul(side_width.saturating_add(gap_x))),
-                y: start_y.saturating_add(row.saturating_mul(side_height.saturating_add(gap_y))),
+                x: start_x.saturating_add(column.saturating_mul(side_width)),
+                y: start_y.saturating_add(row.saturating_mul(side_height)),
                 width: side_width,
                 height: side_height,
             });
@@ -2898,6 +2880,65 @@ mod tests {
             assert!(
                 settled.contains(&format!("main-pane-{pane:02}")),
                 "pane {pane} missing its branch label"
+            );
+        }
+    }
+
+    /// The preview stands in for the real grid, so its cells sit flush: touching
+    /// edges read as one table rather than a scatter of tiles.
+    #[test]
+    fn preview_cells_touch_without_gaps() {
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 40,
+        };
+        let grid = GridSize {
+            rows: 3,
+            columns: 3,
+        };
+        let rects = square_preview_rects(area, grid);
+        assert_eq!(rects.len(), 9);
+
+        for row in 0..3 {
+            for column in 0..3 {
+                let cell = rects[row * 3 + column];
+                if column > 0 {
+                    let left = rects[row * 3 + column - 1];
+                    assert_eq!(
+                        left.x + left.width,
+                        cell.x,
+                        "column {column} leaves a horizontal gap"
+                    );
+                }
+                if row > 0 {
+                    let above = rects[(row - 1) * 3 + column];
+                    assert_eq!(
+                        above.y + above.height,
+                        cell.y,
+                        "row {row} leaves a vertical gap"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The composer shares the resume picker's phosphor-green palette, so its
+    /// accents must actually be green rather than the cyan they replaced.
+    #[test]
+    fn accent_palette_is_phosphor_green() {
+        for (name, color) in [
+            ("TERMINAL_GREEN", TERMINAL_GREEN),
+            ("DIM_GREEN", DIM_GREEN),
+            ("SOFT_GREEN", SOFT_GREEN),
+        ] {
+            let Color::Rgb(red, green, blue) = color else {
+                panic!("{name} must be an rgb colour");
+            };
+            assert!(
+                green > red && green > blue,
+                "{name} is not green: rgb({red}, {green}, {blue})"
             );
         }
     }
