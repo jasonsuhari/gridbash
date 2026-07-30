@@ -97,6 +97,32 @@ impl GridLayout {
         resize_weights(&mut self.column_weights, size.columns.min(MAX_PANES));
     }
 
+    pub fn row_weights(&self) -> &[u16] {
+        &self.row_weights
+    }
+
+    pub fn column_weights(&self) -> &[u16] {
+        &self.column_weights
+    }
+
+    /// Put dragged dividers back where they were.
+    ///
+    /// Saved weights are only applied when they describe the grid being
+    /// restored; a mismatched count means the snapshot and the grid disagree, and
+    /// even spacing is the safe reading.
+    pub fn restore_weights(&mut self, row_weights: &[u16], column_weights: &[u16]) {
+        if row_weights.len() == self.row_weights.len()
+            && row_weights.iter().all(|weight| *weight > 0)
+        {
+            self.row_weights.copy_from_slice(row_weights);
+        }
+        if column_weights.len() == self.column_weights.len()
+            && column_weights.iter().all(|weight| *weight > 0)
+        {
+            self.column_weights.copy_from_slice(column_weights);
+        }
+    }
+
     pub fn rects(&self, area: Rect, count: usize) -> Vec<Rect> {
         weighted_grid_rects(
             area,
@@ -396,6 +422,27 @@ mod tests {
                 columns: 1,
             }
         );
+    }
+
+    /// Dragged dividers are part of how a workspace looked, so a resume puts
+    /// them back. Weights that do not describe the restored grid are ignored.
+    #[test]
+    fn restoring_weights_reproduces_dragged_dividers() {
+        let mut layout = GridLayout::new(GridSize {
+            rows: 1,
+            columns: 2,
+        });
+
+        layout.restore_weights(&[1000], &[1400, 600]);
+        assert_eq!(layout.column_weights(), [1400, 600]);
+        let rects = layout.rects(Rect::new(0, 0, 100, 10), 2);
+        assert!(rects[0].width > rects[1].width);
+
+        // A snapshot that disagrees with the grid leaves the even spacing alone.
+        layout.restore_weights(&[1000], &[500, 500, 500]);
+        assert_eq!(layout.column_weights(), [1400, 600]);
+        layout.restore_weights(&[1000], &[0, 0]);
+        assert_eq!(layout.column_weights(), [1400, 600]);
     }
 
     #[test]

@@ -53,8 +53,10 @@ use crate::{
     profiles::{default_profile_name, find_profile, is_terminal_profile, startup_profiles},
     pty::{PtyEvent, PtyWriteToken},
     session::{
-        InterruptedRecovery, InterruptedRecoveryClaim, SavedBackgroundPane, SavedPane,
-        SavedPaneHistory, SavedTab, SessionRecord, SessionRecorder, complete_interrupted_recovery,
+        InterruptedRecovery, InterruptedRecoveryClaim, LiveGrid, LiveWorkspace,
+        SavedBackgroundPane, SavedPane, SavedPaneHistory, SavedTab, SavedView, SessionRecord,
+        SessionRecorder, claude_session_in_command, complete_interrupted_recovery,
+        latest_claude_session, pin_claude_session,
     },
     setup::{LaunchPlan, PaneLaunchSpec, folder_display_name},
     ui,
@@ -84,6 +86,10 @@ const PTY_DRAIN_MAX_TIME: Duration = Duration::from_millis(4);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const PORT_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
+/// How often panes are checked for having moved onto a new agent conversation.
+/// Each check reads one directory per agent pane, so it is kept off the path of
+/// every keystroke-driven save.
+const AGENT_SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const PANE_GOAL_OUTPUT_MAX_BYTES: usize = 12_000;
 const PANE_GOAL_REVIEW_IDLE: Duration = Duration::from_secs(2);
 const PANE_GOAL_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -178,9 +184,7 @@ pub struct App {
     auth_refresh_rx: Option<std_mpsc::Receiver<Result<Vec<AuthProfile>, String>>>,
     pane_settings: PaneSettingsState,
     status: String,
-    restored_histories: Vec<SavedPaneHistory>,
-    restored_hosts: Vec<Option<PtyHostRef>>,
-    restored_tabs: Vec<SavedTab>,
+    restored: RestoredWorkspace,
     session_recorder: Option<SessionRecorder>,
     interrupted_recovery_claim: Option<InterruptedRecoveryClaim>,
     output_logs: OutputLogs,
@@ -215,6 +219,7 @@ pub struct App {
     last_activity_decay: Instant,
     last_exit_poll: Instant,
     last_session_autosave: Instant,
+    last_agent_session_refresh: Instant,
 }
 
 struct AppInit {
@@ -229,13 +234,43 @@ struct AppInit {
     control_rx: Option<std_mpsc::Receiver<ControlEnvelope>>,
     settings: SettingsState,
     tab_title: String,
-    restored_histories: Vec<SavedPaneHistory>,
-    restored_background_panes: Vec<SavedBackgroundPane>,
-    restored_hosts: Vec<Option<PtyHostRef>>,
-    restored_tabs: Vec<SavedTab>,
+    restored: RestoredWorkspace,
     session_recorder: Option<SessionRecorder>,
     interrupted_recovery_claim: Option<InterruptedRecoveryClaim>,
     status: String,
+}
+
+/// Everything a resumed or recovered workspace brings back that a launch plan
+/// does not describe: what the user named things, which pane had focus, how the
+/// grids were arranged, and the order they sat in.
+#[derive(Default)]
+struct RestoredWorkspace {
+    histories: Vec<SavedPaneHistory>,
+    hosts: Vec<Option<PtyHostRef>>,
+    pane_names: Vec<Option<String>>,
+    sleeping: BTreeSet<usize>,
+    view: SavedView,
+    background_panes: Vec<SavedBackgroundPane>,
+    /// Grids other than the one that opens first, in workspace order.
+    tabs: Vec<SavedTab>,
+    /// Slot the opening grid should occupy once the others are back.
+    active_tab: usize,
+    /// Number to hand the next new grid, or zero to derive it.
+    next_tab_number: usize,
+}
+
+impl RestoredWorkspace {
+    /// State for the grid that opens first, taken from a saved grid.
+    fn from_grid(grid: &SavedTab) -> Self {
+        Self {
+            histories: grid.pane_histories(),
+            hosts: grid.pane_hosts(),
+            pane_names: grid.pane_names(),
+            sleeping: grid.sleeping_panes(),
+            view: grid.view.clone(),
+            ..Self::default()
+        }
+    }
 }
 
 struct GridTabSnapshot {
@@ -266,6 +301,65 @@ struct BackgroundJob {
     host: Option<PtyHostRef>,
     history: SavedPaneHistory,
     idle: PaneIdleState,
+}
+
+/// Move the grid that opens first from the front of the strip into the slot it
+/// held, and report where it landed.
+///
+/// Restored grids are rebuilt after the active one, so without this every resume
+/// pulled whichever grid had been open to the front of the tab strip.
+fn move_active_slot<T>(slots: &mut Vec<Option<T>>, target: usize) -> usize {
+    let target = target.min(slots.len().saturating_sub(1));
+    if target == 0 {
+        return 0;
+    }
+
+    // The active grid's live state lives on `App`, so its slot is the empty one
+    // and moving that slot is enough to reorder the strip.
+    let active = slots.remove(0);
+    slots.insert(target, active);
+    target
+}
+
+/// Move one pane onto the conversation it is talking to now.
+///
+/// A pane whose agent has exited keeps the conversation it ended on: there is
+/// nothing running to have started a new one.
+fn follow_agent_session(pane: &mut PtyPane, followed: &mut BTreeSet<String>) {
+    if pane.exited {
+        return;
+    }
+    let Some(current) = pane.agent_session_id().map(str::to_string) else {
+        return;
+    };
+    let Some(next) =
+        latest_claude_session(pane.cwd(), Some(&current), pane.started_at_ms(), followed)
+    else {
+        return;
+    };
+
+    followed.remove(&current);
+    followed.insert(next.clone());
+    pane.set_agent_session_id(Some(next));
+}
+
+/// Pane names sized to the grid being restored, so a snapshot that disagrees
+/// with its pane count cannot shift names onto the wrong panes.
+fn restored_pane_names(names: &[Option<String>], pane_count: usize) -> Vec<Option<String>> {
+    let mut restored = vec![None; pane_count];
+    for (slot, name) in restored.iter_mut().zip(names.iter()) {
+        *slot = name.clone().filter(|name| !name.trim().is_empty());
+    }
+    restored
+}
+
+/// Saved pane indexes, dropping any that fall outside the restored grid.
+fn restored_pane_indexes(indexes: &BTreeSet<usize>, pane_count: usize) -> BTreeSet<usize> {
+    indexes
+        .iter()
+        .copied()
+        .filter(|index| *index < pane_count)
+        .collect()
 }
 
 fn retire_pane(pane: &mut PtyPane) -> Result<()> {
@@ -2594,10 +2688,7 @@ impl App {
             control_rx,
             settings,
             tab_title: "Grid 1".into(),
-            restored_histories: Vec::new(),
-            restored_background_panes: Vec::new(),
-            restored_hosts: Vec::new(),
-            restored_tabs: Vec::new(),
+            restored: RestoredWorkspace::default(),
             session_recorder: None,
             interrupted_recovery_claim: None,
             status,
@@ -2611,17 +2702,25 @@ impl App {
         agent_control_enabled: bool,
         agent_control_port: u16,
     ) -> Result<Self> {
-        let mut launch_plan = record.session.launch_plan()?;
+        // The grid that was open is restored into the same slot it held, so the
+        // workspace comes back with its grids in order rather than reordered
+        // around whichever one happened to be active.
+        let (mut grids, active_index) = record.session.ordered_grids();
+        let active = grids.remove(active_index);
+        let mut launch_plan = active.launch_plan()?;
         apply_auth_defaults(&mut launch_plan, &config)?;
         let grid = launch_plan.grid;
-        let restored_histories = record.session.pane_histories();
-        let restored_background_panes = record.session.background_panes.clone();
-        let restored_hosts = record.session.pane_hosts();
-        let restored_tabs = record.session.tabs.clone();
-        let tab_title = if record.session.title.is_empty() {
+        let restored = RestoredWorkspace {
+            background_panes: record.session.background_panes.clone(),
+            tabs: grids,
+            active_tab: active_index,
+            next_tab_number: record.session.next_grid_number(),
+            ..RestoredWorkspace::from_grid(&active)
+        };
+        let tab_title = if active.title.is_empty() {
             "Grid 1".into()
         } else {
-            record.session.title.clone()
+            active.title.clone()
         };
         let session_id = record.session.id.clone();
         let recorder = SessionRecorder::continue_record(record);
@@ -2651,10 +2750,7 @@ impl App {
             control_rx,
             settings,
             tab_title,
-            restored_histories,
-            restored_background_panes,
-            restored_hosts,
-            restored_tabs,
+            restored,
             session_recorder: Some(recorder),
             interrupted_recovery_claim: None,
             status,
@@ -2670,27 +2766,37 @@ impl App {
     ) -> Result<Self> {
         let InterruptedRecovery {
             mut tabs,
+            active_tab,
+            background_panes,
+            next_tab_number,
             session_count,
             pane_count,
             claim,
         } = recovery;
-        let active = if tabs.is_empty() {
+        if tabs.is_empty() {
             return Err(anyhow!("interrupted recovery has no tabs"));
-        } else {
-            tabs.remove(0)
-        };
+        }
+        // Recovery opens on the grid the crash interrupted, and every other grid
+        // keeps the position it had.
+        let active_tab = active_tab.min(tabs.len() - 1);
+        let active = tabs.remove(active_tab);
         let mut launch_plan = active.launch_plan()?;
         apply_auth_defaults(&mut launch_plan, &config)?;
         let grid = launch_plan.grid;
-        let restored_histories = active.pane_histories();
-        let restored_hosts = active.pane_hosts();
+        let restored = RestoredWorkspace {
+            background_panes,
+            tabs,
+            active_tab,
+            next_tab_number,
+            ..RestoredWorkspace::from_grid(&active)
+        };
         let settings = SettingsState::from_config(&config);
         let command_cwd = launch_plan
             .panes
             .first()
             .map(|pane| pane.cwd.clone())
             .unwrap_or(resolved_current_dir()?);
-        let tab_count = tabs.len() + 1;
+        let tab_count = restored.tabs.len() + 1;
         let (control_handle, control_rx) =
             start_agent_control(agent_control_enabled, agent_control_port)?;
         let agent_control_status = if control_handle.is_some() {
@@ -2711,10 +2817,7 @@ impl App {
             control_rx,
             settings,
             tab_title: active.title,
-            restored_histories,
-            restored_background_panes: Vec::new(),
-            restored_hosts,
-            restored_tabs: tabs,
+            restored,
             session_recorder: None,
             interrupted_recovery_claim: Some(claim),
             status: format!(
@@ -2732,7 +2835,8 @@ impl App {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (goal_tx, goal_rx) = std_mpsc::channel();
         let background_jobs = init
-            .restored_background_panes
+            .restored
+            .background_panes
             .iter()
             .map(BackgroundJob::from_saved)
             .collect::<Vec<_>>();
@@ -2813,9 +2917,7 @@ impl App {
             auth_refresh_rx: None,
             pane_settings: PaneSettingsState::default(),
             status: init.status,
-            restored_histories: init.restored_histories,
-            restored_hosts: init.restored_hosts,
-            restored_tabs: init.restored_tabs,
+            restored: init.restored,
             session_recorder: init.session_recorder,
             interrupted_recovery_claim: init.interrupted_recovery_claim,
             output_logs: OutputLogs::default(),
@@ -2850,6 +2952,7 @@ impl App {
             last_activity_decay: Instant::now(),
             last_exit_poll: Instant::now(),
             last_session_autosave: Instant::now(),
+            last_agent_session_refresh: Instant::now(),
         })
     }
 
@@ -2934,9 +3037,8 @@ impl App {
         }
         self.layout = GridLayout::new(plan.grid);
         self.launch_plan = Some(plan);
-        self.restored_histories.clear();
-        self.restored_hosts.clear();
-        self.restored_tabs.clear();
+        // A freshly composed plan replaces whatever was being restored.
+        self.restored = RestoredWorkspace::default();
         Ok(())
     }
 
@@ -2951,10 +3053,10 @@ impl App {
         self.tab_rename.close();
         self.layout = GridLayout::new(plan.grid);
         self.panes.clear();
-        self.pane_names = vec![None; plan.panes.len()];
+        self.pane_names = restored_pane_names(&self.restored.pane_names, plan.panes.len());
         self.text_selection = None;
         self.copy_mode = None;
-        self.sleeping.clear();
+        self.sleeping = restored_pane_indexes(&self.restored.sleeping, plan.panes.len());
         self.manager_goal = None;
         self.next_pane_id = 0;
         self.pane_idle.clear();
@@ -2974,9 +3076,10 @@ impl App {
                 });
             }
         }
-        self.restored_histories.clear();
-        self.restored_hosts.clear();
-        for saved_tab in mem::take(&mut self.restored_tabs) {
+        self.apply_restored_view();
+        self.restored.histories.clear();
+        self.restored.hosts.clear();
+        for saved_tab in mem::take(&mut self.restored.tabs) {
             match self.restore_saved_tab(saved_tab) {
                 Ok(snapshot) => self.tabs.push(Some(snapshot)),
                 Err(error) => {
@@ -2990,11 +3093,29 @@ impl App {
                 }
             }
         }
+        self.restore_active_tab_position();
         self.restore_background_panes();
-        self.next_tab_number = self.tabs.len() + 1;
+        self.next_tab_number = self.restored.next_tab_number.max(self.tabs.len() + 1);
         self.start_usage_monitor(&plan);
 
         self.save_session_snapshot()
+    }
+
+    /// Put the grid that opens first back in the slot it held. Restored grids are
+    /// appended after it, so without this every resume moved the active grid to
+    /// the front of the tab strip.
+    fn restore_active_tab_position(&mut self) {
+        self.active_tab = move_active_slot(&mut self.tabs, self.restored.active_tab);
+    }
+
+    /// Restore how the opening grid was arranged: focus, zoom, and any dividers
+    /// the user dragged.
+    fn apply_restored_view(&mut self) {
+        let view = mem::take(&mut self.restored.view);
+        self.focus = view.focus.min(self.panes.len().saturating_sub(1));
+        self.zoomed = view.zoomed && !self.panes.is_empty();
+        self.layout
+            .restore_weights(&view.row_weights, &view.column_weights);
     }
 
     fn retire_owned_panes(&mut self) -> Result<()> {
@@ -3033,7 +3154,8 @@ impl App {
                 &job.history.input_history,
                 self.event_tx.clone(),
             ) {
-                Ok(pane) => {
+                Ok(mut pane) => {
+                    pane.set_agent_session_id(claude_session_in_command(&job.spec.command));
                     job.pane = Some(pane);
                     job.host = None;
                 }
@@ -3096,21 +3218,27 @@ impl App {
             .map(|pane| pane.cwd.clone())
             .unwrap_or_default();
         let grid_id = self.allocate_grid_id();
+        let mut layout = GridLayout::new(grid);
+        layout.restore_weights(&saved.view.row_weights, &saved.view.column_weights);
+        let pane_names = restored_pane_names(&saved.pane_names(), pane_count);
+        let sleeping = restored_pane_indexes(&saved.sleeping_panes(), pane_count);
+        let focus = saved.focus();
+        let zoomed = saved.view.zoomed && pane_count > 0;
         Ok(GridTabSnapshot {
             grid_id,
             title: saved.title,
             launch_plan: Some(plan),
-            layout: GridLayout::new(grid),
-            zoomed: false,
+            layout,
+            zoomed,
             panes,
             pane_idle: (0..pane_count)
                 .map(|_| PaneIdleState::new(Instant::now()))
                 .collect(),
-            focus: 0,
+            focus,
             selected: BTreeSet::new(),
-            pane_names: vec![None; pane_count],
+            pane_names,
             text_selection: None,
-            sleeping: BTreeSet::new(),
+            sleeping,
             manager_goal: None,
             assistant: WorkspaceAssistantState::default(),
             command_line: CommandLineState::new(command_cwd),
@@ -3207,8 +3335,10 @@ impl App {
         self.assistant = WorkspaceAssistantState::default();
         self.rects.clear();
         self.follow_up = None;
-        self.restored_histories.clear();
-        self.restored_hosts.clear();
+        self.restored.histories.clear();
+        self.restored.hosts.clear();
+        self.restored.pane_names.clear();
+        self.restored.sleeping.clear();
         self.command_line = CommandLineState::new(
             plan.panes
                 .first()
@@ -3235,7 +3365,9 @@ impl App {
             .and_then(normalized_tab_title)
             .unwrap_or(fallback);
         self.close_tab_modals();
-        self.activate_plan_as_tab(title, plan)
+        self.activate_plan_as_tab(title, plan)?;
+        self.save_session_structure();
+        Ok(())
     }
 
     fn start_usage_monitor(&mut self, plan: &LaunchPlan) {
@@ -3257,11 +3389,12 @@ impl App {
 
     fn spawn_pane_spec(&mut self, index: usize, spec: &PaneLaunchSpec) -> Result<()> {
         let history = self
-            .restored_histories
+            .restored
+            .histories
             .get(index)
             .cloned()
             .unwrap_or_default();
-        let host = self.restored_hosts.get(index).cloned().flatten();
+        let host = self.restored.hosts.get(index).cloned().flatten();
         let pane = self.create_pane(spec, index, &history, host)?;
         self.panes.push(pane);
         self.pane_idle.push(PaneIdleState::new(Instant::now()));
@@ -3289,7 +3422,13 @@ impl App {
                 &history.input_history,
                 self.event_tx.clone(),
             ) {
-                Ok(pane) => return Ok(pane),
+                Ok(mut pane) => {
+                    // The terminal kept running, so it is still in the
+                    // conversation its command named. Carry that forward instead
+                    // of pinning a new one.
+                    pane.set_agent_session_id(claude_session_in_command(&spec.command));
+                    return Ok(pane);
+                }
                 Err(error) => {
                     if error.is::<PaneHostBusy>() {
                         return Err(error).with_context(|| {
@@ -3333,11 +3472,17 @@ impl App {
         spec: &PaneLaunchSpec,
         pane_index: Option<usize>,
     ) -> Result<PtyPane> {
+        // Claude keeps nothing that ties a transcript back to a pane, so the
+        // conversation id is chosen here and passed in. The pane then carries it,
+        // and snapshots can name the conversation instead of guessing which of
+        // several Claude panes in a folder wrote which transcript.
+        let mut spec = spec.clone();
+        let claude_session_id = pin_claude_session(&mut spec.command);
         let launch = spec.resolved_command()?;
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
         let extra_env = self.pane_env(pane_index, id);
-        PtyPane::spawn(
+        let mut pane = PtyPane::spawn(
             &spec.profile_name,
             id,
             0,
@@ -3351,7 +3496,9 @@ impl App {
             self.config.defaults.pane_workload,
             self.config.ui.keep_terminals_running,
             self.event_tx.clone(),
-        )
+        )?;
+        pane.set_agent_session_id(claude_session_id);
+        Ok(pane)
     }
 
     fn pane_env(&self, pane_index: Option<usize>, pane_id: PaneId) -> Vec<(OsString, OsString)> {
@@ -6523,6 +6670,7 @@ impl App {
         } else {
             "restored grid layout".into()
         };
+        self.save_session_structure();
     }
 
     fn handle_grid_resizer_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -6725,6 +6873,7 @@ impl App {
             self.status = format!("active tab {}", self.tab_title);
         }
         self.sync_pane_sizes_for_current_layout();
+        self.save_session_structure();
     }
 
     fn begin_tab_rename(&mut self) {
@@ -6800,6 +6949,7 @@ impl App {
                 self.tab_title = name.clone();
                 self.tab_rename.close();
                 self.status = format!("renamed tab to {name}");
+                self.save_session_structure();
             }
             None => {
                 self.status = "tab name cannot be empty".into();
@@ -7852,6 +8002,7 @@ impl App {
         }
 
         self.rename.close();
+        self.save_session_structure();
     }
 
     fn swap_selected_tiles(&mut self) {
@@ -7897,6 +8048,9 @@ impl App {
         swap_set_indices(&mut self.sleeping, first, second);
         self.focus = swapped_index(self.focus, first, second);
         self.status = format!("swapped panes {} and {}", first + 1, second + 1);
+        // Pane positions are the first thing a resume is judged on, so the new
+        // arrangement is written before anything else can interrupt.
+        self.save_session_structure();
     }
 
     fn swap_selected_grids(&mut self) {
@@ -7933,6 +8087,7 @@ impl App {
         self.restore_tab_snapshot(snapshot);
         self.sync_pane_sizes_for_current_layout();
         self.status = format!("swapped grids {} and {}", first + 1, second + 1);
+        self.save_session_structure();
     }
 
     #[allow(dead_code)]
@@ -8911,6 +9066,9 @@ impl App {
             self.status
                 .push_str(&format!("; pane cleanup reported: {error:#}"));
         }
+        // The new dimensions are what a resume rebuilds the grid from, so they go
+        // to disk with the resize rather than at the next autosave.
+        self.save_session_structure();
 
         Ok(())
     }
@@ -9002,6 +9160,7 @@ impl App {
                 next.columns
             )
         };
+        self.save_session_structure();
     }
 
     fn toggle_sleep_for_targets(&mut self) {
@@ -9042,6 +9201,7 @@ impl App {
 
         let action = if should_sleep { "slept" } else { "woke" };
         self.status = format!("{} {} {}", action, targets.len(), pane_word(targets.len()));
+        self.save_session_structure();
     }
 
     fn handle_todo_edit_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -10833,20 +10993,86 @@ impl App {
             .map(SessionRecorder::resume_command)
     }
 
+    /// Follow panes onto conversations they started after launching.
+    ///
+    /// Clearing a conversation inside a pane begins a new one in the same
+    /// terminal. The snapshot has to name what each pane is talking to now, not
+    /// what it opened with, or resuming reopens the abandoned conversation.
+    fn refresh_agent_sessions(&mut self) {
+        if self.last_agent_session_refresh.elapsed() < AGENT_SESSION_REFRESH_INTERVAL {
+            return;
+        }
+        self.last_agent_session_refresh = Instant::now();
+
+        // Conversations already spoken for, so two panes in one folder cannot end
+        // up following the same one.
+        let mut followed = self
+            .panes
+            .iter()
+            .chain(
+                self.tabs
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .flat_map(|tab| tab.panes.iter()),
+            )
+            .chain(
+                self.background_jobs
+                    .iter()
+                    .filter_map(|job| job.pane.as_ref()),
+            )
+            .filter_map(|pane| pane.agent_session_id().map(str::to_string))
+            .collect::<BTreeSet<_>>();
+
+        for pane in self.panes.iter_mut() {
+            follow_agent_session(pane, &mut followed);
+        }
+        for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
+            for pane in tab.panes.iter_mut() {
+                follow_agent_session(pane, &mut followed);
+            }
+        }
+        for job in self.background_jobs.iter_mut() {
+            if let Some(pane) = job.pane.as_mut() {
+                follow_agent_session(pane, &mut followed);
+            }
+        }
+    }
+
     fn save_session_snapshot(&mut self) -> Result<()> {
+        self.refresh_agent_sessions();
         let Some(plan) = self.launch_plan.clone() else {
             return Ok(());
         };
-        let tabs = self
-            .tabs
-            .iter()
-            .filter_map(Option::as_ref)
-            .filter_map(|tab| {
-                tab.launch_plan
-                    .as_ref()
-                    .map(|plan| SavedTab::from_live(&tab.title, plan, &tab.panes))
-            })
-            .collect();
+        let mut tabs = Vec::new();
+        // Counted rather than taken from `active_tab` directly: grids that hold
+        // no live state are skipped here, and the active grid has to land back
+        // among the ones that are written.
+        let mut active_tab = 0;
+        for (index, tab) in self.tabs.iter().enumerate() {
+            if index == self.active_tab {
+                active_tab = tabs.len();
+                continue;
+            }
+            let Some(tab) = tab.as_ref() else {
+                continue;
+            };
+            let Some(plan) = tab.launch_plan.as_ref() else {
+                continue;
+            };
+            tabs.push(SavedTab::from_live(&LiveGrid {
+                title: &tab.title,
+                plan,
+                panes: &tab.panes,
+                pane_names: &tab.pane_names,
+                sleeping: &tab.sleeping,
+                view: SavedView {
+                    focus: tab.focus,
+                    zoomed: tab.zoomed,
+                    row_weights: tab.layout.row_weights().to_vec(),
+                    column_weights: tab.layout.column_weights().to_vec(),
+                },
+            }));
+        }
         let Some(recorder) = self.session_recorder.as_mut() else {
             return Ok(());
         };
@@ -10856,7 +11082,25 @@ impl App {
             .iter()
             .map(BackgroundJob::saved)
             .collect();
-        recorder.update(&self.tab_title, &plan, &self.panes, tabs, background_panes);
+        recorder.update(LiveWorkspace {
+            active: LiveGrid {
+                title: &self.tab_title,
+                plan: &plan,
+                panes: &self.panes,
+                pane_names: &self.pane_names,
+                sleeping: &self.sleeping,
+                view: SavedView {
+                    focus: self.focus,
+                    zoomed: self.zoomed,
+                    row_weights: self.layout.row_weights().to_vec(),
+                    column_weights: self.layout.column_weights().to_vec(),
+                },
+            },
+            tabs,
+            background_panes,
+            active_tab,
+            next_tab_number: self.next_tab_number,
+        });
         recorder.save()
     }
 
@@ -10872,12 +11116,48 @@ impl App {
         false
     }
 
+    /// Persist a change to the workspace's shape right away.
+    ///
+    /// Autosave alone means a crash in the seconds after renaming a grid or
+    /// moving a pane loses that edit, and those are exactly the changes a resume
+    /// is judged on. Unchanged snapshots are skipped by the recorder, so calling
+    /// this freely is cheap.
+    fn save_session_structure(&mut self) {
+        self.last_session_autosave = Instant::now();
+        if let Err(error) = self.save_session_snapshot() {
+            self.status = format!("session save failed: {error:#}");
+        }
+    }
+
     fn finish_session(&mut self) -> Result<()> {
         self.save_session_snapshot()?;
         if let Some(recorder) = self.session_recorder.as_mut() {
             recorder.finish()?;
         }
         Ok(())
+    }
+
+    /// Whether the live workspace still describes itself consistently.
+    ///
+    /// Moving a grid or closing one briefly separates the panes from the plan
+    /// that lists them. A snapshot taken in that window would look like a
+    /// workspace whose panes had all vanished.
+    fn workspace_is_coherent(&self) -> bool {
+        self.launch_plan
+            .as_ref()
+            .is_some_and(|plan| plan.panes.len() == self.panes.len())
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        // Last line of defence. The event loop catches its own panics and both
+        // exit paths save, but a panic raised outside that firewall would
+        // otherwise take the workspace with it. Unchanged snapshots are skipped,
+        // so a clean exit pays nothing here.
+        if self.session_recorder.is_some() && self.workspace_is_coherent() {
+            let _ = self.save_session_snapshot();
+        }
     }
 }
 
@@ -13136,6 +13416,58 @@ mod tests {
 
     fn selected(indices: &[usize]) -> BTreeSet<usize> {
         indices.iter().copied().collect()
+    }
+
+    /// The grid that was open goes back to the slot it held, instead of being
+    /// pulled to the front of the tab strip on every resume.
+    #[test]
+    fn the_active_grid_returns_to_its_own_slot() {
+        let mut slots = vec![None, Some("first"), Some("second")];
+
+        assert_eq!(move_active_slot(&mut slots, 1), 1);
+        assert_eq!(slots, [Some("first"), None, Some("second")]);
+
+        // A workspace that was on its first grid is already in place.
+        let mut front = vec![None, Some("first")];
+        assert_eq!(move_active_slot(&mut front, 0), 0);
+        assert_eq!(front, [None, Some("first")]);
+
+        // A snapshot naming a slot that no longer exists lands on the last one.
+        let mut short = vec![None, Some("first")];
+        assert_eq!(move_active_slot(&mut short, 9), 1);
+        assert_eq!(short, [Some("first"), None]);
+    }
+
+    /// Pane names come back on the panes they belonged to, and a snapshot that
+    /// disagrees with its pane count cannot shift them onto the wrong ones.
+    #[test]
+    fn restored_pane_names_line_up_with_their_panes() {
+        let saved = vec![Some("planner".to_string()), None, Some("  ".to_string())];
+
+        assert_eq!(
+            restored_pane_names(&saved, 3),
+            [Some("planner".into()), None, None]
+        );
+        // Fewer panes than names: the extras are dropped rather than shifted.
+        assert_eq!(
+            restored_pane_names(&saved, 2),
+            [Some("planner".into()), None]
+        );
+        // More panes than names: the rest are simply unnamed.
+        assert_eq!(
+            restored_pane_names(&saved, 4),
+            [Some("planner".into()), None, None, None]
+        );
+    }
+
+    /// Sleeping panes outside the restored grid are dropped, so a smaller grid
+    /// cannot come back with a pane marked asleep that does not exist.
+    #[test]
+    fn restored_sleeping_panes_stay_inside_the_grid() {
+        let saved = selected(&[0, 2, 7]);
+
+        assert_eq!(restored_pane_indexes(&saved, 3), selected(&[0, 2]));
+        assert_eq!(restored_pane_indexes(&saved, 8), selected(&[0, 2, 7]));
     }
 
     #[test]

@@ -20,7 +20,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::session::{SessionRecord, delete_saved_session, process_is_running};
+use crate::session::{SavedTab, SessionRecord, delete_saved_session, process_is_running};
 
 type ResumeTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -33,6 +33,9 @@ const MUTED: Color = Color::Rgb(72, 128, 88);
 const DIM_GREEN: Color = Color::Rgb(50, 176, 92);
 const TERMINAL_GREEN: Color = Color::Rgb(91, 255, 139);
 const SOFT_GREEN: Color = Color::Rgb(159, 255, 183);
+
+/// Marks a pane whose agent conversation comes back with it.
+const RESUMABLE_MARK: &str = "*";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionState {
@@ -54,7 +57,7 @@ impl SessionState {
             return Self::Interrupted;
         }
 
-        if all_panes(record).any(|pane| pane.host.is_some()) {
+        if session.all_panes().any(|pane| pane.host.is_some()) {
             Self::Detached
         } else {
             Self::Saved
@@ -85,10 +88,14 @@ impl SessionState {
                 format!("Already attached to a live GridBash client (PID {owner_pid}).")
             }
             Self::Interrupted => {
-                "The previous client stopped. GridBash will recover this workspace.".into()
+                "The previous client stopped. Every grid comes back as it was.".into()
             }
-            Self::Detached => "Saved pane hosts are ready to reconnect.".into(),
-            Self::Saved => "Recreates terminals from the saved layout and history.".into(),
+            Self::Detached => "Terminals are still running and will reconnect.".into(),
+            Self::Saved => {
+                "Rebuilds each grid at its saved size, with its panes, names, and agent \
+                 conversations."
+                    .into()
+            }
         }
     }
 }
@@ -101,9 +108,148 @@ enum PickerAction {
     Cancel,
 }
 
+/// One pane as the picker draws it: where it sat, what it was called, and
+/// whether its agent conversation comes back.
+#[derive(Debug, Clone)]
+struct PaneCell {
+    label: String,
+    resumable: bool,
+}
+
+/// A saved grid, laid out the way it will be restored.
+#[derive(Debug, Clone)]
+struct GridPreview {
+    title: String,
+    rows: usize,
+    columns: usize,
+    pane_count: usize,
+    /// One entry per cell, row by row. `None` is a cell the grid kept empty.
+    cells: Vec<Option<PaneCell>>,
+    active: bool,
+}
+
+impl GridPreview {
+    fn dimensions(&self) -> String {
+        format!("{}x{}", self.rows, self.columns)
+    }
+}
+
+/// A saved workspace with the parts that cost real work to compute already
+/// resolved, so redrawing never touches the filesystem again.
+struct SessionEntry {
+    record: SessionRecord,
+    title: String,
+    grids: Vec<GridPreview>,
+    pane_count: usize,
+    resumable_count: usize,
+    background_count: usize,
+    folders: Option<String>,
+    profiles: Option<String>,
+}
+
+impl SessionEntry {
+    fn new(record: SessionRecord) -> Self {
+        let (grids, active) = record.session.ordered_grids();
+        let grids = grids
+            .iter()
+            .enumerate()
+            .map(|(index, grid)| grid_preview(grid, index == active))
+            .collect::<Vec<_>>();
+        let pane_count = record.session.all_panes().count();
+        let resumable_count = record
+            .session
+            .all_panes()
+            .filter(|pane| pane.resumable_conversation().is_some())
+            .count();
+        let folders = compact_labels(
+            record
+                .session
+                .all_panes()
+                .map(|pane| pane.folder_name.as_str()),
+        );
+        let profiles = compact_labels(
+            record
+                .session
+                .all_panes()
+                .map(|pane| pane.profile_name.as_str()),
+        );
+
+        Self {
+            title: session_title(&record),
+            grids,
+            pane_count,
+            resumable_count,
+            background_count: record.session.background_panes.len(),
+            folders,
+            profiles,
+            record,
+        }
+    }
+
+    fn state(&self) -> SessionState {
+        SessionState::for_record(&self.record)
+    }
+
+    /// One line naming every grid with the size it will be rebuilt at.
+    fn grid_summary(&self) -> String {
+        let shown = self
+            .grids
+            .iter()
+            .take(4)
+            .map(|grid| format!("{} {}", grid.title, grid.dimensions()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let extra = self.grids.len().saturating_sub(4);
+        if extra > 0 {
+            format!("{shown} +{extra}")
+        } else {
+            shown
+        }
+    }
+}
+
+/// Lay a saved grid out cell by cell so the picker can show that every pane
+/// comes back in the position it held.
+fn grid_preview(grid: &SavedTab, active: bool) -> GridPreview {
+    let rows = grid.grid.rows.max(1);
+    let columns = grid.grid.columns.max(1);
+    let mut cells = vec![None; rows.saturating_mul(columns)];
+    let mut panes = grid.panes.iter().collect::<Vec<_>>();
+    panes.sort_by_key(|pane| pane.index);
+    for (position, pane) in panes.iter().enumerate() {
+        let Some(cell) = cells.get_mut(position) else {
+            break;
+        };
+        *cell = Some(PaneCell {
+            label: pane
+                .name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| pane.profile_name.clone()),
+            resumable: pane.resumable_conversation().is_some(),
+        });
+    }
+
+    GridPreview {
+        title: if grid.title.trim().is_empty() {
+            "Untitled grid".into()
+        } else {
+            grid.title.clone()
+        },
+        rows,
+        columns,
+        pane_count: grid.panes.len(),
+        cells,
+        active,
+    }
+}
+
 struct ResumePicker {
-    sessions: Vec<SessionRecord>,
+    sessions: Vec<SessionEntry>,
     list_state: ListState,
+    /// Grid of the selected workspace shown in the map, so every saved grid can
+    /// be inspected before resuming.
+    grid_cursor: usize,
     page_size: usize,
     notice: Option<String>,
     pending_delete: Option<String>,
@@ -133,9 +279,16 @@ impl ResumePicker {
     fn new(sessions: &[SessionRecord]) -> Self {
         let mut list_state = ListState::default();
         list_state.select((!sessions.is_empty()).then_some(0));
+        let sessions = sessions
+            .iter()
+            .cloned()
+            .map(SessionEntry::new)
+            .collect::<Vec<_>>();
+        let grid_cursor = sessions.first().map(active_grid_index).unwrap_or(0);
         Self {
-            sessions: sessions.to_vec(),
+            sessions,
             list_state,
+            grid_cursor,
             page_size: 1,
             notice: None,
             pending_delete: None,
@@ -159,18 +312,19 @@ impl ResumePicker {
             match self.handle_key(key) {
                 PickerAction::Continue => {}
                 PickerAction::Cancel => return Ok(None),
-                PickerAction::Select(index) => return Ok(Some(self.sessions[index].clone())),
+                PickerAction::Select(index) => {
+                    return Ok(Some(self.sessions[index].record.clone()));
+                }
                 PickerAction::Delete(index) => {
-                    let title = session_title(&self.sessions[index]);
-                    match delete_saved_session(&self.sessions[index]) {
+                    let title = self.sessions[index].title.clone();
+                    match delete_saved_session(&self.sessions[index].record) {
                         Ok(()) => {
                             self.sessions.remove(index);
                             self.pending_delete = None;
                             if self.sessions.is_empty() {
                                 return Ok(None);
                             }
-                            self.list_state
-                                .select(Some(index.min(self.sessions.len().saturating_sub(1))));
+                            self.select(index.min(self.sessions.len().saturating_sub(1)));
                             self.notice = Some(format!("Deleted saved session {title}."));
                         }
                         Err(error) => {
@@ -204,6 +358,14 @@ impl ResumePicker {
                 self.select((selected + 1).min(self.sessions.len().saturating_sub(1)));
                 PickerAction::Continue
             }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+                self.cycle_grid(1);
+                PickerAction::Continue
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+                self.cycle_grid(-1);
+                PickerAction::Continue
+            }
             KeyCode::Home => {
                 self.select(0);
                 PickerAction::Continue
@@ -222,9 +384,7 @@ impl ResumePicker {
             }
             KeyCode::Delete => self.request_delete(selected),
             KeyCode::Enter => {
-                if let SessionState::Open(owner_pid) =
-                    SessionState::for_record(&self.sessions[selected])
-                {
+                if let SessionState::Open(owner_pid) = self.sessions[selected].state() {
                     self.notice = Some(format!(
                         "Session is already open in PID {owner_pid}. Switch to that GridBash window or close it before resuming."
                     ));
@@ -239,13 +399,35 @@ impl ResumePicker {
 
     fn select(&mut self, index: usize) {
         self.list_state.select(Some(index));
+        self.grid_cursor = self.sessions.get(index).map(active_grid_index).unwrap_or(0);
         self.notice = None;
         self.pending_delete = None;
     }
 
+    /// Step through the selected workspace's grids, wrapping at both ends.
+    fn cycle_grid(&mut self, delta: isize) {
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        let count = entry.grids.len();
+        if count <= 1 {
+            return;
+        }
+
+        let current = self.grid_cursor.min(count - 1) as isize;
+        self.grid_cursor = (current + delta).rem_euclid(count as isize) as usize;
+        self.notice = None;
+    }
+
+    fn selected_entry(&self) -> Option<&SessionEntry> {
+        self.list_state
+            .selected()
+            .and_then(|index| self.sessions.get(index))
+    }
+
     fn request_delete(&mut self, selected: usize) -> PickerAction {
-        let record = &self.sessions[selected];
-        if let SessionState::Open(owner_pid) = SessionState::for_record(record) {
+        let entry = &self.sessions[selected];
+        if let SessionState::Open(owner_pid) = entry.state() {
             self.pending_delete = None;
             self.notice = Some(format!(
                 "Session is open in PID {owner_pid}. Close that GridBash window before deleting it."
@@ -253,12 +435,16 @@ impl ResumePicker {
             return PickerAction::Continue;
         }
 
-        if self.pending_delete.as_deref() == Some(record.session.id.as_str()) {
+        if self.pending_delete.as_deref() == Some(entry.record.session.id.as_str()) {
             return PickerAction::Delete(selected);
         }
 
-        self.pending_delete = Some(record.session.id.clone());
-        let detached = all_panes(record).any(|pane| pane.host.is_some());
+        self.pending_delete = Some(entry.record.session.id.clone());
+        let detached = entry
+            .record
+            .session
+            .all_panes()
+            .any(|pane| pane.host.is_some());
         self.notice = Some(if detached {
             "Press Delete again to stop detached terminals and permanently delete this session."
                 .into()
@@ -302,10 +488,10 @@ impl ResumePicker {
             return;
         }
 
-        let (header_height, detail_height, controls_height) = if inner.height >= 22 {
-            (3, 9, 3)
+        let (header_height, detail_height, controls_height) = if inner.height >= 24 {
+            (3, 11, 3)
         } else {
-            (2, 7, 2)
+            (2, 9, 2)
         };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -317,7 +503,7 @@ impl ResumePicker {
             ])
             .split(inner);
         self.draw_header(frame, chunks[0]);
-        self.draw_details(frame, chunks[1]);
+        self.draw_selected(frame, chunks[1]);
         self.draw_sessions(frame, chunks[2]);
         self.draw_controls(frame, chunks[3]);
     }
@@ -325,10 +511,8 @@ impl ResumePicker {
     fn draw_header(&self, frame: &mut Frame<'_>, area: Rect) {
         let selected = self.list_state.selected().unwrap_or(0) + 1;
         let selected_state = self
-            .list_state
-            .selected()
-            .and_then(|index| self.sessions.get(index))
-            .map(SessionState::for_record)
+            .selected_entry()
+            .map(SessionEntry::state)
             .unwrap_or(SessionState::Saved);
         let right_width = area.width.min(24);
         let columns = Layout::default()
@@ -342,7 +526,7 @@ impl ResumePicker {
                     Style::default().fg(SOFT_GREEN).add_modifier(Modifier::BOLD),
                 )),
                 Line::from(Span::styled(
-                    "Saved terminals, layout, and working context.",
+                    "Grid sizes, pane positions, names, and agent conversations are restored.",
                     Style::default().fg(MUTED),
                 )),
             ])
@@ -366,37 +550,39 @@ impl ResumePicker {
         }
     }
 
+    /// Details on the left, the selected grid drawn in position on the right.
+    fn draw_selected(&self, frame: &mut Frame<'_>, area: Rect) {
+        let map_width = if area.width >= 96 {
+            area.width / 2
+        } else if area.width >= 70 {
+            area.width * 2 / 5
+        } else {
+            0
+        };
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(30), Constraint::Length(map_width)])
+            .split(area);
+        self.draw_details(frame, columns[0]);
+        if map_width > 0 {
+            self.draw_grid_map(frame, columns[1]);
+        }
+    }
+
     fn draw_details(&self, frame: &mut Frame<'_>, area: Rect) {
-        let block = panel_block("SELECTED SESSION");
+        let block = panel_block("SELECTED WORKSPACE");
         let inner = inset(block.inner(area), 1, 0);
         frame.render_widget(block, area);
-        let Some(record) = self
-            .list_state
-            .selected()
-            .and_then(|index| self.sessions.get(index))
-        else {
+        let Some(entry) = self.selected_entry() else {
             return;
         };
 
-        let state = SessionState::for_record(record);
-        let session = &record.session;
-        let panes = all_panes(record).count();
-        let tabs = session.tabs.len() + 1;
-        let folders = compact_labels(all_panes(record).map(|pane| pane.folder_name.as_str()));
-        let profiles = compact_labels(all_panes(record).map(|pane| pane.profile_name.as_str()));
-        let host_count = all_panes(record).filter(|pane| pane.host.is_some()).count();
-        let resume_mode = if host_count > 0 {
-            format!(
-                "reconnect {host_count} PTY host{}",
-                if host_count == 1 { "" } else { "s" }
-            )
-        } else {
-            "recreate from snapshot".into()
-        };
-        let lines = vec![
+        let state = entry.state();
+        let grid_count = entry.grids.len();
+        let mut lines = vec![
             Line::from(vec![
                 Span::styled(
-                    session_title(record),
+                    entry.title.clone(),
                     Style::default()
                         .fg(TERMINAL_GREEN)
                         .add_modifier(Modifier::BOLD),
@@ -408,20 +594,46 @@ impl ResumePicker {
                 state.description(),
                 Style::default().fg(MUTED),
             )),
-            detail_row("SESSION ID", session.id.clone()),
+            detail_row("SESSION", entry.record.session.id.clone()),
             detail_row(
-                "WORKSPACE",
+                "GRIDS",
                 format!(
-                    "{}x{} | {panes} pane{} | {tabs} tab{} | {resume_mode}",
-                    session.grid.rows,
-                    session.grid.columns,
-                    if panes == 1 { "" } else { "s" },
-                    if tabs == 1 { "" } else { "s" },
+                    "{grid_count} | {}",
+                    if entry.grids.is_empty() {
+                        "none recorded".into()
+                    } else {
+                        entry.grid_summary()
+                    }
                 ),
             ),
-            detail_row("FOLDERS", folders.unwrap_or_else(|| "Unknown".into())),
-            detail_row("PROFILES", profiles.unwrap_or_else(|| "Unknown".into())),
+            detail_row(
+                "PANES",
+                format!(
+                    "{} | {} agent conversation{} resume",
+                    entry.pane_count,
+                    entry.resumable_count,
+                    if entry.resumable_count == 1 { "" } else { "s" },
+                ),
+            ),
+            detail_row(
+                "FOLDERS",
+                entry.folders.clone().unwrap_or_else(|| "Unknown".into()),
+            ),
+            detail_row(
+                "PROFILES",
+                entry.profiles.clone().unwrap_or_else(|| "Unknown".into()),
+            ),
         ];
+        if entry.background_count > 0 {
+            lines.push(detail_row(
+                "BACKGROUND",
+                format!(
+                    "{} pane{} kept out of the grids",
+                    entry.background_count,
+                    if entry.background_count == 1 { "" } else { "s" },
+                ),
+            ));
+        }
         frame.render_widget(
             Paragraph::new(lines)
                 .wrap(Wrap { trim: true })
@@ -430,8 +642,63 @@ impl ResumePicker {
         );
     }
 
+    /// Draw the selected grid as a map, one row of cells per grid row, so the
+    /// user can see the arrangement that will come back.
+    fn draw_grid_map(&self, frame: &mut Frame<'_>, area: Rect) {
+        let Some(entry) = self.selected_entry() else {
+            frame.render_widget(panel_block("GRID"), area);
+            return;
+        };
+        let index = self.grid_cursor.min(entry.grids.len().saturating_sub(1));
+        let Some(grid) = entry.grids.get(index) else {
+            frame.render_widget(panel_block("GRID"), area);
+            return;
+        };
+
+        let heading = format!(
+            " {} · {} · {} pane{} ",
+            grid.title,
+            grid.dimensions(),
+            grid.pane_count,
+            if grid.pane_count == 1 { "" } else { "s" },
+        );
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .title(Line::from(Span::styled(
+                heading,
+                Style::default()
+                    .fg(TERMINAL_GREEN)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .border_style(Style::default().fg(HAIRLINE))
+            .style(Style::default().bg(RAISED_BG));
+        let inner = inset(block.inner(area), 1, 0);
+        frame.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        let mut lines = grid_map_lines(grid, inner.width);
+        if entry.grids.len() > 1 {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "grid {} of {}{}",
+                    index + 1,
+                    entry.grids.len(),
+                    if grid.active { " · opens here" } else { "" }
+                ),
+                Style::default().fg(MUTED),
+            )));
+        }
+        frame.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(RAISED_BG)),
+            inner,
+        );
+    }
+
     fn draw_sessions(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        let block = panel_block("RECENT SESSIONS");
+        let block = panel_block("RECENT WORKSPACES");
         let inner = block.inner(area);
         frame.render_widget(block, area);
         self.page_size = usize::from((inner.height / 2).max(1));
@@ -439,20 +706,19 @@ impl ResumePicker {
         let items = self
             .sessions
             .iter()
-            .map(|record| {
-                let state = SessionState::for_record(record);
+            .map(|entry| {
                 ListItem::new(vec![
                     Line::from(vec![
-                        state_badge(state),
+                        state_badge(entry.state()),
                         Span::raw(" "),
                         Span::styled(
-                            session_title(record),
+                            entry.title.clone(),
                             Style::default().fg(SOFT_GREEN).add_modifier(Modifier::BOLD),
                         ),
                     ]),
                     Line::from(vec![
                         Span::styled("           ", Style::default().fg(MUTED)),
-                        Span::styled(record.summary(), Style::default().fg(MUTED)),
+                        Span::styled(entry.record.summary(), Style::default().fg(MUTED)),
                     ]),
                 ])
             })
@@ -473,8 +739,10 @@ impl ResumePicker {
             ])
         } else {
             Line::from(vec![
-                keycap("UP/DOWN or J/K"),
-                Span::styled(" NAVIGATE   ", Style::default().fg(MUTED)),
+                keycap("UP/DOWN"),
+                Span::styled(" WORKSPACE   ", Style::default().fg(MUTED)),
+                keycap("TAB"),
+                Span::styled(" GRID   ", Style::default().fg(MUTED)),
                 launch_keycap("ENTER"),
                 Span::styled(" RESUME   ", Style::default().fg(MUTED)),
                 keycap("DELETE x2"),
@@ -493,13 +761,58 @@ impl ResumePicker {
     }
 }
 
-fn all_panes(record: &SessionRecord) -> impl Iterator<Item = &crate::session::SavedPane> {
-    record
-        .session
-        .panes
-        .iter()
-        .chain(record.session.tabs.iter().flat_map(|tab| tab.panes.iter()))
-        .chain(record.session.background_panes.iter().map(|job| &job.pane))
+fn active_grid_index(entry: &SessionEntry) -> usize {
+    entry.grids.iter().position(|grid| grid.active).unwrap_or(0)
+}
+
+/// Render a grid as bracketed cells, one line per grid row. Panes whose agent
+/// conversation resumes are marked, and empty cells are drawn as empty.
+fn grid_map_lines(grid: &GridPreview, width: u16) -> Vec<Line<'static>> {
+    let columns = grid.columns.max(1);
+    // Each cell spends two characters on its brackets. A grid with many columns
+    // gets narrow cells rather than a row that runs off the panel.
+    let cell_width = usize::from(width)
+        .saturating_div(columns)
+        .saturating_sub(2)
+        .clamp(1, 18);
+
+    (0..grid.rows.max(1))
+        .map(|row| {
+            let spans = (0..columns)
+                .map(|column| {
+                    let position = row.saturating_mul(columns).saturating_add(column);
+                    match grid.cells.get(position).and_then(Option::as_ref) {
+                        Some(cell) => Span::styled(
+                            format!("[{}]", cell_text(cell, position + 1, cell_width)),
+                            Style::default().fg(if cell.resumable {
+                                TERMINAL_GREEN
+                            } else {
+                                SOFT_GREEN
+                            }),
+                        ),
+                        None => Span::styled(
+                            format!("[{}]", " ".repeat(cell_width)),
+                            Style::default().fg(HAIRLINE),
+                        ),
+                    }
+                })
+                .collect::<Vec<_>>();
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// A cell's text: its pane number, its name, and a mark when its conversation
+/// comes back. Truncated to the space the grid leaves it.
+fn cell_text(cell: &PaneCell, number: usize, width: usize) -> String {
+    let mark = if cell.resumable { RESUMABLE_MARK } else { "" };
+    let prefix = format!("{number}{mark} ");
+    let room = width.saturating_sub(prefix.chars().count());
+    let mut text = prefix;
+    text.extend(cell.label.chars().take(room));
+    let padding = width.saturating_sub(text.chars().count());
+    text.push_str(&" ".repeat(padding));
+    text.chars().take(width).collect()
 }
 
 fn session_title(record: &SessionRecord) -> String {
@@ -664,7 +977,7 @@ mod tests {
     use super::*;
     use crate::{
         profiles::Profile,
-        session::{SavedGrid, SavedPane, SavedPaneHistory, SavedSession},
+        session::{SavedGrid, SavedPane, SavedPaneHistory, SavedSession, SavedView},
     };
 
     #[test]
@@ -702,8 +1015,8 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        let details_at = rendered.find("SELECTED SESSION").expect("details panel");
-        let sessions_at = rendered.find("RECENT SESSIONS").expect("sessions panel");
+        let details_at = rendered.find("SELECTED WORKSPACE").expect("details panel");
+        let sessions_at = rendered.find("RECENT WORKSPACES").expect("sessions panel");
         assert!(
             details_at < sessions_at,
             "details should render above sessions"
@@ -712,13 +1025,89 @@ mod tests {
         assert!(rendered.contains("Fluent workspace"));
         assert!(rendered.contains("DETACHED"));
         assert!(rendered.contains("DELETE x2"));
-        assert!(!rendered.contains("01 /"));
-        assert!(!rendered.contains("02 /"));
         assert!(
             buffer
                 .content()
                 .iter()
                 .any(|cell| cell.fg == TERMINAL_GREEN)
+        );
+    }
+
+    /// The picker has to prove the arrangement survives, so it shows each grid's
+    /// saved size and draws its panes in the cells they occupied.
+    #[test]
+    fn shows_saved_grid_dimensions_and_pane_positions() {
+        let mut session = record("Fluent workspace", false, None, false).session;
+        session.title = "Main".into();
+        session.grid = SavedGrid {
+            rows: 2,
+            columns: 3,
+        };
+        session.panes = vec![
+            named_pane(0, "codex", Some("planner")),
+            named_pane(1, "claude", None),
+            named_pane(2, "git-bash", None),
+            named_pane(3, "codex", None),
+        ];
+        session.tabs = vec![SavedTab {
+            title: "api".into(),
+            grid: SavedGrid {
+                rows: 1,
+                columns: 2,
+            },
+            view: SavedView::default(),
+            panes: vec![named_pane(0, "codex", None), named_pane(1, "codex", None)],
+        }];
+        let sessions = vec![SessionRecord {
+            path: PathBuf::from("session.toml"),
+            session,
+        }];
+        let mut picker = ResumePicker::new(&sessions);
+        let backend = TestBackend::new(130, 34);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+
+        terminal
+            .draw(|frame| picker.draw(frame))
+            .expect("draw resume picker");
+        let rendered = rendered_text(&terminal);
+
+        // Both grids are named with the size they will be rebuilt at.
+        assert!(rendered.contains("Main 2x3"), "{rendered}");
+        assert!(rendered.contains("api 1x2"), "{rendered}");
+        // The active grid's map shows the user's pane name in the first cell and
+        // leaves the two unused cells of the 2x3 grid empty.
+        assert!(rendered.contains("Main · 2x3"), "{rendered}");
+        assert!(rendered.contains("planner"), "{rendered}");
+    }
+
+    /// Tab walks the saved grids so every one can be checked before resuming.
+    #[test]
+    fn tab_cycles_through_saved_grids() {
+        let mut session = record("Fluent workspace", false, None, false).session;
+        session.title = "Main".into();
+        session.tabs = vec![SavedTab {
+            title: "api".into(),
+            grid: SavedGrid {
+                rows: 1,
+                columns: 1,
+            },
+            view: SavedView::default(),
+            panes: vec![named_pane(0, "codex", None)],
+        }];
+        let sessions = vec![SessionRecord {
+            path: PathBuf::from("session.toml"),
+            session,
+        }];
+        let mut picker = ResumePicker::new(&sessions);
+        assert_eq!(picker.grid_cursor, 0);
+
+        let tab = KeyEvent::new(KeyCode::Tab, crossterm::event::KeyModifiers::NONE);
+        assert_eq!(picker.handle_key(tab), PickerAction::Continue);
+        assert_eq!(picker.grid_cursor, 1);
+        assert_eq!(picker.handle_key(tab), PickerAction::Continue);
+        assert_eq!(
+            picker.grid_cursor, 0,
+            "cycling wraps back to the first grid"
         );
     }
 
@@ -754,23 +1143,43 @@ mod tests {
         );
     }
 
-    fn record(title: &str, running: bool, owner_pid: Option<u32>, host: bool) -> SessionRecord {
-        let pane = SavedPane {
+    fn rendered_text(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+
+    fn named_pane(index: usize, profile_name: &str, name: Option<&str>) -> SavedPane {
+        let mut pane = pane(profile_name, false);
+        pane.index = index;
+        pane.name = name.map(str::to_string);
+        pane
+    }
+
+    fn pane(profile_name: &str, host: bool) -> SavedPane {
+        SavedPane {
             index: 0,
-            profile_name: "codex".into(),
+            profile_name: profile_name.into(),
             command: Profile {
-                command: "codex".into(),
+                command: profile_name.into(),
                 args: Vec::new(),
-                title: Some("Codex".into()),
+                title: Some(profile_name.into()),
                 agent_kind: None,
             },
             cwd: PathBuf::from("fluent"),
             folder_name: "fluent".into(),
+            name: None,
             worktree_name: None,
             auth_name: None,
             auth_kind: None,
+            sleeping: false,
             history: SavedPaneHistory::default(),
             codex_thread_id: None,
+            claude_session_id: None,
             host: host.then(|| crate::pane_host::PtyHostRef {
                 endpoint: "127.0.0.1:12345".into(),
                 token: "token".into(),
@@ -778,20 +1187,26 @@ mod tests {
                 codex_sqlite_home: None,
                 started_at_ms: None,
             }),
-        };
+        }
+    }
+
+    fn record(title: &str, running: bool, owner_pid: Option<u32>, host: bool) -> SessionRecord {
         SessionRecord {
             path: PathBuf::from("session.toml"),
             session: SavedSession {
-                version: 1,
+                version: 2,
                 id: "session-id".into(),
                 started_at: 1,
                 updated_at: 1,
                 title: title.into(),
+                active_tab: 0,
+                next_tab_number: 2,
                 grid: SavedGrid {
                     rows: 1,
                     columns: 1,
                 },
-                panes: vec![pane],
+                view: SavedView::default(),
+                panes: vec![pane("codex", host)],
                 background_panes: Vec::new(),
                 tabs: Vec::new(),
                 running,
