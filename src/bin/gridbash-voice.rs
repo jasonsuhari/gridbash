@@ -150,8 +150,12 @@ mod linux {
             .play()
             .context("failed to start microphone capture")?;
         loop {
-            if state.lock().expect("capture state poisoned").done {
-                break;
+            match state.lock() {
+                Ok(guard) if !guard.done => drop(guard),
+                // A poisoned lock means the capture callback panicked. Stop
+                // waiting rather than spinning on state nothing will update
+                // again; the `into_inner` below reports it.
+                Ok(_) | Err(_) => break,
             }
             thread::sleep(Duration::from_millis(25));
         }
@@ -199,6 +203,11 @@ mod linux {
         T: Sample,
         f32: FromSample<T>,
     {
+        // `chunks_exact(0)` panics, and this runs on the audio callback thread
+        // where a panic poisons the capture state.
+        if channels == 0 {
+            return;
+        }
         let Ok(mut state) = state.try_lock() else {
             return;
         };
@@ -230,9 +239,11 @@ mod linux {
         (0..output_len)
             .map(|index| {
                 let source = index as f64 * ratio;
-                let left = source.floor() as usize;
-                let right = (left + 1).min(input.len() - 1);
-                let blend = (source - left as f64) as f32;
+                // Rounding can push the scaled index one past the last sample.
+                let last = input.len().saturating_sub(1);
+                let left = (source.floor() as usize).min(last);
+                let right = left.saturating_add(1).min(last);
+                let blend = (source - left as f64).clamp(0.0, 1.0) as f32;
                 input[left] * (1.0 - blend) + input[right] * blend
             })
             .collect()

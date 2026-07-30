@@ -173,6 +173,10 @@ pub struct ResumeArgs {
     /// Resume the most recently updated session without prompting.
     #[arg(long)]
     pub latest: bool,
+
+    /// Permanently delete the selected saved session instead of resuming it.
+    #[arg(long, conflicts_with_all = ["list", "latest"])]
+    pub delete: bool,
 }
 
 #[derive(Debug, Clone, Args)]

@@ -3,8 +3,9 @@ use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    symbols::merge::MergeStrategy,
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use vt100::Cell;
 
@@ -13,16 +14,57 @@ use crate::{
         App, AssistantMessageRole, BackgroundJobState, BackgroundJobView, BackgroundJobsView,
         CloseGridConfirmationView, CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog,
         GridPalette, PaneSelection, PaneSettingsTarget, PaneSettingsView, PortInspectorView,
-        PreviousPaneView, PreviousPanesView, RenamePaneView, RenameTabView, SettingsGroup,
-        SettingsRow, SettingsTab, SettingsValueKind, TabLabel, WorkspaceAssistantView,
+        PreviousPaneView, PreviousPanesView, QuitConfirmationView, RenamePaneView, RenameTabView,
+        SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
+        WorkspaceAssistantView,
     },
     auth::{AgentKind, AuthProfile},
-    composer::GridPickerMode,
     copy_mode::{CopyCellKind, CopyModeView, TextPoint},
     image_preview::ImagePreview,
 };
 
+// ---------------------------------------------------------------------------
+// Design tokens
+//
+// One ramp, used everywhere. The chrome used to reach for `Color::DarkGray` and
+// `Color::Yellow` alongside hand-written RGB triples, which put terminal-theme
+// colours next to fixed ones — the same "grey" border landed anywhere from black
+// to near-white depending on the user's scheme, and never matched the panel it
+// framed. Everything structural is a fixed value from this ramp so the shell
+// looks the same in every terminal; only the five palette roles the user
+// actually chose stay configurable.
+// ---------------------------------------------------------------------------
+
+/// Deepest surface: the gutter behind the grid, and the dividers between panes.
+const INK: Color = Color::Rgb(7, 10, 14);
+/// The app background, and the default background of terminal cells.
 const APP_BG: Color = Color::Rgb(11, 15, 20);
+/// Raised chrome: the tab strip and the status bar.
+const SURFACE: Color = Color::Rgb(16, 22, 29);
+/// Chrome under the cursor or otherwise active.
+const SURFACE_HI: Color = Color::Rgb(26, 35, 45);
+
+/// Idle pane border. Present enough to read as a frame, quiet enough that the
+/// focused pane is the only thing on screen drawing the eye.
+const LINE: Color = Color::Rgb(42, 53, 66);
+/// Divider between two panes that are both idle.
+const LINE_SOFT: Color = Color::Rgb(30, 39, 49);
+
+const TEXT: Color = Color::Rgb(230, 237, 243);
+const TEXT_DIM: Color = Color::Rgb(150, 165, 180);
+const TEXT_FAINT: Color = Color::Rgb(98, 113, 129);
+
+/// Terminal-cell defaults, applied to any cell whose own colour is "default".
+const PANE_FG: Color = TEXT;
+const PANE_BG: Color = APP_BG;
+
+/// Mouse text selection inside a pane.
+const SELECTION_FG: Color = Color::Rgb(8, 12, 16);
+const SELECTION_BG: Color = Color::Rgb(126, 231, 235);
+
+/// A pane whose agent is waiting on the user. The one colour allowed to shout.
+const WAITING: Color = Color::Rgb(255, 196, 61);
+
 const SETTINGS_BG: Color = Color::Rgb(9, 14, 19);
 const SETTINGS_SURFACE: Color = Color::Rgb(14, 22, 29);
 const SETTINGS_ROW_ACTIVE: Color = Color::Rgb(25, 36, 44);
@@ -30,10 +72,12 @@ const SETTINGS_SHADOW: Color = Color::Rgb(4, 6, 10);
 const SETTINGS_BORDER: Color = Color::Rgb(58, 210, 210);
 const SETTINGS_MUTED: Color = Color::Rgb(118, 135, 149);
 const SETTINGS_TEXT: Color = Color::Rgb(230, 237, 243);
+const TAB_WAITING_BG: Color = WAITING;
 
 pub struct DrawState {
     pub grid_area: Rect,
     pub pane_rects: Vec<Rect>,
+    pub tab_rects: Vec<(usize, Rect)>,
     pub previous_panes_button: Option<Rect>,
     pub previous_pane_rows: Vec<(usize, Rect)>,
     pub pane_settings_button: Option<Rect>,
@@ -58,7 +102,6 @@ pub struct PaneRenderCache {
     buffer: Buffer,
 }
 
-const QUIET_MARKER: &str = " *";
 const STATUS_BRAND: &str = " GridBash ";
 const PREVIOUS_PANES_BUTTON: &str = " Panes ";
 const PANE_SETTINGS_BUTTON: &str = " Summary ";
@@ -98,6 +141,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let grid_resizer = app.grid_resizer();
     let image_overlay = app.image_overlay_view();
     let assistant_view = app.workspace_assistant_view();
+    let quit_confirmation = app.quit_confirmation_view();
     let close_grid_confirmation = app.close_grid_confirmation_view();
     let help_open = app.help_open();
     let copy_mode_open = app.copy_mode_open();
@@ -115,6 +159,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || grid_resizer.is_some()
         || image_overlay.is_some()
         || assistant_view.is_some()
+        || quit_confirmation.is_some()
         || close_grid_confirmation.is_some()
     {
         None
@@ -135,6 +180,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || grid_resizer.is_some()
         || image_overlay.is_some()
         || assistant_view.is_some()
+        || quit_confirmation.is_some()
         || close_grid_confirmation.is_some()
         || exited_recovery.is_some();
     let mut pane_settings_rename_button = None;
@@ -143,9 +189,19 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let mut pane_settings_deactivate_button = None;
     let mut pane_settings_goal_button = None;
     let mut pane_settings_stop_goal_button = None;
-    render_tabs(frame, tab_area, &app.tab_labels(), palette);
+    let tab_rects = render_tabs(frame, tab_area, &app.tab_labels(), palette);
 
-    for (index, pane) in app.panes().iter().enumerate() {
+    // Panes share the border cells that divide them, so whichever pane draws
+    // last owns the colour of the line between them. Drawing in state order lets
+    // a focused or selected pane keep an unbroken outline instead of having half
+    // of it repainted grey by the neighbour that happens to come after it.
+    let mut draw_order = (0..app.panes().len()).collect::<Vec<_>>();
+    draw_order.sort_by_cached_key(|index| pane_draw_layer(app, *index));
+
+    for index in draw_order {
+        let Some(pane) = app.panes().get(index) else {
+            continue;
+        };
         let Some(rect) = rects.get(index).copied() else {
             continue;
         };
@@ -153,45 +209,23 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             continue;
         }
 
-        let focused = app.focused_pane() == Some(index);
-        let selected = app.selected().contains(&index);
         let sleeping = app.pane_sleeping(index);
-        let quiet = app.activity_badges_enabled() && pane.output_quiet();
-        let logging = app.pane_logging(index);
-        let chrome = pane_chrome(
-            selected,
-            focused,
-            pane.exited,
-            sleeping,
-            None,
-            quiet,
-            palette,
-        );
-        let badge = if logging {
-            format!("{} logging", chrome.badge)
-        } else {
-            chrome.badge.to_string()
+        let frame_view = PaneFrame {
+            number: index + 1,
+            label: app.pane_label(index),
+            summary: app.pane_header_summary(index, rect.width as usize),
+            usage: app.pane_usage_label(index),
+            state: pane_state(app, index),
+            focused: app.focused_pane() == Some(index),
+            selected: app.selected().contains(&index),
+            logging: app.pane_logging(index),
+            compact: app.compact_titles_enabled(),
         };
 
-        let header_summary = app.pane_header_summary(index, rect.width as usize);
-        let usage = app.pane_usage_label(index);
-        let title = pane_title(
-            &app.pane_label(index),
-            chrome.quiet_marker,
-            &header_summary,
-            usage.as_deref(),
-            &badge,
-            app.compact_titles_enabled(),
-            rect.width.saturating_sub(2),
-        );
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(chrome.border_style)
-            .title(title);
-
-        let inner = block.inner(rect);
-        frame.render_widget(block, rect);
+        let inner = render_pane_frame(frame, rect, &frame_view, palette);
+        if inner.width == 0 || inner.height == 0 {
+            continue;
+        }
         if let Some(copy_mode) = app.copy_mode_view(index, inner.width, inner.height) {
             render_copy_mode(frame, inner, &copy_mode, palette);
         } else if sleeping {
@@ -201,7 +235,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             app.render_pane_screen(frame, index, inner, selection);
         }
 
-        if focused && !sleeping && !modal_open && pane.screen().scrollback() == 0 {
+        if frame_view.focused && !sleeping && !modal_open && pane.screen().scrollback() == 0 {
             set_terminal_cursor(frame, inner, pane.screen());
         }
     }
@@ -212,85 +246,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         render_shell_command_center(frame, command_center_area, app, palette);
     }
 
-    let input_scope = app.input_scope_label();
-    let previous_panes_button = previous_panes_button_rect(status_area);
-    let pane_settings_button = pane_settings_button_rect(status_area);
-    let background_jobs_button =
-        background_jobs_button_rect(status_area, app.background_job_count());
-    let ports_button = ports_button_rect(status_area, app.agent_port_count());
-    let status = Line::from(vec![
-        Span::styled(
-            STATUS_BRAND,
-            Style::default()
-                .fg(Color::Black)
-                .bg(palette.accent())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            PREVIOUS_PANES_BUTTON,
-            previous_panes_button_style(app.previous_panes_open(), palette),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            PANE_SETTINGS_BUTTON,
-            pane_settings_button_style(app.pane_settings_open(), palette),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            background_jobs_button_label(app.background_job_count()),
-            background_jobs_button_style(app.background_jobs_open(), palette),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            if app.voice_listening() {
-                "MIC"
-            } else if app.zoomed() {
-                "ZOOM"
-            } else {
-                "LIVE"
-            },
-            Style::default()
-                .fg(if app.voice_listening() {
-                    palette.accent()
-                } else {
-                    palette.focus()
-                })
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" | "),
-        Span::styled(
-            input_scope,
-            Style::default().fg(if app.command_center_open() {
-                palette.accent()
-            } else if app.selected().len() > 1 {
-                palette.selected()
-            } else {
-                Color::Gray
-            }),
-        ),
-        Span::raw(" | "),
-        Span::raw(format!("{} selected", app.selected().len())),
-        Span::raw(" | "),
-        Span::raw(app.status().to_string()),
-        Span::raw(" | F1 help | Alt+q quit fallback"),
-    ]);
-    frame.render_widget(
-        Paragraph::new(status).style(Style::default().bg(APP_BG)),
-        status_area,
-    );
-    if let Some(button) = ports_button {
-        frame.render_widget(
-            Paragraph::new(ports_button_label(app.agent_port_count()))
-                .alignment(Alignment::Center)
-                .style(ports_button_style(
-                    app.port_inspector_open(),
-                    app.agent_port_count(),
-                    palette,
-                )),
-            button,
-        );
-    }
+    let status_buttons =
+        render_status_bar(frame, status_area, &StatusBar::from_app(app), palette);
+    let previous_panes_button = status_buttons.previous_panes;
+    let pane_settings_button = status_buttons.pane_settings;
+    let background_jobs_button = status_buttons.background_jobs;
+    let ports_button = status_buttons.ports;
 
     if app.settings_open() {
         render_settings(frame, area, app, palette);
@@ -333,13 +294,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         render_exited_recovery(frame, area, recovery, palette);
     }
     if let Some(picker) = grid_resizer {
-        picker.draw(frame, GridPickerMode::Resize, None);
+        picker.draw(frame, None);
     }
     if help_open {
         render_help(frame, area, app, palette);
     }
     if let Some(view) = command_palette_view.as_ref() {
         render_command_palette(frame, area, view, palette);
+    }
+    if let Some(confirmation) = quit_confirmation.as_ref() {
+        render_quit_confirmation(frame, area, confirmation, palette);
     }
     if let Some(confirmation) = close_grid_confirmation.as_ref() {
         render_close_grid_confirmation(frame, area, confirmation, palette);
@@ -348,6 +312,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     DrawState {
         grid_area,
         pane_rects: rects,
+        tab_rects,
         previous_panes_button,
         previous_pane_rows,
         pane_settings_button,
@@ -364,115 +329,150 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
 }
 
-fn pane_title(
-    label: &str,
-    quiet_marker: &str,
-    summary: &str,
-    usage: Option<&str>,
-    badge: &str,
-    compact: bool,
-    max_width: u16,
-) -> String {
-    let max_width = max_width as usize;
-    if max_width == 0 {
-        return String::new();
-    }
-
-    let usage = if !compact && max_width >= 48 {
-        usage.filter(|value| !value.is_empty())
-    } else {
-        None
-    };
-    let summary_reserve = if summary.is_empty() {
-        0
-    } else {
-        3 + summary.chars().count().min(8)
-    };
-    let reserved = 2
-        + quiet_marker.chars().count()
-        + badge.chars().count()
-        + usage
-            .map(|value| 3 + value.chars().count())
-            .unwrap_or_default()
-        + summary_reserve;
-    let label = truncate_text(label, max_width.saturating_sub(reserved).max(1));
-    let mut parts = vec![format!("{label}{quiet_marker}{badge}")];
-    if let Some(usage) = usage {
-        parts.push(usage.to_string());
-    }
-    if !summary.is_empty() {
-        parts.push(summary.to_string());
-    }
-
-    truncate_text(&format!(" {} ", parts.join(" | ")), max_width)
-}
-
-fn render_tabs(frame: &mut Frame<'_>, area: Rect, tabs: &[TabLabel], palette: &GridPalette) {
+fn render_tabs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    tabs: &[TabLabel],
+    palette: &GridPalette,
+) -> Vec<(usize, Rect)> {
     if area.width == 0 || area.height == 0 {
-        return;
+        return Vec::new();
     }
 
-    let mut spans = vec![
-        Span::styled(
-            STATUS_BRAND,
-            Style::default()
-                .fg(Color::Black)
-                .bg(palette.accent())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-    ];
+    let mut spans = vec![Span::styled(STATUS_BRAND, brand_style(palette))];
+    let mut tab_rects = Vec::with_capacity(tabs.len());
+    let mut tab_x = area
+        .x
+        .saturating_add(u16::try_from(Line::from(STATUS_BRAND).width()).unwrap_or(u16::MAX));
+    let area_right = area.right();
 
     for (index, tab) in tabs.iter().enumerate() {
-        let marker = if tab.exited {
-            "!"
-        } else if tab.activity && !tab.active {
-            "*"
-        } else {
-            ""
-        };
-        let label = format!(
-            " {}:{}{} ",
-            index + 1,
-            truncate_text(&tab.title, 18),
-            marker
-        );
-        let style = if tab.active {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else if tab.exited {
-            Style::default().fg(palette.exited())
-        } else if tab.activity {
-            Style::default().fg(palette.quiet())
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        spans.push(Span::styled(label, style));
+        let label = tab_label(index, tab);
+        let label_width = u16::try_from(Line::from(label.as_str()).width()).unwrap_or(u16::MAX);
+        if tab_x < area_right {
+            tab_rects.push((
+                index,
+                Rect::new(
+                    tab_x,
+                    area.y,
+                    label_width.min(area_right.saturating_sub(tab_x)),
+                    1,
+                ),
+            ));
+        }
+        tab_x = tab_x.saturating_add(label_width);
+        spans.push(Span::styled(label, tab_style(tab, palette)));
     }
 
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(
-        "Alt+n new",
-        Style::default().fg(Color::DarkGray),
-    ));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(
-        "Alt+t switch",
-        Style::default().fg(Color::DarkGray),
-    ));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(
-        "Alt+Shift+r rename",
-        Style::default().fg(Color::DarkGray),
-    ));
-
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(APP_BG)),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(SURFACE)),
         area,
     );
+
+    // Hints go in whatever is left after the tabs, and only what fits. Printing
+    // all five unconditionally spent sixty columns of the most valuable row on
+    // screen restating what F1 already lists, and on a narrow terminal it pushed
+    // the tabs themselves out of view.
+    let spare = area_right.saturating_sub(tab_x);
+    if spare > 4 {
+        let hints = tab_hints(spare.saturating_sub(2));
+        if hints.width() > 0 {
+            frame.render_widget(
+                Paragraph::new(hints.right_aligned()).style(Style::default().bg(SURFACE)),
+                Rect::new(tab_x, area.y, spare, 1),
+            );
+        }
+    }
+
+    tab_rects
 }
+
+fn tab_label(index: usize, tab: &TabLabel) -> String {
+    // One glyph carries the state that used to need a `!`/`*`/`+` cipher; the
+    // rest is conveyed by colour, which needs no legend.
+    let marker = if tab.exited {
+        " !"
+    } else if tab.waiting || (tab.activity && !tab.active) {
+        " •"
+    } else {
+        ""
+    };
+    format!(
+        " {} {}{marker} ",
+        index + 1,
+        truncate_text(&tab.title, 18)
+    )
+}
+
+fn tab_style(tab: &TabLabel, palette: &GridPalette) -> Style {
+    // A grid with an agent waiting on the user outranks every other state: it is
+    // the only one that means "come here now".
+    let style = if tab.waiting {
+        Style::default()
+            .fg(INK)
+            .bg(TAB_WAITING_BG)
+            .add_modifier(Modifier::BOLD)
+    } else if tab.active {
+        Style::default()
+            .fg(INK)
+            .bg(palette.accent())
+            .add_modifier(Modifier::BOLD)
+    } else if tab.exited {
+        Style::default().fg(palette.exited()).bg(SURFACE)
+    } else if tab.activity {
+        Style::default().fg(palette.quiet()).bg(SURFACE)
+    } else {
+        Style::default().fg(TEXT_DIM).bg(SURFACE)
+    };
+
+    // Selection is a mark the user put there by hand, so it has to survive
+    // whatever the grid's own state is doing to the colours.
+    if tab.selected {
+        style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+/// Tab-strip hints, most useful first. Dropped from the end as width runs out.
+const TAB_HINTS: [(&str, &str); 5] = [
+    ("Alt+N", "new"),
+    ("Alt+T", "switch"),
+    ("Alt+Shift+R", "rename"),
+    ("Alt+Shift+S", "select"),
+    ("Alt+X", "swap"),
+];
+
+fn tab_hints(budget: u16) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+
+    for (key, action) in TAB_HINTS {
+        let width = key.chars().count() + action.chars().count() + 2;
+        if used + width > budget as usize {
+            break;
+        }
+        used += width;
+        spans.push(Span::styled(
+            key,
+            Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            format!(" {action}  "),
+            Style::default().fg(TEXT_FAINT),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+fn brand_style(palette: &GridPalette) -> Style {
+    Style::default()
+        .fg(INK)
+        .bg(palette.accent())
+        .add_modifier(Modifier::BOLD)
+}
+
 fn command_center_height(total_height: u16, open: bool, requested: u16) -> u16 {
     if !open {
         return 0;
@@ -538,11 +538,7 @@ fn render_shell_command_center(
         .collect::<Vec<_>>();
 
     frame.render_widget(
-        Paragraph::new(visible).style(
-            Style::default()
-                .fg(Color::Rgb(230, 237, 243))
-                .bg(Color::Rgb(11, 15, 20)),
-        ),
+        Paragraph::new(visible).style(Style::default().fg(TEXT).bg(APP_BG)),
         chunks[0],
     );
 
@@ -560,10 +556,10 @@ fn render_shell_command_center(
             Span::styled(
                 prompt,
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(palette.accent())
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(input, Style::default().fg(Color::White)),
+            Span::styled(input, Style::default().fg(TEXT)),
         ]))
         .style(Style::default().bg(SETTINGS_SURFACE)),
         chunks[1],
@@ -634,159 +630,546 @@ fn visible_input(input: &str, cursor_chars: usize, width: usize) -> (String, usi
     (chars[start..end].iter().collect(), cursor - start)
 }
 
-#[derive(Debug, PartialEq)]
-struct PaneChrome {
-    border_style: Style,
-    badge: &'static str,
-    quiet_marker: &'static str,
+/// The one state a pane's header names.
+///
+/// A pane is usually several of these at once — an exited pane is also quiet, a
+/// sleeping pane is also idle — so the header names the most urgent one instead
+/// of stacking badges until they crowd out the pane's own name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneState {
+    /// Producing output.
+    Live,
+    /// An agent that has stopped producing output. This is how an agent asks for
+    /// the user's attention, and in a grid full of agents it is the single most
+    /// useful thing on screen — so it is the one state allowed to shout.
+    Waiting,
+    /// Quiet, but not an agent waiting on anyone.
+    Idle,
+    Sleeping,
+    Exited,
 }
 
-fn pane_chrome(
-    selected: bool,
-    focused: bool,
-    exited: bool,
-    sleeping: bool,
-    group_color: Option<(u8, u8, u8)>,
-    quiet: bool,
-    palette: &GridPalette,
-) -> PaneChrome {
-    let border_style = if sleeping {
-        Style::default().fg(Color::Rgb(32, 36, 42))
-    } else if selected {
-        Style::default()
-            .fg(palette.selected())
-            .add_modifier(Modifier::BOLD)
-    } else if focused {
-        Style::default()
+impl PaneState {
+    fn badge(self) -> &'static str {
+        match self {
+            Self::Live => "",
+            Self::Waiting => "needs you",
+            Self::Idle => "idle",
+            Self::Sleeping => "asleep",
+            Self::Exited => "exited",
+        }
+    }
+
+    fn color(self, palette: &GridPalette) -> Color {
+        match self {
+            Self::Live => TEXT_FAINT,
+            Self::Waiting => WAITING,
+            Self::Idle => palette.quiet(),
+            Self::Sleeping => TEXT_FAINT,
+            Self::Exited => palette.exited(),
+        }
+    }
+}
+
+/// Everything the chrome around one pane draws, with nothing left to look up.
+///
+/// Keeping this separate from `App` is what lets the frame be rendered — and
+/// therefore seen and tested — without a live PTY behind it.
+#[derive(Debug, Clone)]
+pub struct PaneFrame {
+    pub number: usize,
+    pub label: String,
+    pub summary: String,
+    pub usage: Option<String>,
+    pub state: PaneState,
+    pub focused: bool,
+    pub selected: bool,
+    pub logging: bool,
+    pub compact: bool,
+}
+
+/// Which panes get to keep their outline where two panes share a border cell.
+///
+/// Higher draws later, and the last pane to touch a shared cell owns its colour.
+/// Focus outranks everything: knowing where your keystrokes are going matters
+/// more than any other signal the grid shows.
+fn pane_draw_layer(app: &App, index: usize) -> u8 {
+    if app.focused_pane() == Some(index) {
+        3
+    } else if app.selected().contains(&index) {
+        2
+    } else if pane_state(app, index) == PaneState::Waiting {
+        1
+    } else {
+        0
+    }
+}
+
+fn pane_state(app: &App, index: usize) -> PaneState {
+    let Some(pane) = app.panes().get(index) else {
+        return PaneState::Exited;
+    };
+    if pane.exited {
+        return PaneState::Exited;
+    }
+    if app.pane_sleeping(index) {
+        return PaneState::Sleeping;
+    }
+    // Both remaining states are read off the same quiet-output signal the
+    // activity-badge setting governs.
+    if !app.activity_badges_enabled() || !pane.output_quiet() {
+        return PaneState::Live;
+    }
+    if app.pane_needs_input(index) {
+        PaneState::Waiting
+    } else {
+        PaneState::Idle
+    }
+}
+
+fn pane_border_style(view: &PaneFrame, palette: &GridPalette) -> Style {
+    if view.focused {
+        return Style::default()
             .fg(palette.focus())
-            .add_modifier(Modifier::BOLD)
-    } else if exited {
-        Style::default().fg(palette.exited())
-    } else if let Some(group_color) = group_color {
+            .add_modifier(Modifier::BOLD);
+    }
+    if view.selected {
+        return Style::default()
+            .fg(palette.selected())
+            .add_modifier(Modifier::BOLD);
+    }
+
+    match view.state {
+        PaneState::Waiting => Style::default().fg(WAITING),
+        PaneState::Exited => Style::default().fg(palette.exited()),
+        PaneState::Idle => Style::default().fg(LINE),
+        PaneState::Sleeping => Style::default().fg(LINE_SOFT),
+        PaneState::Live => Style::default().fg(LINE),
+    }
+}
+
+/// The pane number, as a filled chip when the pane is focused or selected.
+///
+/// A filled chip is reserved for the two things the user chose — where input
+/// goes, and what a bulk action would hit — so it never competes with a state
+/// the pane arrived at on its own.
+fn pane_number_style(view: &PaneFrame, palette: &GridPalette) -> Style {
+    if view.focused {
+        return Style::default()
+            .fg(INK)
+            .bg(palette.focus())
+            .add_modifier(Modifier::BOLD);
+    }
+    if view.selected {
+        return Style::default()
+            .fg(INK)
+            .bg(palette.selected())
+            .add_modifier(Modifier::BOLD);
+    }
+
+    Style::default()
+        .fg(view.state.color(palette))
+        .add_modifier(Modifier::BOLD)
+}
+
+/// Draws a pane's frame and returns the area left for its terminal.
+fn render_pane_frame(
+    frame: &mut Frame<'_>,
+    rect: Rect,
+    view: &PaneFrame,
+    palette: &GridPalette,
+) -> Rect {
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pane_border_style(view, palette))
+        // Panes are laid out overlapping by one cell, so each shared cell is
+        // drawn twice. Merging resolves the pair into a single line with the
+        // junction glyph the crossing actually calls for.
+        .merge_borders(MergeStrategy::Exact)
+        .style(Style::default().bg(APP_BG));
+
+    // Below about eight columns a header is all truncation and no information,
+    // and the number alone tells the user more than a sliced-up word would.
+    if rect.width >= 8 {
+        let budget = rect.width.saturating_sub(2);
+        // The state is reserved out of the budget before the name and summary
+        // are measured, rather than fitted around them afterwards. A pane whose
+        // agent is waiting has to say so at every width — that signal is the
+        // whole reason to look at a grid of nine panes — and sizing it last is
+        // what made it the first thing a narrow header dropped.
+        let trailing = pane_header_trailing(view, palette, rect.width);
+        let trailing_width = trailing.width() as u16;
+        // The two titles are drawn independently, one from each end, so the
+        // state only goes up if the number it would sit beside still fits too.
+        // Without that floor a narrow pane draws both and they overlap.
+        let fits = trailing_width > 0 && pane_number_width(view) + trailing_width <= budget;
+        let leading = pane_header_leading(
+            view,
+            palette,
+            if fits { budget - trailing_width } else { budget },
+        );
+        if fits {
+            block = block.title_top(trailing.right_aligned());
+        }
+        block = block.title_top(leading);
+    }
+
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    inner
+}
+
+/// Width of the pane-number chip, which is the one part of a header that is
+/// never dropped — it is how the user names a pane to a keyboard shortcut.
+fn pane_number_width(view: &PaneFrame) -> u16 {
+    // Panes are capped well below four digits, so this cannot overflow.
+    view.number.to_string().chars().count() as u16 + 2
+}
+
+/// The pane's identity, fitted to whatever the state left behind.
+///
+/// Every piece is measured against the running total, so the line never exceeds
+/// `budget` — which is what lets the caller reserve the state's width up front
+/// and trust that it still fits.
+fn pane_header_leading(view: &PaneFrame, palette: &GridPalette, budget: u16) -> Line<'static> {
+    let budget = budget as usize;
+    let number = format!(" {} ", view.number);
+    let mut used = number.chars().count();
+    let mut spans = vec![Span::styled(number, pane_number_style(view, palette))];
+    if used >= budget {
+        return Line::from(spans);
+    }
+
+    // The name is how the user tells one pane from another, so it is the last
+    // thing to go.
+    let label = truncate_text(&view.label, budget - used - 1);
+    if !label.is_empty() {
+        used += label.chars().count() + 1;
+        spans.push(Span::styled(
+            format!("{label} "),
+            if view.focused {
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT_DIM)
+            },
+        ));
+    }
+
+    // The activity summary is the header's least urgent text: useful to read,
+    // never needed to act. It appears only once everything else is safely on
+    // screen, and only if enough of it survives to still mean something.
+    let summary_budget = budget.saturating_sub(used + 3);
+    if !view.compact && !view.summary.is_empty() && summary_budget >= 6 {
+        let summary = truncate_text(&view.summary, summary_budget);
+        spans.push(Span::styled(
+            format!("· {summary} "),
+            Style::default().fg(TEXT_FAINT),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+/// The width below which a pane's header has no room for its usage figure.
+///
+/// Usage is reference material — you go looking for it. Below this the header is
+/// down to the pane's name and its state, and spending a third of a narrow
+/// header on a quota reading buys nothing.
+const USAGE_HEADER_WIDTH: u16 = 48;
+
+fn pane_header_trailing(view: &PaneFrame, palette: &GridPalette, width: u16) -> Line<'static> {
+    let mut spans = Vec::new();
+
+    if view.logging {
+        spans.push(Span::styled(
+            "rec ",
+            Style::default()
+                .fg(palette.accent())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(usage) = view.usage.as_deref().filter(|usage| !usage.is_empty())
+        && !view.compact
+        && width >= USAGE_HEADER_WIDTH
+    {
+        spans.push(Span::styled(
+            format!("{usage} "),
+            Style::default().fg(TEXT_FAINT),
+        ));
+    }
+
+    let badge = view.state.badge();
+    if !badge.is_empty() {
+        let mut style = Style::default().fg(view.state.color(palette));
+        if view.state == PaneState::Waiting {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        spans.push(Span::styled(format!("{badge} "), style));
+    }
+
+    // Right-aligned text lands flush against the border rule that fills the rest
+    // of the header, so it needs a gap of its own to read as a separate thing.
+    if !spans.is_empty() {
+        spans.insert(0, Span::raw(" "));
+    }
+
+    Line::from(spans)
+}
+
+/// Where the status bar's clickable chips ended up.
+#[derive(Debug, Clone, Copy, Default)]
+struct StatusButtons {
+    previous_panes: Option<Rect>,
+    pane_settings: Option<Rect>,
+    background_jobs: Option<Rect>,
+    ports: Option<Rect>,
+}
+
+/// Everything the status bar draws, with nothing left to look up.
+///
+/// Like `PaneFrame`, this exists so the bar can be rendered without a live
+/// `App` behind it. That is not only convenience: `App::new` starts the agent
+/// control server, so building one just to read a handful of booleans leaves a
+/// bound port and a listener thread behind for the rest of the process.
+#[derive(Debug, Clone, Default)]
+pub struct StatusBar {
+    pub previous_panes_open: bool,
+    pub pane_settings_open: bool,
+    pub background_jobs_open: bool,
+    pub port_inspector_open: bool,
+    pub background_jobs: usize,
+    pub ports: usize,
+    pub voice_listening: bool,
+    pub zoomed: bool,
+    pub command_center_open: bool,
+    pub input_scope: &'static str,
+    pub selected_panes: usize,
+    pub selected_grids: usize,
+    pub status: String,
+}
+
+impl StatusBar {
+    fn from_app(app: &App) -> Self {
+        Self {
+            previous_panes_open: app.previous_panes_open(),
+            pane_settings_open: app.pane_settings_open(),
+            background_jobs_open: app.background_jobs_open(),
+            port_inspector_open: app.port_inspector_open(),
+            background_jobs: app.background_job_count(),
+            ports: app.agent_port_count(),
+            voice_listening: app.voice_listening(),
+            zoomed: app.zoomed(),
+            command_center_open: app.command_center_open(),
+            input_scope: app.input_scope_label(),
+            selected_panes: app.selected().len(),
+            selected_grids: app.selected_grid_count(),
+            status: app.status().to_string(),
+        }
+    }
+
+    fn mode(&self) -> &'static str {
+        if self.voice_listening {
+            "MIC"
+        } else if self.zoomed {
+            "ZOOM"
+        } else {
+            "LIVE"
+        }
+    }
+
+    /// The selection count, or nothing at all when nothing is selected.
+    ///
+    /// "0 panes selected" used to sit on screen permanently, reporting that the
+    /// normal state was the normal state.
+    fn selection_summary(&self) -> Option<String> {
+        match (self.selected_panes, self.selected_grids) {
+            (0, 0) => None,
+            (panes, 0) => Some(format!("{panes} selected")),
+            (0, grids) => Some(format!("{grids} grids selected")),
+            (panes, grids) => Some(format!("{panes} panes, {grids} grids selected")),
+        }
+    }
+}
+
+/// Draws the status bar and reports where its chips landed.
+///
+/// The chip rects used to be derived a second time by a set of functions that
+/// re-added the same string lengths the renderer had just laid out by hand. Two
+/// copies of one layout is one copy too many: renaming a button moved it on
+/// screen without moving the thing the mouse hit. Laying out once and returning
+/// the rects makes that class of bug unrepresentable.
+fn render_status_bar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &StatusBar,
+    palette: &GridPalette,
+) -> StatusButtons {
+    if area.width == 0 || area.height == 0 {
+        return StatusButtons::default();
+    }
+
+    frame.render_widget(
+        Paragraph::new("").style(Style::default().bg(SURFACE)),
+        area,
+    );
+
+    let mut buttons = StatusButtons::default();
+    let mut spans = vec![Span::styled(STATUS_BRAND, brand_style(palette))];
+    let mut cursor = area.x.saturating_add(STATUS_BRAND.chars().count() as u16);
+
+    let chip = |spans: &mut Vec<Span<'static>>,
+                    cursor: &mut u16,
+                    label: String,
+                    style: Style|
+     -> Option<Rect> {
+        let width = label.chars().count() as u16;
+        let rect = (*cursor < area.right()).then(|| {
+            Rect::new(
+                *cursor,
+                area.y,
+                width.min(area.right().saturating_sub(*cursor)),
+                1,
+            )
+        });
+        *cursor = cursor.saturating_add(width);
+        spans.push(Span::styled(label, style));
+        rect
+    };
+
+    buttons.previous_panes = chip(
+        &mut spans,
+        &mut cursor,
+        PREVIOUS_PANES_BUTTON.to_string(),
+        chip_style(view.previous_panes_open, palette.focus()),
+    );
+    spans.push(Span::raw(" "));
+    cursor = cursor.saturating_add(1);
+    buttons.pane_settings = chip(
+        &mut spans,
+        &mut cursor,
+        PANE_SETTINGS_BUTTON.to_string(),
+        chip_style(view.pane_settings_open, palette.focus()),
+    );
+    spans.push(Span::raw(" "));
+    cursor = cursor.saturating_add(1);
+    buttons.background_jobs = chip(
+        &mut spans,
+        &mut cursor,
+        background_jobs_button_label(view.background_jobs),
+        if view.background_jobs > 0 {
+            chip_style(view.background_jobs_open, palette.accent())
+        } else {
+            quiet_chip_style(view.background_jobs_open)
+        },
+    );
+
+    // Everything past the chips is read, not clicked, so it is styled as a
+    // sentence rather than as more buttons: mode, then what typing will reach,
+    // then the last thing that happened.
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        view.mode(),
         Style::default()
-            .fg(rgb_color(group_color))
-            .add_modifier(Modifier::BOLD)
-    } else if quiet {
-        Style::default().fg(palette.quiet())
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-
-    let badge = if exited {
-        " exited"
-    } else if sleeping {
-        " asleep"
-    } else if selected {
-        " selected"
-    } else {
-        ""
-    };
-    let quiet_marker = if quiet && !exited && !sleeping {
-        QUIET_MARKER
-    } else {
-        ""
-    };
-
-    PaneChrome {
-        border_style,
-        badge,
-        quiet_marker,
+            .fg(if view.voice_listening {
+                palette.accent()
+            } else {
+                palette.focus()
+            })
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        format!("  {}", view.input_scope),
+        Style::default().fg(if view.command_center_open {
+            palette.accent()
+        } else if view.selected_panes > 1 {
+            palette.selected()
+        } else {
+            TEXT_DIM
+        }),
+    ));
+    if let Some(selection) = view.selection_summary() {
+        spans.push(Span::styled(
+            format!("  {selection}"),
+            Style::default().fg(palette.selected()),
+        ));
     }
+    // The ports chip is anchored to the right edge, so the left side is drawn
+    // into what is left over rather than across the whole bar. Rendering both
+    // over the full width let a long status message run underneath the chip and
+    // get overwritten.
+    buttons.ports = ports_button_rect(area, view.ports);
+    let text_area = Rect {
+        width: buttons
+            .ports
+            .map_or(area.width, |chip| chip.x.saturating_sub(area.x + 1)),
+        ..area
+    };
+
+    // Status messages are sentences and routinely outrun the bar. Trimming to
+    // what is left over ends them in an ellipsis rather than mid-word, so a cut
+    // message reads as cut rather than as a typo.
+    if !view.status.is_empty() {
+        let used = spans.iter().map(Span::width).sum::<usize>();
+        let room = (text_area.width as usize).saturating_sub(used + 2);
+        if room >= 4 {
+            spans.push(Span::styled(
+                format!("  {}", truncate_text(&view.status, room)),
+                Style::default().fg(TEXT_FAINT),
+            ));
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(SURFACE)),
+        text_area,
+    );
+
+    if let Some(button) = buttons.ports {
+        frame.render_widget(
+            Paragraph::new(ports_button_label(view.ports))
+                .alignment(Alignment::Center)
+                .style(if view.ports > 0 {
+                    chip_style(view.port_inspector_open, palette.accent())
+                } else {
+                    quiet_chip_style(view.port_inspector_open)
+                }),
+            button,
+        );
+    }
+
+    buttons
 }
 
-fn previous_panes_button_rect(status_area: Rect) -> Option<Rect> {
-    let offset = STATUS_BRAND.len() as u16 + 1;
-    let width = PREVIOUS_PANES_BUTTON.len() as u16;
-    if status_area.height == 0 || status_area.width < offset.saturating_add(width) {
-        return None;
-    }
-
-    Some(Rect {
-        x: status_area.x.saturating_add(offset),
-        y: status_area.y,
-        width,
-        height: 1,
-    })
-}
-
-fn previous_panes_button_style(open: bool, palette: &GridPalette) -> Style {
+/// A chip the user can click. Filled when its panel is open, so the status bar
+/// always says which overlay is up without the user having to look at it.
+fn chip_style(open: bool, color: Color) -> Style {
     if open {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
+            .fg(INK)
+            .bg(WAITING)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
-            .fg(Color::Black)
-            .bg(palette.focus())
+            .fg(INK)
+            .bg(color)
             .add_modifier(Modifier::BOLD)
     }
 }
 
-fn pane_settings_button_rect(status_area: Rect) -> Option<Rect> {
-    let offset = STATUS_BRAND.len() as u16 + 1 + PREVIOUS_PANES_BUTTON.len() as u16 + 1;
-    let width = PANE_SETTINGS_BUTTON.len() as u16;
-    if status_area.height == 0 || status_area.width < offset.saturating_add(width) {
-        return None;
-    }
-
-    Some(Rect {
-        x: status_area.x.saturating_add(offset),
-        y: status_area.y,
-        width,
-        height: 1,
-    })
-}
-
-fn pane_settings_button_style(open: bool, palette: &GridPalette) -> Style {
+/// A chip with nothing behind it. Still clickable, but it has no business
+/// drawing the eye when the count it carries is zero.
+fn quiet_chip_style(open: bool) -> Style {
     if open {
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
+            .fg(INK)
+            .bg(WAITING)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default()
-            .fg(Color::Black)
-            .bg(palette.focus())
-            .add_modifier(Modifier::BOLD)
+        Style::default().fg(TEXT_FAINT).bg(SURFACE_HI)
     }
 }
 
 fn background_jobs_button_label(count: usize) -> String {
     format!(" BG {count} ")
-}
-
-fn background_jobs_button_rect(status_area: Rect, count: usize) -> Option<Rect> {
-    let offset = STATUS_BRAND.len() as u16
-        + 1
-        + PREVIOUS_PANES_BUTTON.len() as u16
-        + 1
-        + PANE_SETTINGS_BUTTON.len() as u16
-        + 1;
-    let width = background_jobs_button_label(count).len() as u16;
-    if status_area.height == 0 || status_area.width < offset.saturating_add(width) {
-        return None;
-    }
-
-    Some(Rect {
-        x: status_area.x.saturating_add(offset),
-        y: status_area.y,
-        width,
-        height: 1,
-    })
-}
-
-fn background_jobs_button_style(open: bool, palette: &GridPalette) -> Style {
-    if open {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(palette.accent())
-            .add_modifier(Modifier::BOLD)
-    }
 }
 
 fn ports_button_label(count: usize) -> String {
@@ -804,25 +1187,6 @@ fn ports_button_rect(status_area: Rect, count: usize) -> Option<Rect> {
         width,
         height: 1,
     })
-}
-
-fn ports_button_style(open: bool, count: usize, palette: &GridPalette) -> Style {
-    if open {
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else if count > 0 {
-        Style::default()
-            .fg(Color::Black)
-            .bg(palette.accent())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(Color::DarkGray)
-            .bg(APP_BG)
-            .add_modifier(Modifier::BOLD)
-    }
 }
 
 fn render_pane_settings(
@@ -1808,6 +2172,7 @@ fn render_port_inspector(
     let modal = previous_panes_modal_rect(area, view.ports.len().max(1));
     let shadow = settings_shadow_rect(area, modal);
     let mut row_hits = Vec::new();
+
     if shadow != modal {
         frame.render_widget(Clear, shadow);
         frame.render_widget(
@@ -2514,6 +2879,125 @@ fn render_follow_up_dialog(frame: &mut Frame<'_>, area: Rect, dialog: &FollowUpD
     frame.render_widget(block, modal);
     frame.render_widget(
         Paragraph::new(follow_up_lines(dialog, inner.width)).style(settings_panel_style()),
+        inner,
+    );
+}
+
+fn render_quit_confirmation(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    confirmation: &QuitConfirmationView,
+    palette: &GridPalette,
+) {
+    let modal = quit_confirmation_modal_rect(area);
+    let shadow = settings_shadow_rect(area, modal);
+
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+
+    frame.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.accent())
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" Quit GridBash? ")
+        .title_bottom(" Alt+Q confirms | Any other key cancels ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let behavior = if confirmation.keeps_terminals_running {
+        "Your exact workspace has been saved. Live terminals will stay running."
+    } else {
+        "Your exact workspace has been saved. Pane processes will close with GridBash."
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(behavior, Style::default().fg(SETTINGS_TEXT))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Resume this setup directly with:",
+            Style::default().fg(SETTINGS_MUTED),
+        )),
+        Line::from(Span::styled(
+            confirmation.resume_command.clone(),
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines).style(settings_panel_style()), inner);
+}
+
+fn render_close_grid_confirmation(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    confirmation: &CloseGridConfirmationView,
+    palette: &GridPalette,
+) {
+    let modal = close_grid_confirmation_modal_rect(area);
+    let shadow = settings_shadow_rect(area, modal);
+
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+
+    frame.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.exited())
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" Close current grid? ")
+        .title_bottom(" Enter / Y closes | Esc / N cancels ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let pane_label = if confirmation.pane_count == 1 {
+        "pane"
+    } else {
+        "panes"
+    };
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(
+                "Close \"{}\" and terminate {} {pane_label}?",
+                confirmation.title, confirmation.pane_count
+            ),
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Every visible process in this grid will stop.",
+            Style::default().fg(SETTINGS_TEXT),
+        )),
+        Line::from(Span::styled(
+            "Managed worktrees and branches will stay on disk.",
+            Style::default().fg(SETTINGS_MUTED),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .style(settings_panel_style()),
         inner,
     );
 }
@@ -3544,71 +4028,6 @@ fn render_command_palette(
     frame.set_cursor_position((cursor_x, inner.y));
 }
 
-fn render_close_grid_confirmation(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    confirmation: &CloseGridConfirmationView,
-    palette: &GridPalette,
-) {
-    let modal = close_grid_confirmation_modal_rect(area);
-    let shadow = settings_shadow_rect(area, modal);
-
-    if shadow != modal {
-        frame.render_widget(Clear, shadow);
-        frame.render_widget(
-            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
-            shadow,
-        );
-    }
-
-    frame.render_widget(Clear, modal);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(palette.exited())
-                .add_modifier(Modifier::BOLD),
-        )
-        .style(settings_panel_style())
-        .title(" Close current grid? ")
-        .title_bottom(" Enter / Y closes | Esc / N cancels ");
-    let inner = block.inner(modal);
-    frame.render_widget(block, modal);
-
-    let pane_label = if confirmation.pane_count == 1 {
-        "pane"
-    } else {
-        "panes"
-    };
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            format!(
-                "Close \"{}\" and terminate {} {pane_label}?",
-                confirmation.title, confirmation.pane_count
-            ),
-            Style::default()
-                .fg(palette.focus())
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Every visible process in this grid will stop.",
-            Style::default().fg(SETTINGS_TEXT),
-        )),
-        Line::from(Span::styled(
-            "Managed worktrees and branches will stay on disk.",
-            Style::default().fg(SETTINGS_MUTED),
-        )),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: true })
-            .style(settings_panel_style()),
-        inner,
-    );
-}
-
 fn help_control(key: &str, action: &str, width: usize) -> String {
     truncate_text(&format!("{key:<13} {action}"), width)
 }
@@ -3699,6 +4118,22 @@ fn follow_up_modal_rect(area: Rect) -> Rect {
         .height
         .saturating_sub(2)
         .min(12)
+        .max(area.height.min(1));
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn quit_confirmation_modal_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(4).min(78).max(area.width.min(1));
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(10)
         .max(area.height.min(1));
 
     Rect {
@@ -3814,13 +4249,20 @@ fn render_sleeping_screen(frame: &mut Frame<'_>, area: Rect) {
         return;
     }
 
-    let style = Style::default().fg(Color::Black).bg(Color::Black);
+    // A shade below the app background rather than pure black. A sleeping pane
+    // should read as dormant, not as a hole cut in the grid — and on a terminal
+    // whose own background is not black, a black rectangle is exactly that.
+    let style = Style::default().fg(INK).bg(INK);
     let buffer = frame.buffer_mut();
+    // Indexing a `Buffer` outside its area panics, so clip first and still take
+    // the `Option` path: a pane rect can outlive the frame it was measured in.
+    let area = area.intersection(buffer.area);
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            let cell = &mut buffer[(x, y)];
-            cell.reset();
-            cell.set_style(style);
+            if let Some(cell) = buffer.cell_mut((x, y)) {
+                cell.reset();
+                cell.set_style(style);
+            }
         }
     }
 }
@@ -3852,7 +4294,7 @@ fn render_copy_mode(frame: &mut Frame<'_>, area: Rect, view: &CopyModeView, pale
         ..area
     };
     let footer = Rect {
-        y: area.y + body.height,
+        y: area.y.saturating_add(body.height),
         height: footer_height,
         ..area
     };
@@ -3860,44 +4302,53 @@ fn render_copy_mode(frame: &mut Frame<'_>, area: Rect, view: &CopyModeView, pale
         .rows
         .iter()
         .map(|row| {
-            let spans = row
-                .text
-                .chars()
-                .enumerate()
-                .map(|(offset, ch)| {
-                    let point = TextPoint {
-                        line: row.line,
-                        column: view.left_column + offset,
-                    };
-                    let style = match view.cell_kind(point) {
-                        CopyCellKind::Normal => {
-                            Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)
-                        }
-                        CopyCellKind::Match => Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::DarkGray)
-                            .add_modifier(Modifier::BOLD),
-                        CopyCellKind::ActiveMatch => Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                        CopyCellKind::Selection => Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::LightCyan)
-                            .add_modifier(Modifier::BOLD),
-                        CopyCellKind::Cursor => Style::default()
-                            .fg(Color::Black)
-                            .bg(palette.focus())
-                            .add_modifier(Modifier::BOLD),
-                    };
-                    Span::styled(ch.to_string(), style)
-                })
-                .collect::<Vec<_>>();
+            // Coalesce runs of equally styled characters. Rendering is
+            // unchanged, but a full-width row costs a handful of spans instead
+            // of one heap-allocated `Span` per character, every frame.
+            let mut spans = Vec::new();
+            let mut current_style: Option<Style> = None;
+            let mut current_text = String::new();
+            for (offset, ch) in row.text.chars().enumerate() {
+                let point = TextPoint {
+                    line: row.line,
+                    column: view.left_column + offset,
+                };
+                let style = match view.cell_kind(point) {
+                    CopyCellKind::Normal => Style::default().fg(TEXT).bg(APP_BG),
+                    // Every match is highlighted, so the one the cursor is on
+                    // has to be the brighter of the two or "next match" gives no
+                    // feedback.
+                    CopyCellKind::Match => Style::default()
+                        .fg(TEXT)
+                        .bg(SURFACE_HI)
+                        .add_modifier(Modifier::BOLD),
+                    CopyCellKind::ActiveMatch => Style::default()
+                        .fg(INK)
+                        .bg(WAITING)
+                        .add_modifier(Modifier::BOLD),
+                    CopyCellKind::Selection => Style::default()
+                        .fg(SELECTION_FG)
+                        .bg(SELECTION_BG)
+                        .add_modifier(Modifier::BOLD),
+                    CopyCellKind::Cursor => Style::default()
+                        .fg(INK)
+                        .bg(palette.focus())
+                        .add_modifier(Modifier::BOLD),
+                };
+                if current_style.is_some_and(|active| active == style) {
+                    current_text.push(ch);
+                    continue;
+                }
+                flush_span(&mut spans, &mut current_style, &mut current_text);
+                current_style = Some(style);
+                current_text.push(ch);
+            }
+            flush_span(&mut spans, &mut current_style, &mut current_text);
             Line::from(spans)
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).style(Style::default().fg(Color::White).bg(APP_BG)),
+        Paragraph::new(lines).style(Style::default().fg(TEXT).bg(APP_BG)),
         body,
     );
 
@@ -3934,7 +4385,7 @@ fn render_copy_mode(frame: &mut Frame<'_>, area: Rect, view: &CopyModeView, pale
         frame.render_widget(
             Paragraph::new(truncate_text(&label, footer.width as usize)).style(
                 Style::default()
-                    .fg(Color::Black)
+                    .fg(INK)
                     .bg(palette.focus())
                     .add_modifier(Modifier::BOLD),
             ),
@@ -3959,21 +4410,17 @@ fn refresh_screen_cache(
         return;
     }
 
-    let lines = (0..height)
-        .map(|row| render_screen_row(screen, row, width, selection))
-        .collect::<Vec<_>>();
     let area = Rect::new(0, 0, width, height);
-    let mut buffer = Buffer::empty(area);
-    Widget::render(
-        Paragraph::new(lines).style(Style::default().fg(Color::Rgb(230, 237, 243)).bg(APP_BG)),
-        area,
-        &mut buffer,
-    );
+    // Reuse the cached allocation instead of building a fresh pane-sized buffer
+    // on every screen revision, which for an active pane is once per frame.
+    if cache.buffer.area != area {
+        cache.buffer.resize(area);
+    }
+    rasterize_screen(&mut cache.buffer, screen, selection);
     cache.revision = revision;
     cache.width = width;
     cache.height = height;
     cache.selection = selection;
-    cache.buffer = buffer;
 }
 
 /// Copy a cached pane buffer into the frame at `area`.
@@ -4012,65 +4459,185 @@ fn blit_buffer(source: &Buffer, target: &mut Buffer, area: Rect) {
     }
 }
 
-fn render_screen_row<'a>(
-    screen: &vt100::Screen,
-    row: u16,
-    width: u16,
-    selection: Option<PaneSelection>,
-) -> Line<'a> {
-    let mut spans = Vec::new();
-    let mut current_style: Option<Style> = None;
-    let mut current_text = String::new();
+/// Writes a terminal screen straight into buffer cells.
+///
+/// Terminal cells already *are* cells. The path this replaced turned every row
+/// into a `Line` of `Span`s — a heap `String` per style run and a `Vec` per row —
+/// then handed the pane to `Paragraph`, which re-segmented each row into
+/// graphemes and re-measured their widths to lay out text that was already laid
+/// out on a grid. For a pane producing output that ran once per frame. Copying
+/// cell to cell skips the whole text layer and allocates nothing.
+///
+/// Every cell in `buffer` is written, so the caller does not clear it first. That
+/// matters: keeping the previous frame's cells lets the symbol comparison below
+/// skip the write for the cells that did not change, which in a terminal is most
+/// of them.
+fn rasterize_screen(buffer: &mut Buffer, screen: &vt100::Screen, selection: Option<PaneSelection>) {
+    let width = buffer.area.width;
+    let height = buffer.area.height;
+    let stride = width as usize;
+    let mut colors = ColorMemo::default();
 
-    for column in 0..width {
-        let Some(cell) = screen.cell(row, column) else {
-            push_cell_text(
-                &mut spans,
-                &mut current_style,
-                &mut current_text,
-                selection_style(Style::default(), selection, row, column),
-                " ",
-            );
-            continue;
-        };
+    for row in 0..height {
+        let base = row as usize * stride;
+        let mut column = 0;
+        while column < width {
+            let source = screen.cell(row, column);
+            // vt100 stores a wide character as a cell holding both columns'
+            // worth of content plus a contentless continuation cell. Ratatui
+            // wants the symbol on the lead cell and a blank behind it, so the
+            // pair is emitted together and the continuation column skipped.
+            let wide = source.is_some_and(|cell| cell.is_wide()) && column + 1 < width;
+            let (symbol, style) = match source {
+                // A continuation cell reached on its own means its lead was
+                // clipped away; it has no content of its own to show.
+                Some(cell) if cell.is_wide_continuation() => (" ", colors.style_for(cell)),
+                Some(cell) => {
+                    let symbol = match cell.has_contents() {
+                        // A wide glyph in the last column has nowhere to put its
+                        // second half. Emitting it would let the terminal spill
+                        // it over whatever the blit puts to the right.
+                        true if cell.is_wide() && !wide => " ",
+                        true => cell.contents(),
+                        false => " ",
+                    };
+                    (symbol, colors.style_for(cell))
+                }
+                None => (" ", CellStyle::default()),
+            };
+            let style = style.with_selection(selection, row, column);
 
-        if cell.is_wide_continuation() {
-            continue;
+            if let Some(target) = buffer.content.get_mut(base + column as usize) {
+                style.apply(target, symbol);
+            }
+            if wide {
+                if let Some(trailing) = buffer.content.get_mut(base + column as usize + 1) {
+                    // Ratatui's diff assumes a wide symbol is followed by a blank
+                    // and skips that column; anything else would be printed over
+                    // the second half of the glyph.
+                    style.apply(trailing, " ");
+                }
+                column += 2;
+            } else {
+                column += 1;
+            }
         }
-
-        let text = if cell.has_contents() {
-            cell.contents()
-        } else {
-            " "
-        };
-        push_cell_text(
-            &mut spans,
-            &mut current_style,
-            &mut current_text,
-            selection_style(cell_style(cell), selection, row, column),
-            text,
-        );
     }
-
-    flush_span(&mut spans, &mut current_style, &mut current_text);
-    Line::from(spans)
 }
 
-fn push_cell_text<'a>(
-    spans: &mut Vec<Span<'a>>,
-    current_style: &mut Option<Style>,
-    current_text: &mut String,
-    style: Style,
-    text: &str,
-) {
-    if current_style.is_some_and(|active| active == style) {
-        current_text.push_str(text);
-        return;
+/// A terminal cell's appearance, in the form a buffer cell actually stores.
+///
+/// Deliberately not a `Style`: a `Style` carries `Option` colours and an
+/// add/remove modifier pair, and patching one onto a cell that persists between
+/// frames leaves last frame's modifiers set. These three fields are assigned, so
+/// dropping bold is as reliable as adding it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CellStyle {
+    fg: Color,
+    bg: Color,
+    modifier: Modifier,
+}
+
+impl Default for CellStyle {
+    fn default() -> Self {
+        Self {
+            fg: PANE_FG,
+            bg: PANE_BG,
+            modifier: Modifier::empty(),
+        }
+    }
+}
+
+impl CellStyle {
+    fn with_selection(self, selection: Option<PaneSelection>, row: u16, column: u16) -> Self {
+        if selection.is_some_and(|selection| selection.contains(row, column)) {
+            Self {
+                fg: SELECTION_FG,
+                bg: SELECTION_BG,
+                modifier: self.modifier | Modifier::BOLD,
+            }
+        } else {
+            self
+        }
     }
 
-    flush_span(spans, current_style, current_text);
-    *current_style = Some(style);
-    current_text.push_str(text);
+    fn apply(self, target: &mut ratatui::buffer::Cell, symbol: &str) {
+        // Building a `CompactString` is the most expensive part of writing a
+        // cell, and in terminal output the symbol is usually the one already
+        // there.
+        if target.symbol() != symbol {
+            target.set_symbol(symbol);
+        }
+        target.fg = self.fg;
+        target.bg = self.bg;
+        target.modifier = self.modifier;
+    }
+}
+
+/// Remembers the last colour pair translated out of vt100.
+///
+/// Styled output arrives in runs — a word, usually a whole line, shares one
+/// colour pair — so this turns the palette lookup for almost every cell into two
+/// comparisons. The keys start at vt100's own default, which is what an untouched
+/// screen is full of.
+#[derive(Debug, Clone, Copy)]
+struct ColorMemo {
+    fg_key: vt100::Color,
+    bg_key: vt100::Color,
+    fg: Color,
+    bg: Color,
+}
+
+impl Default for ColorMemo {
+    fn default() -> Self {
+        // There is no "nothing remembered yet" state to guard against: vt100's
+        // default colour maps to the pane defaults, so seeding the memo with
+        // that pair starts it already correct for an untouched screen.
+        Self {
+            fg_key: vt100::Color::Default,
+            bg_key: vt100::Color::Default,
+            fg: PANE_FG,
+            bg: PANE_BG,
+        }
+    }
+}
+
+impl ColorMemo {
+    fn style_for(&mut self, cell: &Cell) -> CellStyle {
+        let fg_key = cell.fgcolor();
+        if self.fg_key != fg_key {
+            self.fg_key = fg_key;
+            self.fg = vt_color(fg_key, PANE_FG);
+        }
+        let bg_key = cell.bgcolor();
+        if self.bg_key != bg_key {
+            self.bg_key = bg_key;
+            self.bg = vt_color(bg_key, PANE_BG);
+        }
+
+        let mut modifier = Modifier::empty();
+        if cell.bold() {
+            modifier |= Modifier::BOLD;
+        }
+        if cell.dim() {
+            modifier |= Modifier::DIM;
+        }
+        if cell.italic() {
+            modifier |= Modifier::ITALIC;
+        }
+        if cell.underline() {
+            modifier |= Modifier::UNDERLINED;
+        }
+        if cell.inverse() {
+            modifier |= Modifier::REVERSED;
+        }
+
+        CellStyle {
+            fg: self.fg,
+            bg: self.bg,
+            modifier,
+        }
+    }
 }
 
 fn flush_span<'a>(
@@ -4086,45 +4653,6 @@ fn flush_span<'a>(
         std::mem::take(current_text),
         current_style.take().unwrap_or_default(),
     ));
-}
-
-fn cell_style(cell: &Cell) -> Style {
-    let mut style = Style::default()
-        .fg(vt_color(cell.fgcolor(), Color::Rgb(230, 237, 243)))
-        .bg(vt_color(cell.bgcolor(), Color::Rgb(11, 15, 20)));
-
-    if cell.bold() {
-        style = style.add_modifier(Modifier::BOLD);
-    }
-    if cell.dim() {
-        style = style.add_modifier(Modifier::DIM);
-    }
-    if cell.italic() {
-        style = style.add_modifier(Modifier::ITALIC);
-    }
-    if cell.underline() {
-        style = style.add_modifier(Modifier::UNDERLINED);
-    }
-    if cell.inverse() {
-        style = style.add_modifier(Modifier::REVERSED);
-    }
-
-    style
-}
-
-fn selection_style(style: Style, selection: Option<PaneSelection>, row: u16, column: u16) -> Style {
-    if selection.is_some_and(|selection| selection.contains(row, column)) {
-        style
-            .fg(Color::Black)
-            .bg(Color::LightCyan)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        style
-    }
-}
-
-fn rgb_color((red, green, blue): (u8, u8, u8)) -> Color {
-    Color::Rgb(red, green, blue)
 }
 
 fn vt_color(color: vt100::Color, default: Color) -> Color {
@@ -4189,9 +4717,144 @@ fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{cli::Cli, config::Config};
+    use crate::{
+        cli::Cli,
+        config::Config,
+        layout::{GridLayout, GridSize},
+    };
     use clap::Parser;
     use ratatui::{Terminal, backend::TestBackend};
+
+    /// One pane in a rendered preview of the shell.
+    struct PreviewPane {
+        frame: PaneFrame,
+        body: &'static str,
+    }
+
+    fn preview_panes() -> Vec<PreviewPane> {
+        let pane = |number: usize,
+                    label: &str,
+                    summary: &str,
+                    state: PaneState,
+                    body: &'static str| PreviewPane {
+            frame: PaneFrame {
+                number,
+                label: label.into(),
+                summary: summary.into(),
+                usage: Some("5h 80% left".into()),
+                state,
+                focused: number == 1,
+                selected: number == 4,
+                logging: number == 6,
+                compact: false,
+            },
+            body,
+        };
+
+        vec![
+            pane(1, "api", "editing src/routes.rs", PaneState::Live, "$ cargo test"),
+            pane(2, "web", "waiting for review", PaneState::Waiting, "Continue? [y/N]"),
+            pane(3, "docs", "wrote the changelog", PaneState::Idle, "$ "),
+            pane(4, "infra", "terraform plan clean", PaneState::Live, "$ tf apply"),
+            pane(5, "tests", "3 failures remain", PaneState::Waiting, "FAILED 3"),
+            pane(6, "bench", "recording a trace", PaneState::Live, "sampling..."),
+            pane(7, "spike", "paused by the user", PaneState::Sleeping, ""),
+            pane(8, "old", "process exited", PaneState::Exited, "exit 130"),
+            pane(9, "shell", "", PaneState::Live, "$ git status"),
+        ]
+    }
+
+    /// Renders the main shell — tab strip, pane lattice, status bar — to text.
+    ///
+    /// The grid is the one part of GridBash that cannot be judged from its
+    /// source: whether nine panes read as a workspace or as noise is a question
+    /// about glyphs on a screen. This draws the real chrome functions so that
+    /// question can be answered without a terminal full of live PTYs behind it.
+    fn preview_shell(width: u16, height: u16, grid: GridSize) -> String {
+        let palette = GridPalette::default();
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                frame.render_widget(Paragraph::new("").style(Style::default().bg(INK)), area);
+
+                let tabs = ["Frontend", "Backend", "Review"]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, title)| TabLabel {
+                        title: (*title).into(),
+                        active: index == 0,
+                        selected: index == 1,
+                        waiting: index == 2,
+                        activity: false,
+                        exited: false,
+                    })
+                    .collect::<Vec<_>>();
+                render_tabs(frame, Rect::new(0, 0, width, 1), &tabs, &palette);
+
+                let grid_area = Rect::new(0, 1, width, height.saturating_sub(2));
+                let panes = preview_panes();
+                let rects = GridLayout::new(grid).rects(grid_area, panes.len());
+                let mut order = (0..panes.len()).collect::<Vec<_>>();
+                order.sort_by_key(|index| {
+                    let view = &panes[*index].frame;
+                    u8::from(view.selected) + 2 * u8::from(view.focused)
+                });
+                for index in order {
+                    let Some(rect) = rects.get(index).copied() else {
+                        continue;
+                    };
+                    let pane = &panes[index];
+                    let inner = render_pane_frame(frame, rect, &pane.frame, &palette);
+                    if inner.width > 0 && inner.height > 0 {
+                        frame.render_widget(
+                            Paragraph::new(pane.body)
+                                .style(Style::default().fg(TEXT).bg(APP_BG)),
+                            inner,
+                        );
+                    }
+                }
+
+                render_status_bar(
+                    frame,
+                    Rect::new(0, height.saturating_sub(1), width, 1),
+                    &StatusBar {
+                        input_scope: "focused pane",
+                        selected_panes: 1,
+                        background_jobs: 2,
+                        ports: 3,
+                        status: "agent pane tools ready | Drag copies within pane".into(),
+                        ..StatusBar::default()
+                    },
+                    &palette,
+                );
+            })
+            .expect("render preview");
+
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Prints the shell so the layout can be looked at. Run with:
+    /// `cargo test -- --ignored --nocapture main_tui_preview`
+    #[test]
+    #[ignore = "visual preview"]
+    fn main_tui_preview() {
+        for (width, height, rows, columns) in [(120, 34, 3, 3), (100, 28, 2, 2), (72, 20, 2, 2)] {
+            let grid = GridSize::new(rows, columns).expect("grid");
+            eprintln!("\n===== {width}x{height} · {rows}x{columns} =====");
+            eprintln!("{}", preview_shell(width, height, grid));
+        }
+    }
 
     fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
         terminal
@@ -4201,6 +4864,246 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    /// The event loop catches a panic thrown inside `Terminal::draw`, which
+    /// abandons the frame half-written and never swaps the buffers. Resetting the
+    /// current buffer and clearing is what makes the next frame trustworthy.
+    #[test]
+    fn a_frame_abandoned_by_a_panic_redraws_cleanly() {
+        let backend = TestBackend::new(6, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("aaaaaa"), frame.area());
+            })
+            .expect("first frame");
+        assert_eq!(buffer_text(&terminal), "aaaaaa");
+
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = terminal.draw(|frame| {
+                frame.render_widget(Paragraph::new("bbbbbb"), frame.area());
+                panic!("half-drawn frame");
+            });
+        }));
+        std::panic::set_hook(previous_hook);
+        assert!(panicked.is_err(), "the draw must have unwound");
+
+        // What the event loop does on recovery.
+        terminal.current_buffer_mut().reset();
+        terminal.clear().expect("clear after a caught panic");
+
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new("cc"), frame.area());
+            })
+            .expect("frame after recovery");
+        assert_eq!(
+            buffer_text(&terminal),
+            "cc    ",
+            "the abandoned frame must not bleed into the next one"
+        );
+    }
+
+    /// Pane rects are stored between frames, so a rect measured before a resize
+    /// can name cells the current frame does not have. Indexing a `Buffer`
+    /// outside its area panics, and this runs on every sleeping pane.
+    #[test]
+    fn the_sleeping_screen_clips_rects_that_outgrew_the_frame() {
+        let backend = TestBackend::new(10, 4);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+
+        terminal
+            .draw(|frame| {
+                render_sleeping_screen(frame, Rect::new(0, 0, 200, 200));
+                render_sleeping_screen(frame, Rect::new(8, 3, 40, 40));
+                render_sleeping_screen(frame, Rect::new(50, 50, 4, 4));
+                render_sleeping_screen(frame, Rect::new(0, 0, 0, 0));
+                render_sleeping_screen(frame, Rect::new(u16::MAX, u16::MAX, u16::MAX, u16::MAX));
+            })
+            .expect("drawing a sleeping pane must not panic");
+
+        assert_eq!(buffer_text(&terminal).chars().count(), 40);
+    }
+
+    #[test]
+    fn tab_rendering_returns_click_targets_and_marks_selected_grids() {
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let tabs = vec![
+            TabLabel {
+                title: "Frontend".into(),
+                active: true,
+                selected: false,
+                waiting: false,
+                activity: false,
+                exited: false,
+            },
+            TabLabel {
+                title: "Tests".into(),
+                active: false,
+                selected: true,
+                waiting: false,
+                activity: false,
+                exited: false,
+            },
+            TabLabel {
+                title: "Review".into(),
+                active: false,
+                selected: false,
+                waiting: true,
+                activity: false,
+                exited: false,
+            },
+        ];
+        let mut targets = Vec::new();
+
+        terminal
+            .draw(|frame| {
+                targets = render_tabs(frame, frame.area(), &tabs, &GridPalette::default());
+            })
+            .expect("render tabs");
+
+        assert_eq!(targets.len(), 3);
+        assert_eq!(targets[0].0, 0);
+        assert_eq!(targets[1].0, 1);
+        assert_eq!(targets[0].1.right(), targets[1].1.x);
+        assert_eq!(targets[1].1.right(), targets[2].1.x);
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains(" 1 Frontend "), "tabs: {rendered}");
+        assert!(rendered.contains(" 2 Tests "), "tabs: {rendered}");
+        // A grid with an agent waiting on the user is the one thing in the strip
+        // allowed a filled background.
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "R" && cell.bg == TAB_WAITING_BG)
+        );
+    }
+
+    /// The chrome must be drawable from plain data.
+    ///
+    /// `App::new` starts the agent control server, so an `App` built purely to
+    /// read a few booleans leaves a bound port and a live listener behind for
+    /// the rest of the test process. Two such tests were enough to make the
+    /// timing-sensitive `pane_host` socket tests fail later in the same run.
+    /// Rendering from a view model keeps that out of the test binary entirely.
+    #[test]
+    fn the_status_bar_renders_without_a_live_app() {
+        let backend = TestBackend::new(100, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let view = StatusBar {
+            background_jobs: 4,
+            ports: 2,
+            zoomed: true,
+            input_scope: "selected panes",
+            selected_panes: 3,
+            status: "everything is fine".into(),
+            ..StatusBar::default()
+        };
+
+        terminal
+            .draw(|frame| {
+                render_status_bar(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render status bar");
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("ZOOM"), "bar: {rendered}");
+        assert!(rendered.contains(" BG 4 "), "bar: {rendered}");
+        assert!(rendered.contains(" Ports 2 "), "bar: {rendered}");
+        assert!(rendered.contains("3 selected"), "bar: {rendered}");
+    }
+
+    /// The hints exist to be discoverable, not to be load-bearing. A terminal
+    /// too narrow for them must spend its width on the tabs instead.
+    #[test]
+    fn tab_hints_give_way_to_the_tabs_themselves() {
+        assert_eq!(tab_hints(0).width(), 0);
+        assert!(tab_hints(200).width() > 0);
+        assert!(tab_hints(200).width() >= tab_hints(20).width());
+
+        for budget in [0, 1, 7, 13, 40, 200] {
+            assert!(
+                tab_hints(budget).width() <= budget as usize,
+                "hints overflowed a {budget}-column budget"
+            );
+        }
+    }
+
+    /// The status bar lays out its chips once and reports where they landed.
+    /// When that layout was duplicated by a second set of offset calculations,
+    /// renaming a button moved it on screen without moving its click target.
+    #[test]
+    fn status_bar_click_targets_match_what_was_drawn() {
+        let backend = TestBackend::new(120, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut buttons = StatusButtons::default();
+        let view = StatusBar {
+            input_scope: "focused pane",
+            ..StatusBar::default()
+        };
+
+        terminal
+            .draw(|frame| {
+                buttons = render_status_bar(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render status bar");
+
+        let buffer = terminal.backend().buffer().clone();
+        let text_at = |rect: Rect| {
+            (rect.x..rect.right())
+                .map(|x| buffer[(x, rect.y)].symbol())
+                .collect::<String>()
+        };
+
+        assert_eq!(
+            text_at(buttons.previous_panes.expect("panes chip")),
+            PREVIOUS_PANES_BUTTON
+        );
+        assert_eq!(
+            text_at(buttons.pane_settings.expect("summary chip")),
+            PANE_SETTINGS_BUTTON
+        );
+        assert_eq!(
+            text_at(buttons.background_jobs.expect("jobs chip")),
+            background_jobs_button_label(0)
+        );
+        assert_eq!(
+            text_at(buttons.ports.expect("ports chip")),
+            ports_button_label(0)
+        );
+    }
+
+    /// "0 panes selected" was permanently on screen to report that nothing
+    /// unusual was happening.
+    #[test]
+    fn the_status_bar_stays_silent_about_an_empty_selection() {
+        let quiet = StatusBar::default();
+        assert_eq!(quiet.selection_summary(), None);
+
+        let panes = StatusBar {
+            selected_panes: 3,
+            ..StatusBar::default()
+        };
+        assert_eq!(panes.selection_summary().as_deref(), Some("3 selected"));
+
+        let both = StatusBar {
+            selected_panes: 3,
+            selected_grids: 2,
+            ..StatusBar::default()
+        };
+        assert_eq!(
+            both.selection_summary().as_deref(),
+            Some("3 panes, 2 grids selected")
+        );
     }
 
     #[test]
@@ -4226,10 +5129,25 @@ mod tests {
     }
 
     #[test]
-    fn command_center_is_hidden_and_clamped_to_the_available_height() {
-        assert_eq!(command_center_height(24, false, 12), 0);
-        assert_eq!(command_center_height(24, true, 12), 12);
-        assert_eq!(command_center_height(8, true, 12), 5);
+    fn quit_confirmation_shows_the_exact_resume_command() {
+        let backend = TestBackend::new(90, 18);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let view = QuitConfirmationView {
+            resume_command: "gridbash resume 1777777777777-42".into(),
+            keeps_terminals_running: true,
+        };
+
+        terminal
+            .draw(|frame| {
+                render_quit_confirmation(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render quit confirmation");
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("Quit GridBash?"));
+        assert!(rendered.contains("gridbash resume 1777777777777-42"));
+        assert!(rendered.contains("Alt+Q confirms"));
+        assert!(rendered.contains("Live terminals will stay running"));
     }
 
     #[test]
@@ -4256,6 +5174,13 @@ mod tests {
     }
 
     #[test]
+    fn command_center_is_hidden_and_clamped_to_the_available_height() {
+        assert_eq!(command_center_height(24, false, 12), 0);
+        assert_eq!(command_center_height(24, true, 12), 12);
+        assert_eq!(command_center_height(8, true, 12), 5);
+    }
+
+    #[test]
     fn hidden_command_line_renders_safely_at_small_terminal_sizes() {
         let cli = Cli::parse_from(["gridbash"]);
         let app = App::new(cli, Config::default()).expect("app");
@@ -4273,12 +5198,87 @@ mod tests {
         }
     }
 
+    /// The pane path as it stood before the rasterizer: a `Line` of `Span`s per
+    /// row, laid out by `Paragraph`. Kept only so the benchmark below can put a
+    /// number on what replacing it bought.
+    fn legacy_screen_render(buffer: &mut Buffer, screen: &vt100::Screen, width: u16, height: u16) {
+        use ratatui::widgets::Widget;
+
+        fn legacy_cell_style(cell: &Cell) -> Style {
+            let mut style = Style::default()
+                .fg(vt_color(cell.fgcolor(), PANE_FG))
+                .bg(vt_color(cell.bgcolor(), PANE_BG));
+            if cell.bold() {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            if cell.dim() {
+                style = style.add_modifier(Modifier::DIM);
+            }
+            if cell.italic() {
+                style = style.add_modifier(Modifier::ITALIC);
+            }
+            if cell.underline() {
+                style = style.add_modifier(Modifier::UNDERLINED);
+            }
+            if cell.inverse() {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            style
+        }
+
+        let lines = (0..height)
+            .map(|row| {
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                let mut current_style: Option<Style> = None;
+                let mut current_text = String::new();
+                for column in 0..width {
+                    let (style, text) = match screen.cell(row, column) {
+                        Some(cell) if cell.is_wide_continuation() => continue,
+                        Some(cell) => (
+                            legacy_cell_style(cell),
+                            if cell.has_contents() {
+                                cell.contents()
+                            } else {
+                                " "
+                            },
+                        ),
+                        None => (Style::default(), " "),
+                    };
+                    if current_style.is_some_and(|active| active == style) {
+                        current_text.push_str(text);
+                        continue;
+                    }
+                    flush_span(&mut spans, &mut current_style, &mut current_text);
+                    current_style = Some(style);
+                    current_text.push_str(text);
+                }
+                flush_span(&mut spans, &mut current_style, &mut current_text);
+                Line::from(spans)
+            })
+            .collect::<Vec<_>>();
+
+        let area = Rect::new(0, 0, width, height);
+        if buffer.area != area {
+            buffer.resize(area);
+        }
+        buffer.reset();
+        Widget::render(
+            Paragraph::new(lines).style(Style::default().fg(PANE_FG).bg(APP_BG)),
+            area,
+            buffer,
+        );
+    }
+
+    /// Times the pane hot path against the one it replaced.
+    ///
+    /// The version of this benchmark that shipped before held `revision` at 1,
+    /// so every iteration after the first hit the cache's early return and the
+    /// loop timed `blit_buffer` alone — the rasterizer it was named after never
+    /// ran. Varying the revision is what makes the number mean anything.
     #[test]
     #[ignore = "manual performance benchmark"]
     fn benchmark_cached_screen_render() {
         use std::{hint::black_box, time::Instant};
-
-        use ratatui::buffer::Buffer;
 
         const ITERATIONS: usize = 5_000;
         let mut parser = vt100::Parser::new(40, 120, 10_000);
@@ -4291,28 +5291,52 @@ mod tests {
             })
             .collect::<String>();
         parser.process(output.as_bytes());
+        let screen = parser.screen();
 
         let area = Rect::new(0, 0, 120, 40);
-        let mut buffer = Buffer::empty(area);
-        let mut cache = PaneRenderCache::default();
+        let mut frame_buffer = Buffer::empty(area);
+
+        let mut legacy = Buffer::empty(area);
         let start = Instant::now();
         for _ in 0..ITERATIONS {
+            legacy_screen_render(&mut legacy, screen, area.width, area.height);
+            black_box(&legacy);
+        }
+        let legacy_elapsed = start.elapsed() / ITERATIONS as u32;
+
+        let mut cache = PaneRenderCache::default();
+        let start = Instant::now();
+        for iteration in 0..ITERATIONS {
+            // A fresh revision every pass, so the cache never short-circuits and
+            // the rasterizer actually runs.
             refresh_screen_cache(
                 &mut cache,
-                1,
-                parser.screen(),
+                iteration as u64,
+                screen,
                 area.width,
                 area.height,
                 None,
             );
-            blit_buffer(black_box(&cache.buffer), &mut buffer, area);
+            black_box(&cache.buffer);
         }
-        let elapsed = start.elapsed();
+        let rasterize_elapsed = start.elapsed() / ITERATIONS as u32;
+
+        let start = Instant::now();
+        for _ in 0..ITERATIONS {
+            blit_buffer(black_box(&cache.buffer), &mut frame_buffer, area);
+        }
+        let blit_elapsed = start.elapsed() / ITERATIONS as u32;
+
+        eprintln!("120x40 pane, {ITERATIONS} iterations each:");
+        eprintln!("  spans + Paragraph (old): {legacy_elapsed:?}");
+        eprintln!("  direct rasterize (new):  {rasterize_elapsed:?}");
+        eprintln!("  blit to frame:           {blit_elapsed:?}");
         eprintln!(
-            "cached screen render: {ITERATIONS} iterations in {elapsed:?} ({:?}/iteration)",
-            elapsed / ITERATIONS as u32
+            "  full frame old/new:      {:?} -> {:?}",
+            legacy_elapsed + blit_elapsed,
+            rasterize_elapsed + blit_elapsed
         );
-        black_box(buffer);
+        black_box((frame_buffer, legacy));
     }
 
     #[test]
@@ -4405,119 +5429,181 @@ mod tests {
         );
     }
 
-    #[test]
-    fn idle_pane_has_no_state_badges() {
-        let palette = GridPalette::default();
-        let chrome = pane_chrome(false, false, false, false, None, false, &palette);
+    fn pane_frame(state: PaneState) -> PaneFrame {
+        PaneFrame {
+            number: 1,
+            label: "api".into(),
+            summary: "reviewing the latest changes".into(),
+            usage: Some("5h 80% left".into()),
+            state,
+            focused: false,
+            selected: false,
+            logging: false,
+            compact: false,
+        }
+    }
 
-        assert_eq!(chrome.badge, "");
-        assert_eq!(chrome.quiet_marker, "");
+    fn header_text(view: &PaneFrame, width: u16) -> String {
+        let backend = TestBackend::new(width, 3);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_pane_frame(
+                    frame,
+                    Rect::new(0, 0, width, 3),
+                    view,
+                    &GridPalette::default(),
+                );
+            })
+            .expect("render pane frame");
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .take(width as usize)
+            .map(|cell| cell.symbol())
+            .collect()
     }
 
     #[test]
-    fn selected_and_exited_badges_remain_visible() {
-        let palette = GridPalette::default();
+    fn a_live_pane_header_shows_its_number_name_and_activity() {
+        let header = header_text(&pane_frame(PaneState::Live), 80);
 
-        assert_eq!(
-            pane_chrome(true, false, false, false, None, true, &palette).badge,
-            " selected"
-        );
-        assert_eq!(
-            pane_chrome(true, false, true, false, None, true, &palette).badge,
-            " exited"
-        );
+        assert!(header.contains(" 1 api"), "header: {header}");
+        assert!(header.contains("reviewing the latest"), "header: {header}");
+        // A pane doing its job has no state worth naming.
+        for badge in ["idle", "asleep", "exited", "needs you"] {
+            assert!(!header.contains(badge), "header: {header}");
+        }
+    }
+
+    /// An agent that has gone quiet is asking for the user. In a grid full of
+    /// agents that is the single most useful thing on screen, so it has to be
+    /// stated in words rather than left to a one-character marker.
+    #[test]
+    fn a_waiting_agent_says_so_in_its_header() {
+        let header = header_text(&pane_frame(PaneState::Waiting), 80);
+
+        assert!(header.contains("needs you"), "header: {header}");
     }
 
     #[test]
-    fn sleeping_panes_show_sleep_badge() {
-        let palette = GridPalette::default();
+    fn every_resting_state_names_itself() {
+        for (state, badge) in [
+            (PaneState::Idle, "idle"),
+            (PaneState::Sleeping, "asleep"),
+            (PaneState::Exited, "exited"),
+        ] {
+            let header = header_text(&pane_frame(state), 80);
+            assert!(header.contains(badge), "{state:?} header: {header}");
+        }
+    }
 
-        assert_eq!(
-            pane_chrome(false, false, false, true, None, true, &palette).badge,
-            " asleep"
-        );
+    /// The name is the only way to tell one pane from another, so it is the last
+    /// thing a narrow header gives up — before the summary, and before usage.
+    #[test]
+    fn a_narrow_header_keeps_the_name_and_drops_the_extras() {
+        let header = header_text(&pane_frame(PaneState::Idle), 26);
+
+        assert!(header.contains("api"), "header: {header}");
+        assert!(!header.contains("5h 80% left"), "header: {header}");
+        assert_eq!(header.chars().count(), 26);
     }
 
     #[test]
-    fn pane_title_uses_activity_summary_instead_of_launch_metadata() {
-        assert_eq!(
-            pane_title(
-                "api",
-                "",
-                "reviewing the latest changes",
-                None,
-                "",
-                false,
-                120,
-            ),
-            " api | reviewing the latest changes "
-        );
-        assert_eq!(
-            pane_title("1", "", "tests passed", None, " selected", false, 120),
-            " 1 selected | tests passed "
-        );
-        assert_eq!(
-            pane_title(
-                "2",
-                "",
-                "goal: finish the API",
-                Some("5h 80% left"),
-                " selected",
-                false,
-                120,
-            ),
-            " 2 selected | 5h 80% left | goal: finish the API "
-        );
+    fn compact_headers_keep_the_summary_but_drop_usage() {
+        let mut view = pane_frame(PaneState::Live);
+        view.compact = true;
+        let header = header_text(&view, 80);
+
+        assert!(header.contains("api"), "header: {header}");
+        assert!(!header.contains("5h 80% left"), "header: {header}");
+    }
+
+    /// Panes overlap by a cell so their borders merge. If a pane ever drew
+    /// outside the rect it was handed, it would erase its neighbour's content
+    /// rather than just share a line with it.
+    #[test]
+    fn a_pane_frame_draws_only_inside_its_own_rect() {
+        let backend = TestBackend::new(20, 6);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                render_pane_frame(
+                    frame,
+                    Rect::new(0, 0, 10, 4),
+                    &pane_frame(PaneState::Live),
+                    &GridPalette::default(),
+                );
+            })
+            .expect("render pane frame");
+
+        let buffer = terminal.backend().buffer();
+        for y in 0..6 {
+            for x in 0..20 {
+                if x < 10 && y < 4 {
+                    continue;
+                }
+                assert_eq!(buffer[(x, y)].symbol(), " ", "cell ({x}, {y}) was painted");
+            }
+        }
+    }
+
+    /// The header is drawn as two titles, one from each end. They must never
+    /// reach far enough to write over each other, at any width a pane can have.
+    #[test]
+    fn header_titles_never_collide_at_any_width() {
+        for state in [
+            PaneState::Live,
+            PaneState::Waiting,
+            PaneState::Idle,
+            PaneState::Sleeping,
+            PaneState::Exited,
+        ] {
+            let mut view = pane_frame(state);
+            view.number = 100;
+            view.label = "a-rather-long-pane-name".into();
+            view.logging = true;
+
+            for width in 8..=80u16 {
+                let budget = width - 2;
+                let trailing = pane_header_trailing(&view, &GridPalette::default(), width);
+                let trailing_width = trailing.width() as u16;
+                let fits =
+                    trailing_width > 0 && pane_number_width(&view) + trailing_width <= budget;
+                let leading = pane_header_leading(
+                    &view,
+                    &GridPalette::default(),
+                    if fits { budget - trailing_width } else { budget },
+                );
+
+                let used = leading.width() as u16 + if fits { trailing_width } else { 0 };
+                assert!(
+                    used <= budget,
+                    "{state:?} at width {width}: header needs {used} of {budget}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn pane_title_keeps_quiet_marker_with_custom_label() {
-        assert_eq!(
-            pane_title(
-                "api",
-                QUIET_MARKER,
-                "waiting for output",
-                None,
-                "",
-                false,
-                120,
-            ),
-            " api * | waiting for output "
-        );
-    }
+    fn a_pane_frame_reports_the_area_left_for_its_terminal() {
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let mut inner = Rect::default();
+        terminal
+            .draw(|frame| {
+                inner = render_pane_frame(
+                    frame,
+                    Rect::new(2, 1, 30, 6),
+                    &pane_frame(PaneState::Live),
+                    &GridPalette::default(),
+                );
+            })
+            .expect("render pane frame");
 
-    #[test]
-    fn compact_pane_title_keeps_summary_but_omits_usage_details() {
-        assert_eq!(
-            pane_title(
-                "api",
-                QUIET_MARKER,
-                "reviewing the latest changes",
-                Some("5h 80% left"),
-                " selected",
-                true,
-                120,
-            ),
-            " api * selected | reviewing the latest changes "
-        );
-    }
-
-    #[test]
-    fn narrow_pane_title_keeps_state_before_truncated_activity() {
-        let title = pane_title(
-            "very-long-pane-name",
-            QUIET_MARKER,
-            "reviewing the latest changes",
-            Some("5h 80% left"),
-            " selected",
-            false,
-            30,
-        );
-
-        assert!(title.chars().count() <= 30);
-        assert!(title.contains("selected"));
-        assert!(title.contains("review"));
-        assert!(!title.contains("5h 80% left"));
+        assert_eq!(inner, Rect::new(3, 2, 28, 4));
     }
 
     #[test]
@@ -4763,36 +5849,136 @@ mod tests {
         );
     }
 
+    /// Focus is the answer to "where do my keystrokes go", so it outranks every
+    /// state a pane arrived at on its own — including an agent asking for help,
+    /// which still gets to say so in words.
     #[test]
-    fn quiet_output_marks_idle_pane_without_active_chrome() {
+    fn focus_and_selection_outrank_a_panes_own_state() {
         let palette = GridPalette::default();
-        let quiet = pane_chrome(false, false, false, false, None, true, &palette);
+        let mut view = pane_frame(PaneState::Waiting);
 
-        assert_eq!(quiet.quiet_marker, QUIET_MARKER);
-        assert_eq!(quiet.border_style, Style::default().fg(palette.quiet()));
-    }
-
-    #[test]
-    fn grouped_quiet_pane_keeps_group_border_and_marker() {
-        let palette = GridPalette::default();
-        let group_color = (82, 166, 255);
-        let chrome = pane_chrome(
-            false,
-            false,
-            false,
-            false,
-            Some(group_color),
-            true,
-            &palette,
+        assert_eq!(
+            pane_border_style(&view, &palette),
+            Style::default().fg(WAITING)
         );
 
-        assert_eq!(chrome.quiet_marker, QUIET_MARKER);
+        view.selected = true;
         assert_eq!(
-            chrome.border_style,
+            pane_border_style(&view, &palette),
             Style::default()
-                .fg(rgb_color(group_color))
+                .fg(palette.selected())
                 .add_modifier(Modifier::BOLD)
         );
+
+        view.focused = true;
+        assert_eq!(
+            pane_border_style(&view, &palette),
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD)
+        );
+        assert!(header_text(&view, 80).contains("needs you"));
+    }
+
+    /// A resting pane must stay quiet. Borders that shout at the user from every
+    /// idle pane are how a grid stops being readable at nine panes.
+    #[test]
+    fn a_resting_pane_uses_a_quiet_border() {
+        let palette = GridPalette::default();
+
+        for state in [PaneState::Live, PaneState::Idle] {
+            assert_eq!(
+                pane_border_style(&pane_frame(state), &palette),
+                Style::default().fg(LINE),
+                "{state:?} must not draw attention"
+            );
+        }
+        assert_eq!(
+            pane_border_style(&pane_frame(PaneState::Sleeping), &palette),
+            Style::default().fg(LINE_SOFT)
+        );
+    }
+
+    /// The seam is the whole point of overlapping the rects. If ratatui's border
+    /// merging ever stops resolving the overlap, panes go back to showing two
+    /// parallel lines between every pair — so assert on the junction glyph
+    /// rather than trusting the layout arithmetic alone.
+    #[test]
+    fn adjacent_panes_merge_into_a_single_dividing_line() {
+        let backend = TestBackend::new(21, 5);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let palette = GridPalette::default();
+
+        terminal
+            .draw(|frame| {
+                let mut left = pane_frame(PaneState::Live);
+                left.summary = String::new();
+                left.usage = None;
+                let mut right = left.clone();
+                right.number = 2;
+                // Overlapping by one column is what `weighted_grid_rects` hands
+                // the renderer for two side-by-side panes.
+                render_pane_frame(frame, Rect::new(0, 0, 11, 5), &left, &palette);
+                render_pane_frame(frame, Rect::new(10, 0, 11, 5), &right, &palette);
+            })
+            .expect("render two panes");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(10, 0)].symbol(), "┬", "top junction");
+        assert_eq!(buffer[(10, 2)].symbol(), "│", "shared divider");
+        assert_eq!(buffer[(10, 4)].symbol(), "┴", "bottom junction");
+    }
+
+    /// Cache buffers live between frames, so a cell keeps whatever it was last
+    /// given. Patching a `Style` onto one only ever adds modifiers, which would
+    /// leave text bold forever once anything nearby had been bold.
+    #[test]
+    fn rasterizing_clears_attributes_that_no_longer_apply() {
+        let mut parser = vt100::Parser::new(1, 4, 100);
+        let mut cache = PaneRenderCache::default();
+
+        parser.process(b"\x1b[1;31mbold");
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 4, 1, None);
+        assert!(cache.buffer[(0, 0)].modifier.contains(Modifier::BOLD));
+
+        parser.process(b"\r\x1b[0mflat");
+        refresh_screen_cache(&mut cache, 2, parser.screen(), 4, 1, None);
+        assert!(
+            !cache.buffer[(0, 0)].modifier.contains(Modifier::BOLD),
+            "bold outlived the output that set it"
+        );
+        assert_eq!(cache.buffer[(0, 0)].symbol(), "f");
+    }
+
+    /// Ratatui's diff assumes a double-width symbol is followed by a blank and
+    /// skips that column. Leaving anything else there prints over the second
+    /// half of the glyph.
+    #[test]
+    fn wide_characters_leave_their_second_column_blank() {
+        let mut parser = vt100::Parser::new(1, 4, 100);
+        parser.process("東京".as_bytes());
+        let mut cache = PaneRenderCache::default();
+
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 4, 1, None);
+
+        assert_eq!(cache.buffer[(0, 0)].symbol(), "東");
+        assert_eq!(cache.buffer[(1, 0)].symbol(), " ");
+        assert_eq!(cache.buffer[(2, 0)].symbol(), "京");
+        assert_eq!(cache.buffer[(3, 0)].symbol(), " ");
+    }
+
+    /// A wide glyph in the last column has nowhere to put its second half, and
+    /// the cell to its right belongs to the next pane's border.
+    #[test]
+    fn a_wide_character_clipped_by_the_pane_edge_is_dropped() {
+        let mut parser = vt100::Parser::new(1, 4, 100);
+        parser.process("a東".as_bytes());
+        let mut cache = PaneRenderCache::default();
+
+        refresh_screen_cache(&mut cache, 1, parser.screen(), 2, 1, None);
+
+        assert_eq!(cache.buffer[(0, 0)].symbol(), "a");
+        assert_eq!(cache.buffer[(1, 0)].symbol(), " ");
     }
 
     #[test]

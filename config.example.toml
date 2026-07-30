@@ -10,7 +10,7 @@ pane_workload = "adaptive"
 [ui]
 compact_titles = false
 activity_badges = true
-confirm_quit = false
+confirm_quit = true
 # Leave live pane processes in local background hosts when the UI closes.
 keep_terminals_running = false
 scrollback_rows = 10000

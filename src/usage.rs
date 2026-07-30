@@ -11,7 +11,7 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::auth::AgentKind;
+use crate::{auth::AgentKind, diagnostics};
 
 const CLAUDE_USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/usage";
@@ -66,33 +66,31 @@ struct UsageBlock {
 
 pub fn spawn_usage_monitor(targets: Vec<UsageTarget>, tx: Sender<UsageEvent>) {
     thread::spawn(move || {
-        let targets = resolve_usage_sources(&targets);
+        let Ok(targets) = diagnostics::recovering("usage monitor startup", || {
+            Ok(resolve_usage_sources(&targets))
+        }) else {
+            return;
+        };
         loop {
-            let mut disconnected = false;
-
-            for source in &targets {
-                let label = profile_usage_label(source);
-                if tx
-                    .send(UsageEvent::Profile {
+            // Each round reads and parses files the agents own. A panic on one
+            // malformed read would otherwise end usage reporting for the rest of
+            // the session, so recover and try again next round.
+            let round = diagnostics::recovering("a usage refresh", || {
+                let mut events = Vec::with_capacity(targets.len() + 1);
+                for source in &targets {
+                    events.push(UsageEvent::Profile {
                         usage_key: source.usage_key.clone(),
-                        label,
-                    })
-                    .is_err()
-                {
-                    disconnected = true;
-                    break;
+                        label: profile_usage_label(source),
+                    });
                 }
-            }
-
-            if disconnected {
-                break;
-            }
-
-            if tx
-                .send(UsageEvent::ApiSpend {
+                events.push(UsageEvent::ApiSpend {
                     label: api_spend_label(),
-                })
-                .is_err()
+                });
+                Ok(events)
+            });
+
+            if let Ok(events) = round
+                && events.into_iter().any(|event| tx.send(event).is_err())
             {
                 break;
             }

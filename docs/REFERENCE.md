@@ -4,13 +4,31 @@ This guide covers launch options, sessions, managed worktrees, controls, profile
 configuration, and platform-specific behavior. See the [project
 README](../README.md) for installation and a shorter introduction.
 
-## Create an agent workspace
+## Create a grid
 
-Run `gridbash` with no arguments to open the agent-workspace setup. It detects
-installed agent and terminal profiles and lets you choose the launch profile,
-compatible Claude/Codex auth, project folder, layout, and worktree isolation.
-Agent profiles appear first. Shell profiles remain available as explicitly
-unmanaged raw-terminal grids.
+Run `gridbash` with no arguments, or press `Alt+n` inside a running workspace,
+to open the new-grid screen. It asks for four things and decides the rest:
+
+| Field | Meaning |
+| --- | --- |
+| Rows | 1-10 rows of panes. |
+| Columns | 1-10 columns of panes. |
+| Name | Tab title for this grid. Blank falls back to `Grid N`. |
+| Project | Folder the panes start in, with Tab completion. |
+
+Everything else is assumed so there is nothing else to answer:
+
+- **Worktrees are on** whenever the project is a git repository with a commit
+  and no tracked modifications. The screen names the exact branches it will
+  create and falls back to the shared project folder — saying why — when the
+  repository cannot host them. `Alt+w` overrides the choice.
+- **Panes run the platform shell**: Git Bash on Windows, otherwise the first
+  available of zsh, bash, fish, sh, or PowerShell. `GRIDBASH_PROFILE`, a
+  non-agent `--set-default` profile, and `--profile` still win. Pick agents per
+  pane once the grid is up, or launch them directly with `--profile`.
+
+A live preview shows the grid that is about to exist, one cell per pane, each
+labelled with the managed branch it will check out.
 
 Common direct launches:
 
@@ -45,29 +63,33 @@ The main launch options are:
 | `--agent-api-port PORT` | Choose the localhost control port; `0` selects a free port. |
 
 Grid, count, profile, cwd, or auto-layout arguments use the direct launch path
-and bypass workspace setup. `gridbash --worktrees` by itself opens setup with
-worktree isolation enabled.
+and bypass the new-grid screen. `gridbash --worktrees` by itself opens it with
+the managed worktree prefix from `--worktree-prefix`.
 
-Set the initial agent selection or direct-launch default with:
+Set the direct-launch default profile with:
 
 ```powershell
 gridbash --set-default codex
 ```
 
-An older configured shell default remains valid for direct launches, but bare
-interactive startup leads with the first detected agent. Select a raw terminal
-in workspace setup when that is the intended workflow.
-
-### Workspace setup controls
+### New-grid controls
 
 | Input | Action |
 | --- | --- |
-| Up / Down | Move between profile, auth, layout, worktrees, and project fields. |
-| Left / Right | Change the selected field. |
-| `w` | Toggle managed worktrees. |
-| `e` | Edit the project folder while the Project field is selected. |
-| Enter | Confirm a project edit or launch the workspace. |
-| Esc / `q` | Quit. |
+| Up / Down | Move between the four fields. |
+| Left / Right | Resize on Rows and Columns; move the cursor in Name and Project. |
+| `0`-`9` | Set the focused dimension directly; `0` means 10. |
+| Tab | Complete the project path, or move to the next field. |
+| Tab again | Cycle the remaining folder matches. |
+| Ctrl+w / Ctrl+u | Delete the previous path segment / clear the field. |
+| Alt+w | Override managed worktrees for this grid. |
+| Enter | Launch, from any field. |
+| Esc / Ctrl+c | Cancel. |
+
+Project completion works like a shell: the first Tab extends to the prefix every
+candidate shares, and later presses walk the candidates. The panel below lists
+the folders next to the current path so nearby projects are one keystroke away.
+`~` expands to the home directory.
 
 Managed auth is a launch boundary, not a global shell hook. GridBash sets
 `CLAUDE_CONFIG_DIR` or `CODEX_HOME` for compatible agent panes it launches. It
@@ -77,15 +99,23 @@ terminal panes retain their normal shell environment.
 ## Sessions and resume
 
 GridBash writes bounded session snapshots to local app data when grids launch,
-while they run, and when they exit. Resume interactively, resume the latest
-snapshot, list snapshots, or select a session by its full ID or unique prefix:
+when persisted state changes while they run, and when they exit. Resume
+interactively, resume the latest snapshot, list snapshots, or select a session
+by its full ID or unique prefix:
 
 ```powershell
 gridbash resume
 gridbash resume --latest
 gridbash resume --list
 gridbash resume <session-id>
+gridbash resume <session-id> --delete
 ```
+
+`Alt+q` saves a fresh snapshot and shows a quit confirmation containing the
+full command for that specific session. Press `Alt+q` again to quit or any other
+key to cancel. After a confirmed quit, GridBash prints the command again in the
+launching shell so it remains easy to copy. Confirmation is enabled by default;
+set `ui.confirm_quit = false` or turn it off in Settings to skip the dialog.
 
 A snapshot restores grid dimensions, pane profiles, working directories,
 worktree names, auth assignments, and a pane-local view of recent submitted
@@ -103,7 +133,8 @@ GridBash UI closes. `gridbash resume` then reconnects to the same PTYs; output
 produced while detached is added to the restored view. If a host is no longer
 available, GridBash starts a replacement terminal and retains the saved context.
 The background hosts are local, authenticated, and accept one GridBash client at
-a time.
+a time. Resuming a saved session atomically claims it before terminals launch,
+so a second client cannot duplicate or overwrite the same workspace.
 
 Session snapshots record whether their GridBash owner is still running and
 whether it exited cleanly. On a plain `gridbash` launch, snapshots left by a
@@ -112,6 +143,12 @@ visible, tabbed, and background panes by working directory, names each recovered
 tab after the directory, and preserves the bounded command/output context. It
 does not claim sessions owned by another live GridBash process. Use `Alt+t` to
 cycle through the recovered tabs.
+
+In the interactive resume picker, press Delete twice to permanently remove the
+selected snapshot. Deleting a detached session first stops its saved terminal
+hosts; a session owned by a live GridBash process cannot be deleted. The
+`--delete` form provides the same behavior for scripts and requires a full
+session ID or unique prefix.
 
 Automatic recovery only applies to a plain launch. Grid, profile, count, cwd,
 worktree, layout, and agent-API launch options take precedence, while every
@@ -239,16 +276,19 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | --- | --- |
 | Drag mouse | Select terminal text inside the pane where the drag began and copy it on release. |
 | Right-click pane | Add or remove that pane from the selected set. |
+| Left-click grid tab | Switch directly to that grid. |
+| Right-click grid tab | Add or remove that grid from the selected set. Ctrl-click and Shift-click work too. |
 | Mouse wheel | Scroll only the pane under the pointer; selected panes use GridBash scrollback. |
 | Alt+k | Open the searchable command palette. Type to filter, use Up/Down to select, and press Enter to run an action. |
 | Alt+Left / Alt+Right | Focus the previous or next pane in the row, wrapping at the edge. |
 | Alt+Up / Alt+Down | Focus the pane above or below, wrapping at the edge. |
 | Alt+l | Resize the current grid. |
-| Alt+x | Swap the two selected panes. |
-| Alt+n | Open the startup picker and launch a new tab. |
+| Alt+x | Swap two selected grids when any grids are selected; otherwise swap the two selected panes. |
+| Alt+n | Open the new-grid screen and launch another tab. |
 | Alt+t | Switch to the next tab. |
 | Alt+w | Open the current-grid close confirmation. |
 | Alt+s | Toggle selection of the focused pane. |
+| Alt+Shift+s | Toggle selection of the current grid. |
 | Alt+a | Select all panes, or clear the set when all are selected. |
 | Alt+c | Open or close the current grid's BashBot Director command center. |
 | Alt+Shift+C | Save bounded recent plain-text output from the focused or selected panes. |
@@ -269,7 +309,7 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+z | Sleep the focused pane, or all selected panes. |
 | Hover sleeping pane | Wake it and reveal its terminal. |
 | Alt+o | Open settings. |
-| Alt+q | Quit. |
+| Alt+q | Save the workspace and open quit confirmation with its exact resume command. |
 
 Drag selection is contained to its source pane and copies through the standard OSC 52 clipboard sequence. Use `--no-mouse` if the host terminal, serial link, or multiplexer cannot forward mouse reporting.
 
@@ -286,7 +326,7 @@ Output capture writes the same bounded, ANSI-stripped pane tail used for session
 context. Continuous logging appends only new PTY output; submitted input,
 environment variables, and sibling panes are never added separately. With
 multiple selected panes, capture and logging create one file per selected pane;
-otherwise they target the focused pane. Active logs show a `logging` pane badge.
+otherwise they target the focused pane. Active logs show a `rec` pane badge.
 Default collision-safe files live under GridBash's platform-local data `output`
 directory, and every operation reports its resolved path. Agent API capture and
 start-log calls may provide an explicit output directory. A write failure stops
@@ -311,6 +351,8 @@ Pane Activity provides auth, rename, refresh, sleep/wake, deactivate, and shortc
 
 The bottom-right **Ports** control counts TCP listeners launched inside GridBash agent process trees. Click it or press Ctrl+Alt+p to see each port, process name, PID, and owning pane or tab. Use Up/Down to select a listener, `R` to refresh, and Enter or Delete followed by Enter to terminate its process. GridBash excludes unrelated system listeners and its own pane-host control sockets from this view.
 
+The bottom-right **Ports** control shows the most recent count of TCP listeners launched inside GridBash agent process trees. Click it or press Ctrl+Alt+p to scan and see each port, process name, PID, and owning pane or tab. Use Up/Down to select a listener, `R` to refresh, and Enter or Delete followed by Enter to terminate its process. Scanning is paused while the inspector is closed. GridBash excludes unrelated system listeners and its own pane-host control sockets from this view.
+
 Deactivating a pane ends its terminal process, compacts the remaining panes, and shrinks the grid whenever a smaller dimension can still hold them. Columns are removed before rows, so deactivating two panes from a `2x3` grid compacts it to `2x2`. The final pane cannot be deactivated.
 
 Alt+Shift+B backgrounds every explicitly selected pane, or the focused pane when the selected set is empty. GridBash first launches fresh panes with the same profile, command, auth, folder, and worktree; only after all replacements succeed are the original PTYs moved into the session-wide pool. Custom pane names follow the original jobs, while fresh replacements return to numbered labels.
@@ -332,9 +374,9 @@ settings = "f8"
 ```
 
 Supported actions are `quit`, `help`, `focus-left`, `focus-right`, `focus-up`,
-`focus-down`, `toggle-selection`, `select-all`, `sleep-panes`, `restart-panes`,
+`focus-down`, `toggle-selection`, `toggle-grid-selection`, `select-all`, `sleep-panes`, `restart-panes`,
 `next-tab`, `new-tab`, `close-grid`, `resize-grid`, `swap-panes`, `zoom-pane`, `command-line`,
-`command-palette`, `voice-input`, `settings`, `previous-panes`, `ports`,
+`command-palette`, `bashbot`, `voice-input`, `edit-goal`, `stop-goal`, `settings`, `previous-panes`, `ports`,
 `pane-activity`, `copy-mode`, `auth-profiles`, `capture-output`,
 `toggle-output-logging`, `rename-tab`, and `rename-pane`. Unlisted actions retain their
 defaults. Duplicate chords and unmodified terminal keys are rejected. F1 and
@@ -348,7 +390,9 @@ customize `command-line` instead.
 
 The resize picker starts from the current dimensions and shows each existing pane's latest activity summary when one is available. Shrinking a grid deactivates live panes outside the retained upper-left rectangle; changing `3x3` to `3x2`, for example, removes the rightmost column.
 
-A pane's top border shows a stable activity state by default. Opt-in AI activity summaries replace that state with a concise work headline after output settles; GridBash never uses raw typing or terminal UI fragments as the displayed summary. A configured manager goal replaces pane summaries across the grid until removed. A quiet marker appears after roughly three seconds without output; it indicates output followed by inactivity, not completion or process exit. Saving a blank pane name restores its default number.
+A pane's top border carries its number and name on the left and its state on the right. Opt-in AI activity summaries add a concise work headline after the name once output settles; GridBash never uses raw typing or terminal UI fragments as the displayed summary. A configured manager goal replaces pane summaries across the grid until removed. Saving a blank pane name restores its default number.
+
+The state on the right is whichever one matters most: `exited`, `asleep`, `needs you`, or `idle`. `needs you` marks an agent pane that has stopped producing output for roughly three seconds, which is how an agent asks for input — it indicates output followed by inactivity, not completion or process exit. A non-agent pane that goes quiet reads `idle` instead. As a pane narrows, its header drops its usage figure first, then its activity summary; the number, name, and state are kept. Focused and selected panes are marked by a filled number chip and a coloured border, which outrank a pane's own state.
 
 ## Voice mode
 
@@ -447,7 +491,7 @@ pane_workload = "adaptive"     # or "unrestricted"
 [ui]
 compact_titles = false
 activity_badges = true
-confirm_quit = false
+confirm_quit = true
 keep_terminals_running = false
 scrollback_rows = 10000
 refresh_ms = 16

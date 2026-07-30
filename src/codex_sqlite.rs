@@ -126,6 +126,14 @@ impl CodexSqlitePool {
 
             match FileExt::try_lock(&lock) {
                 Ok(()) => {
+                    // Codex keeps an interrupted backfill claim for 15 minutes, while a new
+                    // startup waits only 30 seconds. Exclusive ownership of the GridBash lane
+                    // proves its previous pane is gone, so make that checkpoint claimable again.
+                    if prepare_released_lane(&home).is_err() {
+                        // Leave a busy or unreadable database untouched and use another lane.
+                        let _ = FileExt::unlock(&lock);
+                        continue;
+                    }
                     return Ok(CodexSqliteLease { home, _lock: lock });
                 }
                 Err(TryLockError::WouldBlock) => continue,
@@ -236,6 +244,60 @@ fn normalized_path(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
+fn prepare_released_lane(home: &Path) -> Result<()> {
+    let entries = fs::read_dir(home)
+        .with_context(|| format!("failed to inspect Codex SQLite lane {}", home.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to inspect an entry in Codex SQLite lane {}",
+                home.display()
+            )
+        })?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("failed to inspect {}", entry.path().display()))?
+            .is_file()
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if !name.starts_with(CODEX_STATE_DB_PREFIX) || !name.ends_with(CODEX_STATE_DB_SUFFIX) {
+            continue;
+        }
+        reset_interrupted_backfill(&path).with_context(|| {
+            format!(
+                "failed to prepare released Codex SQLite state DB {}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn reset_interrupted_backfill(path: &Path) -> rusqlite::Result<bool> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(std::time::Duration::from_millis(250))?;
+    match connection.execute(
+        "UPDATE backfill_state SET status = 'pending' WHERE id = 1 AND status = 'running'",
+        [],
+    ) {
+        Ok(changed) => Ok(changed > 0),
+        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
+            if message.contains("no such table: backfill_state") =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn create_private_dir_all(path: &Path) -> std::io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true);
@@ -317,6 +379,40 @@ fn stable_scope_id(value: &OsStr) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_backfill_state(path: &Path, status: &str, watermark: &str) {
+        let connection = Connection::open(path).expect("open test state db");
+        connection
+            .execute_batch(
+                "CREATE TABLE backfill_state (\
+                    id INTEGER PRIMARY KEY,\
+                    status TEXT NOT NULL,\
+                    last_watermark TEXT,\
+                    last_success_at INTEGER,\
+                    updated_at INTEGER NOT NULL\
+                );",
+            )
+            .expect("create backfill state");
+        connection
+            .execute(
+                "INSERT INTO backfill_state \
+                    (id, status, last_watermark, last_success_at, updated_at) \
+                 VALUES (1, ?1, ?2, NULL, 123)",
+                (status, watermark),
+            )
+            .expect("insert backfill state");
+    }
+
+    fn read_backfill_state(path: &Path) -> (String, String, i64) {
+        let connection = Connection::open(path).expect("open test state db");
+        connection
+            .query_row(
+                "SELECT status, last_watermark, updated_at FROM backfill_state WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("read backfill state")
+    }
 
     fn write_threads(path: &Path, rows: &[(&str, &str, i64)]) {
         let connection = Connection::open(path).expect("open test state DB");
@@ -421,22 +517,45 @@ mod tests {
     }
 
     #[test]
-    fn restart_allocation_excludes_lane_held_by_old_pane() {
+    fn released_lane_resumes_an_interrupted_backfill_without_losing_its_checkpoint() {
         let root = TestRoot::new();
         let pool = root.pool();
-        let pane_env = BTreeMap::new();
+        let scope = stable_scope_id(OsStr::new(DEFAULT_CODEX_HOME_SCOPE));
+        let lane = root.0.join(scope).join("lane-1");
+        fs::create_dir_all(&lane).expect("create lane");
+        let state_db = lane.join("state_5.sqlite");
+        write_backfill_state(&state_db, "running", "sessions/checkpoint.jsonl");
 
-        let old_pane = pool
-            .for_pane_with_inherited(&pane_env, None, None, None)
-            .expect("old pane lease");
-        let old_home = sqlite_home(&old_pane).to_path_buf();
+        let lease = pool
+            .for_pane_with_inherited(&BTreeMap::new(), None, None, None)
+            .expect("acquire interrupted lane");
 
-        let replacement = pool
-            .for_pane_with_inherited(&pane_env, None, None, None)
-            .expect("replacement pane lease");
+        assert_eq!(sqlite_home(&lease), lane);
+        assert_eq!(
+            read_backfill_state(&state_db),
+            ("pending".into(), "sessions/checkpoint.jsonl".into(), 123)
+        );
+    }
 
-        assert!(old_pane.lease.is_some());
-        assert_ne!(sqlite_home(&replacement), old_home);
+    #[test]
+    fn released_lane_preserves_a_completed_backfill() {
+        let root = TestRoot::new();
+        let pool = root.pool();
+        let scope = stable_scope_id(OsStr::new(DEFAULT_CODEX_HOME_SCOPE));
+        let lane = root.0.join(scope).join("lane-1");
+        fs::create_dir_all(&lane).expect("create lane");
+        let state_db = lane.join("state_5.sqlite");
+        write_backfill_state(&state_db, "complete", "sessions/complete.jsonl");
+
+        let lease = pool
+            .for_pane_with_inherited(&BTreeMap::new(), None, None, None)
+            .expect("acquire completed lane");
+
+        assert_eq!(sqlite_home(&lease), lane);
+        assert_eq!(
+            read_backfill_state(&state_db),
+            ("complete".into(), "sessions/complete.jsonl".into(), 123)
+        );
     }
 
     #[test]
@@ -476,6 +595,55 @@ mod tests {
                 .expect("filter old thread"),
             None
         );
+    }
+
+    #[test]
+    fn active_lane_backfill_state_is_not_changed_by_another_lease() {
+        let root = TestRoot::new();
+        let pool = root.pool();
+        let pane_env = BTreeMap::new();
+        let active = pool
+            .for_pane_with_inherited(&pane_env, None, None, None)
+            .expect("acquire active lane");
+        let active_state_db = sqlite_home(&active).join("state_5.sqlite");
+        write_backfill_state(
+            &active_state_db,
+            "running",
+            "sessions/active-checkpoint.jsonl",
+        );
+
+        let other = pool
+            .for_pane_with_inherited(&pane_env, None, None, None)
+            .expect("acquire another lane");
+
+        assert_ne!(sqlite_home(&other), sqlite_home(&active));
+        assert_eq!(
+            read_backfill_state(&active_state_db),
+            (
+                "running".into(),
+                "sessions/active-checkpoint.jsonl".into(),
+                123
+            )
+        );
+    }
+
+    #[test]
+    fn restart_allocation_excludes_lane_held_by_old_pane() {
+        let root = TestRoot::new();
+        let pool = root.pool();
+        let pane_env = BTreeMap::new();
+
+        let old_pane = pool
+            .for_pane_with_inherited(&pane_env, None, None, None)
+            .expect("old pane lease");
+        let old_home = sqlite_home(&old_pane).to_path_buf();
+
+        let replacement = pool
+            .for_pane_with_inherited(&pane_env, None, None, None)
+            .expect("replacement pane lease");
+
+        assert!(old_pane.lease.is_some());
+        assert_ne!(sqlite_home(&replacement), old_home);
     }
 
     #[test]

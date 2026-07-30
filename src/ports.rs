@@ -1,8 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
-    io,
-    process::Command,
+    io::{self, Read},
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
+
+const INSPECTOR_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const INSPECTOR_COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentProcessRoot {
@@ -35,6 +40,7 @@ pub fn discover_agent_ports(roots: &[AgentProcessRoot]) -> io::Result<Vec<AgentP
     if roots.is_empty() {
         return Ok(Vec::new());
     }
+
     let processes = process_snapshot()?;
     let listeners = listening_sockets()?;
     Ok(associate_agent_ports(roots, &processes, listeners))
@@ -47,6 +53,7 @@ pub fn terminate_process(pid: u32) -> io::Result<()> {
             "refusing to terminate an invalid or current process",
         ));
     }
+
     terminate_process_platform(pid)
 }
 
@@ -178,9 +185,9 @@ fn endpoint_port(endpoint: &str) -> Option<u16> {
 
 #[cfg(windows)]
 fn listening_sockets() -> io::Result<Vec<ListeningSocket>> {
-    let output = Command::new("netstat")
-        .args(["-ano", "-p", "tcp"])
-        .output()?;
+    let mut command = Command::new("netstat");
+    command.args(["-ano", "-p", "tcp"]);
+    let output = command_output_with_timeout(&mut command)?;
     if !output.status.success() {
         return Err(io::Error::other("netstat failed while listing TCP ports"));
     }
@@ -225,6 +232,7 @@ fn process_snapshot() -> io::Result<HashMap<u32, ProcessInfo>> {
     if snapshot == INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error());
     }
+
     let mut entry = unsafe { mem::zeroed::<PROCESSENTRY32W>() };
     entry.dwSize = mem::size_of::<PROCESSENTRY32W>() as u32;
     let mut processes = HashMap::new();
@@ -255,6 +263,7 @@ fn terminate_process_platform(pid: u32) -> io::Result<()> {
         Foundation::CloseHandle,
         System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess},
     };
+
     let process = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
     if process.is_null() {
         return Err(io::Error::last_os_error());
@@ -272,22 +281,25 @@ fn listening_sockets() -> io::Result<Vec<ListeningSocket>> {
     } else {
         "lsof"
     };
-    match Command::new(lsof)
-        .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"])
-        .output()
-    {
+    let mut command = Command::new(lsof);
+    command.args(["-nP", "-iTCP", "-sTCP:LISTEN", "-Fpcn"]);
+    match command_output_with_timeout(&mut command) {
         Ok(output) if output.status.success() || !output.stdout.is_empty() => {
             return Ok(parse_lsof(&String::from_utf8_lossy(&output.stdout)));
         }
         _ => {}
     }
+
     #[cfg(target_os = "linux")]
     {
-        let output = Command::new("ss").args(["-H", "-ltnp"]).output()?;
+        let mut command = Command::new("ss");
+        command.args(["-H", "-ltnp"]);
+        let output = command_output_with_timeout(&mut command)?;
         if output.status.success() {
             return Ok(parse_linux_ss(&String::from_utf8_lossy(&output.stdout)));
         }
     }
+
     Err(io::Error::new(
         io::ErrorKind::NotFound,
         "neither lsof nor a supported socket inspector is available",
@@ -393,13 +405,64 @@ fn process_snapshot() -> io::Result<HashMap<u32, ProcessInfo>> {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn process_snapshot() -> io::Result<HashMap<u32, ProcessInfo>> {
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,comm="])
-        .output()?;
+    let mut command = Command::new("ps");
+    command.args(["-axo", "pid=,ppid=,comm="]);
+    let output = command_output_with_timeout(&mut command)?;
     if !output.status.success() {
         return Err(io::Error::other("ps failed while listing processes"));
     }
     Ok(parse_ps(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn command_output_with_timeout(command: &mut Command) -> io::Result<Output> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| io::Error::other("failed to capture inspector stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| io::Error::other("failed to capture inspector stderr"))?;
+    let stdout_reader = thread::spawn(move || read_all(stdout));
+    let stderr_reader = thread::spawn(move || read_all(stderr));
+    let deadline = Instant::now() + INSPECTOR_COMMAND_TIMEOUT;
+
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "port inspection command timed out",
+            ));
+        }
+        thread::sleep(INSPECTOR_COMMAND_POLL_INTERVAL);
+    };
+
+    Ok(Output {
+        status,
+        stdout: join_reader(stdout_reader)?,
+        stderr: join_reader(stderr_reader)?,
+    })
+}
+
+fn read_all(mut reader: impl Read) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn join_reader(reader: thread::JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| io::Error::other("port inspection output reader panicked"))?
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -506,6 +569,7 @@ mod tests {
                 process: None,
             },
         ];
+
         assert_eq!(
             associate_agent_ports(&roots, &processes, listeners),
             vec![AgentPort {

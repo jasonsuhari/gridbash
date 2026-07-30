@@ -102,7 +102,9 @@ impl CopyMode {
             lines.push(String::new());
         }
         let line = lines.len().saturating_sub(1);
-        let column = line_char_len(&lines[line]).saturating_sub(1);
+        let column = lines
+            .get(line)
+            .map_or(0, |text| line_char_len(text).saturating_sub(1));
         let mut mode = Self {
             pane,
             lines,
@@ -278,27 +280,43 @@ impl CopyMode {
     }
 
     pub fn copy_text(&self) -> String {
+        // Every line index below is clamped: the cursor and the selection anchor
+        // are bookkeeping that a resize or a fresh capture can outdate, and a
+        // stale index would take down the whole TUI over a copy.
+        let last_line = self.lines.len().saturating_sub(1);
         let Some(selection) = self.selection else {
-            return self.lines[self.cursor.line].clone();
+            return self
+                .lines
+                .get(self.cursor.line)
+                .cloned()
+                .unwrap_or_default();
         };
 
         match selection.kind {
             SelectionKind::Lines => {
-                let start = selection.anchor.line.min(self.cursor.line);
-                let end = selection.anchor.line.max(self.cursor.line);
-                self.lines[start..=end].join("\n")
+                let start = selection.anchor.line.min(self.cursor.line).min(last_line);
+                let end = selection
+                    .anchor
+                    .line
+                    .max(self.cursor.line)
+                    .min(last_line)
+                    .max(start);
+                self.lines.get(start..=end).unwrap_or_default().join("\n")
             }
             SelectionKind::Characters => {
                 let (start, end) = normalize_points(selection.anchor, self.cursor);
                 let mut selected = Vec::new();
-                for line in start.line..=end.line {
+                for line in start.line.min(last_line)..=end.line.min(last_line) {
+                    let Some(text) = self.lines.get(line) else {
+                        continue;
+                    };
                     let from = if line == start.line { start.column } else { 0 };
                     let to = if line == end.line {
                         end.column.saturating_add(1)
                     } else {
-                        line_char_len(&self.lines[line])
+                        line_char_len(text)
                     };
-                    selected.push(slice_chars(&self.lines[line], from, to));
+                    selected.push(slice_chars(text, from, to));
                 }
                 selected.join("\n")
             }
@@ -392,7 +410,9 @@ impl CopyMode {
     }
 
     fn line_max_column(&self, line: usize) -> usize {
-        line_char_len(&self.lines[line]).saturating_sub(1)
+        self.lines
+            .get(line)
+            .map_or(0, |text| line_char_len(text).saturating_sub(1))
     }
 
     fn clamp_cursor_column(&mut self) {
@@ -527,6 +547,43 @@ mod tests {
         assert_eq!(view.rows.len(), 1);
         assert_eq!(view.rows[0].text, " ");
         assert_eq!(mode.copy_text(), "");
+    }
+
+    /// The cursor and the selection anchor are plain indices. Copying with one
+    /// pointing past the captured lines used to index straight out of bounds.
+    #[test]
+    fn copying_with_a_stale_cursor_or_anchor_does_not_panic() {
+        let mut mode = mode(&["alpha", "bravo"]);
+
+        mode.cursor = TextPoint {
+            line: 99,
+            column: 99,
+        };
+        assert_eq!(mode.copy_text(), "");
+        assert_eq!(mode.line_max_column(99), 0);
+
+        mode.selection = Some(Selection {
+            anchor: TextPoint {
+                line: 42,
+                column: 0,
+            },
+            kind: SelectionKind::Lines,
+        });
+        assert_eq!(mode.copy_text(), "bravo");
+
+        // Both ends are out of range, so the clamped range covers the last line
+        // in full rather than reaching for columns that are not there.
+        mode.selection = Some(Selection {
+            anchor: TextPoint {
+                line: 42,
+                column: 7,
+            },
+            kind: SelectionKind::Characters,
+        });
+        assert_eq!(mode.copy_text(), "bravo");
+
+        mode.cursor = TextPoint { line: 0, column: 1 };
+        assert_eq!(mode.copy_text(), "lpha\nbravo");
     }
 
     #[test]

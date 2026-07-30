@@ -17,6 +17,7 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result, anyhow};
 use crossterm::{
+    cursor::Show,
     event::{
         self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
         EnableFocusChange, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -40,6 +41,7 @@ use crate::{
         PaneTarget,
     },
     copy_mode::{CopyMode, CopyModeView},
+    diagnostics,
     image_preview::{self, ImagePreview},
     keybindings::{Action, KeyBindings, is_help_recovery, is_quit_recovery},
     layout::{GridLayout, GridSize, PaneId, pane_at},
@@ -51,8 +53,8 @@ use crate::{
     profiles::{default_profile_name, find_profile, is_terminal_profile, startup_profiles},
     pty::{PtyEvent, PtyWriteToken},
     session::{
-        InterruptedRecovery, SavedBackgroundPane, SavedPane, SavedPaneHistory, SavedTab,
-        SessionRecord, SessionRecorder,
+        InterruptedRecovery, InterruptedRecoveryClaim, SavedBackgroundPane, SavedPane,
+        SavedPaneHistory, SavedTab, SessionRecord, SessionRecorder, complete_interrupted_recovery,
     },
     setup::{LaunchPlan, PaneLaunchSpec, folder_display_name},
     ui,
@@ -64,6 +66,16 @@ use crate::{
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// How many panics and errors one minute of the event loop may recover from
+/// before the session exits instead. Panics get the smaller allowance: an error
+/// is often a transient failure to reach the disk or a subprocess, while a panic
+/// means state the code did not expect.
+const MAX_RECOVERED_PANICS: u32 = 8;
+const MAX_RECOVERED_LOOP_ERRORS: u32 = 32;
+/// Windows consoles deliver a paste as synthetic keystrokes instead of a
+/// bracketed paste, so a burst has to be stitched back together by hand.
+const PASTE_BURST_GAP: Duration = Duration::from_millis(4);
+const PASTE_BURST_MAX_BYTES: usize = 256 * 1024;
 const LARGE_GRID_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const PTY_EVENT_CHANNEL_CAPACITY: usize = 256;
 const PTY_DRAIN_MAX_EVENTS: usize = 64;
@@ -107,6 +119,7 @@ pub struct App {
     worktrees: Option<ManagedWorktreeOptions>,
     tabs: Vec<Option<GridTabSnapshot>>,
     active_tab: usize,
+    selected_grids: BTreeSet<usize>,
     active_grid_id: u64,
     next_grid_id: u64,
     tab_title: String,
@@ -169,10 +182,12 @@ pub struct App {
     restored_hosts: Vec<Option<PtyHostRef>>,
     restored_tabs: Vec<SavedTab>,
     session_recorder: Option<SessionRecorder>,
+    interrupted_recovery_claim: Option<InterruptedRecoveryClaim>,
     output_logs: OutputLogs,
     next_pane_id: usize,
     next_background_job_id: u64,
     next_tab_number: usize,
+    tab_rects: Vec<(usize, Rect)>,
     previous_panes_button: Option<Rect>,
     previous_pane_rows: Vec<(usize, Rect)>,
     pane_settings_button: Option<Rect>,
@@ -188,6 +203,7 @@ pub struct App {
     port_rows: Vec<(usize, Rect)>,
     event_tx: mpsc::Sender<PtyEvent>,
     event_rx: mpsc::Receiver<PtyEvent>,
+    pane_routes_scratch: HashMap<(PaneId, u64), PaneRoute>,
     pane_render_cache: RefCell<HashMap<PaneId, ui::PaneRenderCache>>,
     applied_workloads: HashMap<PaneId, (PaneWorkloadPolicy, PaneWorkloadClass)>,
     terminal_focused: bool,
@@ -218,6 +234,7 @@ struct AppInit {
     restored_hosts: Vec<Option<PtyHostRef>>,
     restored_tabs: Vec<SavedTab>,
     session_recorder: Option<SessionRecorder>,
+    interrupted_recovery_claim: Option<InterruptedRecoveryClaim>,
     status: String,
 }
 
@@ -249,6 +266,28 @@ struct BackgroundJob {
     host: Option<PtyHostRef>,
     history: SavedPaneHistory,
     idle: PaneIdleState,
+}
+
+fn retire_pane(pane: &mut PtyPane) -> Result<()> {
+    let policy_result = pane.set_keep_running(false);
+    let termination_result = pane.terminate();
+    match (policy_result, termination_result) {
+        (_, Ok(())) => Ok(()),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(policy_error), Err(termination_error)) => Err(termination_error.context(format!(
+            "failed to disable pane-host persistence first: {policy_error:#}"
+        ))),
+    }
+}
+
+fn retire_panes<'a>(panes: impl IntoIterator<Item = &'a mut PtyPane>) -> Result<()> {
+    let mut first_error = None;
+    for pane in panes {
+        if let Err(error) = retire_pane(pane) {
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 impl BackgroundJob {
@@ -296,6 +335,8 @@ impl BackgroundJob {
 pub struct TabLabel {
     pub title: String,
     pub active: bool,
+    pub selected: bool,
+    pub waiting: bool,
     pub activity: bool,
     pub exited: bool,
 }
@@ -945,6 +986,12 @@ pub struct FollowUpDialog {
     pub todo_position: usize,
     pub todo_count: usize,
     pub quiet_seconds: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct QuitConfirmationView {
+    pub resume_command: String,
+    pub keeps_terminals_running: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1818,7 +1865,7 @@ impl Default for SettingsState {
             create_auth: None,
             compact_titles: false,
             activity_badges: true,
-            confirm_quit: false,
+            confirm_quit: UiConfig::default_confirm_quit(),
             keep_terminals_running: false,
             idle_followups: true,
             idle_seconds: crate::config::TodoSettings::default_idle_seconds(),
@@ -2155,13 +2202,19 @@ impl SettingsState {
                     .filter(|edit| edit.target == target)
                     .map(|edit| edit.buffer.as_str())
                     .unwrap_or_else(|| match target {
-                        ManagerSettingTarget::ActivitySummaries => unreachable!(),
+                        // Handled by the early return above; an empty value keeps
+                        // the row renderable instead of panicking mid-frame.
+                        ManagerSettingTarget::ActivitySummaries => "",
                         ManagerSettingTarget::Endpoint => config.endpoint.as_str(),
                         ManagerSettingTarget::Model => config.model.as_str(),
                         ManagerSettingTarget::ApiKey => config.api_key.as_str(),
                     });
                 let (label, value, hint) = match target {
-                    ManagerSettingTarget::ActivitySummaries => unreachable!(),
+                    ManagerSettingTarget::ActivitySummaries => (
+                        "AI activity summaries",
+                        switch_value(config.activity_summaries),
+                        "sends bounded active-tab output after quiet periods",
+                    ),
                     ManagerSettingTarget::Endpoint => (
                         "API endpoint",
                         format!("{}{}", raw, if editing { "_" } else { "" }),
@@ -2546,6 +2599,7 @@ impl App {
             restored_hosts: Vec::new(),
             restored_tabs: Vec::new(),
             session_recorder: None,
+            interrupted_recovery_claim: None,
             status,
         })
     }
@@ -2602,6 +2656,7 @@ impl App {
             restored_hosts,
             restored_tabs,
             session_recorder: Some(recorder),
+            interrupted_recovery_claim: None,
             status,
         })
     }
@@ -2617,6 +2672,7 @@ impl App {
             mut tabs,
             session_count,
             pane_count,
+            claim,
         } = recovery;
         let active = if tabs.is_empty() {
             return Err(anyhow!("interrupted recovery has no tabs"));
@@ -2660,6 +2716,7 @@ impl App {
             restored_hosts,
             restored_tabs: tabs,
             session_recorder: None,
+            interrupted_recovery_claim: Some(claim),
             status: format!(
                 "recovered {pane_count} pane{} from {session_count} interrupted session{} into {tab_count} tab{} | Alt+t switches tabs{agent_control_status}",
                 if pane_count == 1 { "" } else { "s" },
@@ -2697,6 +2754,7 @@ impl App {
             worktrees: init.worktrees,
             tabs: vec![None],
             active_tab: 0,
+            selected_grids: BTreeSet::new(),
             active_grid_id: 1,
             next_grid_id: 2,
             tab_title: init.tab_title,
@@ -2759,10 +2817,12 @@ impl App {
             restored_hosts: init.restored_hosts,
             restored_tabs: init.restored_tabs,
             session_recorder: init.session_recorder,
+            interrupted_recovery_claim: init.interrupted_recovery_claim,
             output_logs: OutputLogs::default(),
             next_pane_id: 0,
             next_background_job_id,
             next_tab_number: 2,
+            tab_rects: Vec::new(),
             previous_panes_button: None,
             previous_pane_rows: Vec::new(),
             pane_settings_button: None,
@@ -2778,6 +2838,7 @@ impl App {
             port_rows: Vec::new(),
             event_tx,
             event_rx,
+            pane_routes_scratch: HashMap::new(),
             pane_render_cache: RefCell::new(HashMap::new()),
             applied_workloads: HashMap::new(),
             terminal_focused: true,
@@ -2793,21 +2854,39 @@ impl App {
     }
 
     pub fn run(&mut self) -> Result<()> {
+        let _panic_hook = TerminalPanicHookGuard::install(self.mouse_enabled);
+        let mut restore_guard = TerminalRestoreGuard::new(self.mouse_enabled);
         let mut terminal = setup_terminal(self.mouse_enabled)?;
         let result = self.run_in_terminal(&mut terminal);
-        teardown_terminal(&mut terminal, self.mouse_enabled)?;
+        let teardown_result = teardown_terminal(&mut terminal, self.mouse_enabled);
+        if teardown_result.is_ok() {
+            restore_guard.disarm();
+        }
+        if let Err(cleanup_error) = teardown_result {
+            return match result {
+                Ok(()) => Err(cleanup_error),
+                Err(run_error) => {
+                    Err(run_error
+                        .context(format!("terminal cleanup also failed: {cleanup_error:#}")))
+                }
+            };
+        }
         if result.is_ok()
-            && self.settings.keep_terminals_running
-            && (self.panes.iter().any(|pane| !pane.exited)
-                || self
-                    .tabs
-                    .iter()
-                    .filter_map(Option::as_ref)
-                    .any(|tab| tab.panes.iter().any(|pane| !pane.exited)))
+            && let Some(command) = self.resume_command()
         {
-            println!(
-                "gridbash: terminals are still running; reconnect with `gridbash resume --latest`"
-            );
+            let terminals_still_running = self.settings.keep_terminals_running
+                && (self.panes.iter().any(|pane| !pane.exited)
+                    || self
+                        .tabs
+                        .iter()
+                        .filter_map(Option::as_ref)
+                        .any(|tab| tab.panes.iter().any(|pane| !pane.exited)));
+            if terminals_still_running {
+                println!("gridbash: terminals are still running; reconnect to this exact session:");
+            } else {
+                println!("gridbash: session saved; resume this exact setup:");
+            }
+            println!("{command}");
         }
         result
     }
@@ -2815,14 +2894,24 @@ impl App {
     fn run_in_terminal(&mut self, terminal: &mut Tui) -> Result<()> {
         if self.launch_plan.is_none() {
             let current_dir = resolved_current_dir()?;
-            let mut composer = Composer::new(current_dir, self.worktrees.clone(), &self.config)?;
-            let Some(plan) = composer.run(terminal, &self.config)? else {
+            let default_name = self.tab_title.clone();
+            let mut composer = Composer::new(
+                current_dir,
+                self.worktrees.clone(),
+                &self.config,
+                &default_name,
+            )?;
+            let Some(outcome) = composer.run(terminal, &self.config)? else {
                 return Ok(());
             };
-            self.set_launch_plan(plan)?;
+            self.tab_title = outcome.title;
+            self.set_launch_plan(outcome.plan)?;
         }
 
         self.spawn_initial_panes()?;
+        if let Some(claim) = self.interrupted_recovery_claim.take() {
+            complete_interrupted_recovery(&claim)?;
+        }
         self.sync_initial_pane_sizes(terminal)?;
 
         let run_result = self.run_loop(terminal);
@@ -2874,19 +2963,55 @@ impl App {
         self.start_session_recorder(&plan)?;
 
         for (index, spec) in plan.panes.iter().enumerate() {
-            self.spawn_pane_spec(index, spec)?;
+            if let Err(error) = self.spawn_pane_spec(index, spec) {
+                let cleanup_error = self.retire_owned_panes().err();
+                self.panes.clear();
+                return Err(match cleanup_error {
+                    Some(cleanup_error) => error.context(format!(
+                        "initial pane cleanup also failed: {cleanup_error:#}"
+                    )),
+                    None => error,
+                });
+            }
         }
         self.restored_histories.clear();
         self.restored_hosts.clear();
         for saved_tab in mem::take(&mut self.restored_tabs) {
-            let snapshot = self.restore_saved_tab(saved_tab)?;
-            self.tabs.push(Some(snapshot));
+            match self.restore_saved_tab(saved_tab) {
+                Ok(snapshot) => self.tabs.push(Some(snapshot)),
+                Err(error) => {
+                    let cleanup_error = self.retire_owned_panes().err();
+                    return Err(match cleanup_error {
+                        Some(cleanup_error) => error.context(format!(
+                            "initial workspace cleanup also failed: {cleanup_error:#}"
+                        )),
+                        None => error,
+                    });
+                }
+            }
         }
         self.restore_background_panes();
         self.next_tab_number = self.tabs.len() + 1;
         self.start_usage_monitor(&plan);
 
         self.save_session_snapshot()
+    }
+
+    fn retire_owned_panes(&mut self) -> Result<()> {
+        let mut first_error = retire_panes(self.panes.iter_mut()).err();
+        for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
+            if let Err(error) = retire_panes(tab.panes.iter_mut()) {
+                first_error.get_or_insert(error);
+            }
+        }
+        for job in &mut self.background_jobs {
+            if let Some(pane) = job.pane.as_mut()
+                && let Err(error) = retire_pane(pane)
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     fn restore_background_panes(&mut self) {
@@ -2923,8 +3048,14 @@ impl App {
         self.background_jobs = jobs;
     }
 
+    /// Name the next tab would take, without consuming the number. The composer
+    /// shows this as the pre-filled grid name.
+    fn peek_tab_title(&self) -> String {
+        format!("Grid {}", self.next_tab_number)
+    }
+
     fn next_tab_title(&mut self) -> String {
-        let title = format!("Grid {}", self.next_tab_number);
+        let title = self.peek_tab_title();
         self.next_tab_number += 1;
         title
     }
@@ -2944,7 +3075,18 @@ impl App {
         for (index, spec) in plan.panes.iter().enumerate() {
             let history = histories.get(index).cloned().unwrap_or_default();
             let host = hosts.get(index).cloned().flatten();
-            panes.push(self.create_pane(spec, index, &history, host)?);
+            match self.create_pane(spec, index, &history, host) {
+                Ok(pane) => panes.push(pane),
+                Err(error) => {
+                    let cleanup_error = retire_panes(panes.iter_mut()).err();
+                    return Err(match cleanup_error {
+                        Some(cleanup_error) => error.context(format!(
+                            "restored-tab cleanup also failed: {cleanup_error:#}"
+                        )),
+                        None => error,
+                    });
+                }
+            }
         }
         let pane_count = panes.len();
         let grid = plan.grid;
@@ -3029,6 +3171,7 @@ impl App {
     }
 
     fn close_tab_modals(&mut self) {
+        self.close_grid_confirmation_pending = false;
         self.command_palette.close();
         self.rename.close();
         self.tab_rename.close();
@@ -3081,11 +3224,16 @@ impl App {
         Ok(())
     }
 
-    fn add_tab_from_plan(&mut self, plan: LaunchPlan) -> Result<()> {
+    fn add_tab_from_plan(&mut self, title: Option<String>, plan: LaunchPlan) -> Result<()> {
         self.save_current_tab();
         self.tabs.push(None);
         self.active_tab = self.tabs.len() - 1;
-        let title = self.next_tab_title();
+        // The number is consumed either way so later tabs never reuse it.
+        let fallback = self.next_tab_title();
+        let title = title
+            .as_deref()
+            .and_then(normalized_tab_title)
+            .unwrap_or(fallback);
         self.close_tab_modals();
         self.activate_plan_as_tab(title, plan)
     }
@@ -3240,88 +3388,235 @@ impl App {
         env
     }
 
+    /// Drives the interface until the user quits.
+    ///
+    /// Every iteration runs behind a panic firewall. A panic or error inside one
+    /// iteration is recorded, surfaced in the status bar, and dropped; the
+    /// session keeps its panes and its terminal state. Only a session that
+    /// cannot stop failing gives up, and it does so through the normal teardown
+    /// path so the terminal is always restored.
     fn run_loop(&mut self, terminal: &mut Tui) -> Result<()> {
-        let mut immediate_render = true;
-        let mut output_render = false;
-        let mut last_render = Instant::now();
-        let mut mouse_capture_enabled = self.mouse_enabled;
+        let mut state = LoopState {
+            immediate_render: true,
+            output_render: false,
+            last_render: Instant::now(),
+            mouse_capture_enabled: self.mouse_enabled,
+        };
+        let mut panic_budget = FailureBudget::new(MAX_RECOVERED_PANICS);
+        let mut error_budget = FailureBudget::new(MAX_RECOVERED_LOOP_ERRORS);
 
         loop {
-            let frame_interval = self.output_frame_interval();
-            let until_frame = frame_interval.saturating_sub(last_render.elapsed());
-            let wait = if immediate_render || !self.event_rx.is_empty() {
-                Duration::ZERO
-            } else if output_render {
-                until_frame.min(INPUT_POLL_INTERVAL)
-            } else {
-                INPUT_POLL_INTERVAL
-            };
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _shield = diagnostics::PanicShield::new();
+                self.run_loop_iteration(terminal, &mut state)
+            }));
 
-            if event::poll(wait)? {
-                let event = event::read()?;
-                if self.handle_terminal_event(
-                    terminal,
-                    event,
-                    &mut immediate_render,
-                    &mut mouse_capture_enabled,
-                )? {
-                    break;
+            match outcome {
+                Ok(Ok(LoopStep::Quit)) => break,
+                Ok(Ok(LoopStep::Continue)) => {}
+                Ok(Err(error)) => {
+                    let detail = format!("{error:#}");
+                    diagnostics::record_recovered("tui", "event loop iteration", &detail);
+                    if error_budget.record() {
+                        return Err(error.context(format!(
+                            "the event loop failed {} times without recovering",
+                            error_budget.count()
+                        )));
+                    }
+                    self.status = format!("recovered from an internal error: {detail}");
+                    state.immediate_render = true;
+                }
+                Err(payload) => {
+                    let detail = diagnostics::panic_payload_message(payload.as_ref());
+                    diagnostics::record_recovered("tui", "event loop panic", &detail);
+                    if panic_budget.record() {
+                        return Err(anyhow!(
+                            "the interface panicked {} times without recovering; last panic: {detail}",
+                            panic_budget.count()
+                        ));
+                    }
+                    // A panic inside `draw` leaves the frame half-written and
+                    // never swaps the buffers, so the backend's diff no longer
+                    // describes the screen. Drop the partial frame, then force a
+                    // full repaint.
+                    terminal.current_buffer_mut().reset();
+                    let _ = terminal.clear();
+                    state.immediate_render = true;
+                    self.status = format!(
+                        "recovered from an internal error ({}); a report was saved to the GridBash log directory",
+                        panic_budget.count()
+                    );
                 }
             }
-
-            output_render |= self.drain_pty_events();
-            immediate_render |= self.drain_usage_events();
-            immediate_render |= self.drain_auth_refresh();
-            immediate_render |= self.drain_command_events();
-            immediate_render |= self.drain_port_scan();
-            immediate_render |= self.drain_goal_reviews();
-            immediate_render |= self.drain_activity_summary_events();
-            immediate_render |= self.drain_assistant_events();
-            immediate_render |= self.drain_voice_events()?;
-            immediate_render |= self.drain_control_events();
-            immediate_render |= self.decay_activity();
-            immediate_render |= self.update_follow_up_prompt();
-            immediate_render |= self.schedule_goal_reviews();
-            immediate_render |= self.schedule_activity_summaries();
-            immediate_render |= self.autosave_session_if_due();
-            immediate_render |= self.schedule_port_scan();
-            if immediate_render {
-                immediate_render |= self.refresh_workload_classes();
-            }
-
-            if immediate_render || (output_render && last_render.elapsed() >= frame_interval) {
-                terminal.draw(|frame| {
-                    let draw_state = ui::draw(frame, self);
-                    self.grid_area = draw_state.grid_area;
-                    self.rects = draw_state.pane_rects;
-                    self.previous_panes_button = draw_state.previous_panes_button;
-                    self.previous_pane_rows = draw_state.previous_pane_rows;
-                    self.pane_settings_button = draw_state.pane_settings_button;
-                    self.pane_settings_rename_button = draw_state.pane_settings_rename_button;
-                    self.pane_settings_reload_button = draw_state.pane_settings_reload_button;
-                    self.pane_settings_sleep_button = draw_state.pane_settings_sleep_button;
-                    self.pane_settings_deactivate_button =
-                        draw_state.pane_settings_deactivate_button;
-                    self.pane_settings_goal_button = draw_state.pane_settings_goal_button;
-                    self.pane_settings_stop_goal_button = draw_state.pane_settings_stop_goal_button;
-                    self.background_jobs_button = draw_state.background_jobs_button;
-                    self.background_job_rows = draw_state.background_job_rows;
-                    self.ports_button = draw_state.ports_button;
-                    self.port_rows = draw_state.port_rows;
-                })?;
-                self.sync_pane_sizes();
-                immediate_render = false;
-                output_render = false;
-                last_render = Instant::now();
-            }
-            self.sync_mouse_capture(terminal, &mut mouse_capture_enabled)?;
         }
 
-        if mouse_capture_enabled {
+        if state.mouse_capture_enabled {
             execute!(terminal.backend_mut(), DisableMouseCapture)?;
         }
 
         Ok(())
+    }
+
+    fn run_loop_iteration(
+        &mut self,
+        terminal: &mut Tui,
+        state: &mut LoopState,
+    ) -> Result<LoopStep> {
+        let frame_interval = self.output_frame_interval();
+        let until_frame = frame_interval.saturating_sub(state.last_render.elapsed());
+        let wait = if state.immediate_render || !self.event_rx.is_empty() {
+            Duration::ZERO
+        } else if state.output_render {
+            until_frame.min(INPUT_POLL_INTERVAL)
+        } else {
+            INPUT_POLL_INTERVAL
+        };
+
+        if event::poll(wait)? {
+            for event in self.read_input_events()? {
+                if self.handle_terminal_event(
+                    terminal,
+                    event,
+                    &mut state.immediate_render,
+                    &mut state.mouse_capture_enabled,
+                )? {
+                    return Ok(LoopStep::Quit);
+                }
+            }
+        }
+
+        state.output_render |= self.drain_pty_events();
+        state.immediate_render |= self.flush_output_logs_if_due();
+        state.immediate_render |= self.drain_usage_events();
+        state.immediate_render |= self.drain_auth_refresh();
+        state.immediate_render |= self.drain_command_events();
+        state.immediate_render |= self.drain_port_scan();
+        state.immediate_render |= self.drain_goal_reviews();
+        state.immediate_render |= self.drain_activity_summary_events();
+        state.immediate_render |= self.drain_assistant_events();
+        state.immediate_render |= self.drain_voice_events()?;
+        state.immediate_render |= self.drain_control_events();
+        state.immediate_render |= self.decay_activity();
+        state.immediate_render |= self.update_follow_up_prompt();
+        state.immediate_render |= self.schedule_goal_reviews();
+        state.immediate_render |= self.schedule_activity_summaries();
+        state.immediate_render |= self.autosave_session_if_due();
+        state.immediate_render |= self.schedule_port_scan();
+        if state.immediate_render {
+            state.immediate_render |= self.refresh_workload_classes();
+        }
+
+        if state.immediate_render
+            || (state.output_render && state.last_render.elapsed() >= frame_interval)
+        {
+            terminal.draw(|frame| {
+                let draw_state = ui::draw(frame, self);
+                self.grid_area = draw_state.grid_area;
+                self.rects = draw_state.pane_rects;
+                self.tab_rects = draw_state.tab_rects;
+                self.previous_panes_button = draw_state.previous_panes_button;
+                self.previous_pane_rows = draw_state.previous_pane_rows;
+                self.pane_settings_button = draw_state.pane_settings_button;
+                self.pane_settings_rename_button = draw_state.pane_settings_rename_button;
+                self.pane_settings_reload_button = draw_state.pane_settings_reload_button;
+                self.pane_settings_sleep_button = draw_state.pane_settings_sleep_button;
+                self.pane_settings_deactivate_button = draw_state.pane_settings_deactivate_button;
+                self.pane_settings_goal_button = draw_state.pane_settings_goal_button;
+                self.pane_settings_stop_goal_button = draw_state.pane_settings_stop_goal_button;
+                self.background_jobs_button = draw_state.background_jobs_button;
+                self.background_job_rows = draw_state.background_job_rows;
+                self.ports_button = draw_state.ports_button;
+                self.port_rows = draw_state.port_rows;
+            })?;
+            self.sync_pane_sizes();
+            state.immediate_render = false;
+            state.output_render = false;
+            state.last_render = Instant::now();
+        }
+        self.sync_mouse_capture(terminal, &mut state.mouse_capture_enabled)?;
+
+        Ok(LoopStep::Continue)
+    }
+
+    /// Reads the events crossterm has ready, folding a synthetic keystroke
+    /// burst back into a single `Event::Paste`.
+    ///
+    /// Windows consoles hand a paste to the application as one key event per
+    /// character, so crossterm never reports `Event::Paste` there and every
+    /// pasted line break arrives as Enter. Without this, pasting a multi-line
+    /// prompt submits the first line and runs the rest as separate commands.
+    /// Only bursts that span a line break are folded, so ordinary typing and
+    /// key repeat keep their existing per-key behaviour.
+    fn read_input_events(&self) -> Result<Vec<Event>> {
+        let first = event::read()?;
+        if !cfg!(windows) || !self.input_reaches_pane() {
+            return Ok(vec![first]);
+        }
+        let Some(first_char) = paste_burst_char(&first) else {
+            return Ok(vec![first]);
+        };
+
+        let mut keys = vec![first];
+        let mut text = String::from(first_char);
+        let mut trailing = None;
+        while text.len() < PASTE_BURST_MAX_BYTES {
+            // The console buffer can run dry mid-paste, so allow a short gap
+            // once a burst is under way rather than cutting it in half.
+            let gap = if keys.len() > 1 {
+                PASTE_BURST_GAP
+            } else {
+                Duration::ZERO
+            };
+            if !event::poll(gap)? {
+                break;
+            }
+            let event = event::read()?;
+            // Key releases are dropped by `handle_terminal_event` anyway, and
+            // Windows interleaves one after every synthesized character.
+            if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Press) {
+                continue;
+            }
+            match paste_burst_char(&event) {
+                Some(ch) => {
+                    text.push(ch);
+                    keys.push(event);
+                }
+                None => {
+                    trailing = Some(event);
+                    break;
+                }
+            }
+        }
+
+        if text.contains('\n') && text.chars().any(|ch| ch != '\n') {
+            keys.clear();
+            keys.push(Event::Paste(text));
+        }
+        keys.extend(trailing);
+        Ok(keys)
+    }
+
+    /// True when plain keystrokes are forwarded to a pane rather than consumed
+    /// by an overlay, modal, or the command line.
+    fn input_reaches_pane(&self) -> bool {
+        !self.quit_confirmation_pending
+            && !self.close_grid_confirmation_pending
+            && self.copy_mode.is_none()
+            && !self.command_palette.open
+            && !self.assistant.open
+            && !self.help_open
+            && self.grid_resizer.is_none()
+            && self.image_overlay.is_none()
+            && !self.tab_rename.open
+            && !self.rename.open
+            && !self.background_picker.open
+            && !self.previous_panes.open
+            && !self.pane_settings.open
+            && !self.port_inspector.open
+            && self.follow_up.is_none()
+            && !self.settings.open
+            && !self.command_line.focused
+            && self.exited_recovery_view().is_none()
     }
 
     fn handle_terminal_event(
@@ -3377,6 +3672,8 @@ impl App {
             }
             Event::Paste(text)
                 if !self.command_palette.open
+                    && !self.quit_confirmation_pending
+                    && !self.close_grid_confirmation_pending
                     && !self.settings.open
                     && self.grid_resizer.is_none()
                     && !self.rename.open
@@ -3392,11 +3689,13 @@ impl App {
                     self.command_line.insert_text(&text);
                     *needs_render = true;
                 } else {
-                    self.route_input(text.as_bytes())?;
+                    *needs_render |= self.route_paste(&text)?;
                 }
             }
             Event::Mouse(mouse)
                 if (self.mouse_enabled || !self.sleeping.is_empty())
+                    && !self.quit_confirmation_pending
+                    && !self.close_grid_confirmation_pending
                     && !self.command_palette.open
                     && !self.settings.open
                     && self.grid_resizer.is_none()
@@ -3478,9 +3777,14 @@ impl App {
         }
 
         self.applied_workloads.retain(|id, _| seen.contains(id));
+        // Only the panes in the active grid are ever blitted, but `seen` also
+        // covers inactive tabs and background jobs. Each stale entry is a full
+        // pane-sized `Buffer`, so keep the cache to what is on screen; it
+        // rebuilds on the first draw after a tab switch.
+        let visible = self.panes.iter().map(PtyPane::id).collect::<BTreeSet<_>>();
         self.pane_render_cache
             .borrow_mut()
-            .retain(|id, _| seen.contains(id));
+            .retain(|id, _| visible.contains(id));
         self.activity_summary_states
             .retain(|id, _| seen.contains(id));
         if let Some(error) = failure
@@ -3515,7 +3819,8 @@ impl App {
         };
 
         let mut changed = false;
-        let routes = self.pane_routes();
+        let mut routes = mem::take(&mut self.pane_routes_scratch);
+        self.populate_pane_routes(&mut routes);
         let mut pending_output = HashMap::<(PaneId, u64), Vec<u8>>::new();
         let mut pending_output_order = Vec::new();
         let mut exited = Vec::new();
@@ -3583,14 +3888,19 @@ impl App {
         }
 
         for (pane, generation) in pending_output_order {
-            let bytes = pending_output
-                .remove(&(pane, generation))
-                .expect("pending output order and batches stay in sync");
+            // The order list and the batch map are filled together, so a missing
+            // batch means nothing to write; skipping it costs one frame of pane
+            // output where indexing would cost the session.
+            let Some(bytes) = pending_output.remove(&(pane, generation)) else {
+                continue;
+            };
             let log_key = PaneLogKey::new(pane, generation);
             let activity = match routes.get(&(pane, generation)).copied() {
                 Some(PaneRoute::Visible(index)) => {
+                    let Some(target) = self.panes.get_mut(index) else {
+                        continue;
+                    };
                     let (pane_id, pane_generation, plain) = {
-                        let target = &mut self.panes[index];
                         let plain = target.process_output(&bytes);
                         (target.id(), target.generation(), plain)
                     };
@@ -3601,18 +3911,19 @@ impl App {
                     Some((pane_id, pane_generation))
                 }
                 Some(PaneRoute::Inactive { tab, pane }) => {
-                    let activity_and_plain =
-                        if let Some(tab) = self.tabs.get_mut(tab).and_then(Option::as_mut) {
-                            let target = &mut tab.panes[pane];
+                    let activity_and_plain = self
+                        .tabs
+                        .get_mut(tab)
+                        .and_then(Option::as_mut)
+                        .and_then(|tab| {
+                            let target = tab.panes.get_mut(pane)?;
                             let was_active = target.active;
                             let plain = target.process_output(&bytes);
                             let activity = (target.id(), target.generation());
                             capture_goal_text(&mut tab.manager_goal, &tab.sleeping, pane, &plain);
                             changed |= !was_active;
                             Some((activity, plain))
-                        } else {
-                            None
-                        };
+                        });
                     if let Some((activity, plain)) = activity_and_plain {
                         changed |= self.append_output_log(log_key, pane + 1, &plain);
                         Some(activity)
@@ -3644,6 +3955,7 @@ impl App {
             }
         }
 
+        let had_exit_events = !exited.is_empty();
         for (pane, generation) in exited {
             let log_key = PaneLogKey::new(pane, generation);
             match self.output_logs.stop(log_key) {
@@ -3659,7 +3971,7 @@ impl App {
             }
             match routes.get(&(pane, generation)).copied() {
                 Some(PaneRoute::Visible(index)) => {
-                    changed |= self.handle_visible_pane_exit(index, pane, generation);
+                    changed |= self.mark_visible_pane_exited(index, pane, generation);
                 }
                 Some(PaneRoute::Inactive { tab, pane }) => {
                     if let Some(target) = self
@@ -3687,11 +3999,15 @@ impl App {
                 None => {}
             }
         }
+        if had_exit_events {
+            changed |= self.recover_exited_agent_panes_to_shell();
+        }
 
         if should_poll_exits {
             changed |= self.poll_exited_panes();
         }
 
+        self.pane_routes_scratch = routes;
         changed
     }
 
@@ -3707,7 +4023,18 @@ impl App {
         }
     }
 
-    fn handle_visible_pane_exit(&mut self, index: usize, pane_id: PaneId, generation: u64) -> bool {
+    fn flush_output_logs_if_due(&mut self) -> bool {
+        match self.output_logs.flush_due() {
+            Ok(()) => false,
+            Err(error) => {
+                self.status =
+                    format!("pane output logging stopped after a flush failure: {error:#}");
+                true
+            }
+        }
+    }
+
+    fn mark_visible_pane_exited(&mut self, index: usize, pane_id: PaneId, generation: u64) -> bool {
         let changed = {
             let Some(pane) = self.panes.get_mut(index) else {
                 return false;
@@ -3726,17 +4053,7 @@ impl App {
         {
             self.follow_up = None;
         }
-
-        match self.recover_exited_agent_pane_to_shell(index) {
-            Ok(recovered) => changed || recovered,
-            Err(error) => {
-                self.status = format!(
-                    "pane {} agent exited; failed to open an interactive shell: {error:#}",
-                    index + 1
-                );
-                true
-            }
-        }
+        changed
     }
 
     fn recover_exited_agent_pane_to_shell(&mut self, index: usize) -> Result<bool> {
@@ -3763,7 +4080,7 @@ impl App {
             let _ = pane.terminate();
         }
         let mut replacement = self.spawn_pane_instance(&shell_spec, index)?;
-        replacement.restore_history_display(&history.output_tail, &history.input_history);
+        replacement.restore_history_state(&history.output_tail, &history.input_history);
         self.panes[index] = replacement;
         if let Some(plan) = self.launch_plan.as_mut()
             && let Some(spec) = plan.panes.get_mut(index)
@@ -3785,11 +4102,14 @@ impl App {
         let exited = self
             .panes
             .iter()
-            .enumerate()
-            .filter_map(|(index, pane)| pane.exited.then_some(index))
+            .map(|pane| pane.exited)
             .collect::<Vec<_>>();
+        let Some(specs) = self.launch_plan.as_ref().map(|plan| plan.panes.as_slice()) else {
+            return false;
+        };
+        let targets = agent_recovery_targets(&exited, specs);
         let mut changed = false;
-        for index in exited {
+        for index in targets {
             match self.recover_exited_agent_pane_to_shell(index) {
                 Ok(recovered) => changed |= recovered,
                 Err(error) => {
@@ -3844,8 +4164,18 @@ impl App {
         changed
     }
 
-    fn pane_routes(&self) -> HashMap<(PaneId, u64), PaneRoute> {
-        let mut routes = HashMap::new();
+    fn populate_pane_routes(&self, routes: &mut HashMap<(PaneId, u64), PaneRoute>) {
+        routes.clear();
+        routes.reserve(
+            self.panes.len()
+                + self
+                    .tabs
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .map(|tab| tab.panes.len())
+                    .sum::<usize>()
+                + self.background_jobs.len(),
+        );
         for (index, pane) in self.panes.iter().enumerate() {
             routes.insert((pane.id(), pane.generation()), PaneRoute::Visible(index));
         }
@@ -3868,7 +4198,6 @@ impl App {
                 routes.insert((pane.id(), pane.generation()), PaneRoute::Background(index));
             }
         }
-        routes
     }
 
     fn apply_manager_write_result(
@@ -3979,8 +4308,10 @@ impl App {
         let config = self.config.manager.clone();
         let tx = self.assistant_tx.clone();
         thread::spawn(move || {
-            let result = manager::assist(&config, &conversation, &workspace_context)
-                .map_err(|error| format!("{error:#}"));
+            let result = diagnostics::recovering("the BashBot request", || {
+                manager::assist(&config, &conversation, &workspace_context)
+                    .map_err(|error| format!("{error:#}"))
+            });
             let _ = tx.send(AssistantEvent {
                 grid_id,
                 request_id,
@@ -4185,7 +4516,8 @@ impl App {
         targets: &[AssistantTarget],
         commands: &[ManagerCommand],
     ) -> (usize, Vec<String>) {
-        let routes = self.pane_routes();
+        let mut routes = mem::take(&mut self.pane_routes_scratch);
+        self.populate_pane_routes(&mut routes);
         let mut sent = 0;
         let mut failures = Vec::new();
 
@@ -4267,6 +4599,7 @@ impl App {
             }
         }
 
+        self.pane_routes_scratch = routes;
         (sent, failures)
     }
 
@@ -4313,8 +4646,10 @@ impl App {
             let config = config.clone();
             let tx = tx.clone();
             thread::spawn(move || {
-                let result = manager::review(&config, &objective, &context)
-                    .map_err(|error| format!("{error:#}"));
+                let result = diagnostics::recovering("the grid goal review", || {
+                    manager::review(&config, &objective, &context)
+                        .map_err(|error| format!("{error:#}"))
+                });
                 let _ = tx.send(GoalReviewEvent {
                     goal_id,
                     targets,
@@ -4444,8 +4779,10 @@ impl App {
         let config = self.config.manager.clone();
         let tx = self.activity_summary_tx.clone();
         thread::spawn(move || {
-            let result = manager::summarize_activity(&config, &context, &expected_panes)
-                .map_err(|error| format!("{error:#}"));
+            let result = diagnostics::recovering("the activity summary", || {
+                manager::summarize_activity(&config, &context, &expected_panes)
+                    .map_err(|error| format!("{error:#}"))
+            });
             let _ = tx.send(ActivitySummaryEvent {
                 request_id,
                 targets,
@@ -4617,6 +4954,9 @@ impl App {
     }
 
     fn schedule_port_scan(&mut self) -> bool {
+        if !self.port_inspector.open {
+            return false;
+        }
         if self.port_inspector.refreshing
             || self
                 .port_inspector
@@ -4642,7 +4982,9 @@ impl App {
         self.port_inspector.refreshing = true;
         let sender = self.port_scan_tx.clone();
         thread::spawn(move || {
-            let result = ports::discover_agent_ports(&roots).map_err(|error| error.to_string());
+            let result = diagnostics::recovering("the port scan", || {
+                ports::discover_agent_ports(&roots).map_err(|error| error.to_string())
+            });
             let _ = sender.send(result);
         });
         self.port_inspector.open
@@ -5417,6 +5759,7 @@ impl App {
         if self.quit_confirmation_pending {
             self.quit_confirmation_pending = false;
             self.status = "quit canceled".into();
+            return Ok(KeyOutcome::Render);
         }
 
         if self.copy_mode.is_some() {
@@ -5521,6 +5864,11 @@ impl App {
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
         }
 
+        if self.follow_up.is_some() {
+            let outcome = self.handle_follow_up_key(key)?;
+            return Ok(render_if_selection_cleared(outcome, selection_cleared));
+        }
+
         if self.settings.open {
             let outcome = self.handle_settings_key(key)?;
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
@@ -5566,8 +5914,17 @@ impl App {
             return KeyOutcome::Quit;
         }
 
+        if let Err(error) = self.save_session_snapshot() {
+            self.status = format!("quit canceled: failed to save resumable session: {error:#}");
+            return KeyOutcome::Render;
+        }
+        if self.resume_command().is_none() {
+            self.status = "quit canceled: no resumable session is available yet".into();
+            return KeyOutcome::Render;
+        }
+
         self.quit_confirmation_pending = true;
-        self.status = "press Alt+q again to quit; any other key cancels".into();
+        self.status = "quit confirmation open | Alt+q confirms | any other key cancels".into();
         KeyOutcome::Render
     }
 
@@ -5754,8 +6111,7 @@ impl App {
         let (width, height) = self.copy_mode_dimensions(pane_index);
         let searching = self.copy_mode.as_ref().is_some_and(CopyMode::searching);
 
-        if searching {
-            let mode = self.copy_mode.as_mut().expect("copy mode checked above");
+        if let Some(mode) = self.copy_mode.as_mut().filter(|_| searching) {
             match key.code {
                 KeyCode::Enter => mode.finish_search(),
                 KeyCode::Backspace => mode.backspace_search(width, height),
@@ -5791,11 +6147,14 @@ impl App {
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
         {
-            let (pane, text) = self
+            let Some((pane, text)) = self
                 .copy_mode
                 .as_ref()
                 .map(|mode| (mode.pane(), mode.copy_text()))
-                .expect("copy mode checked above");
+            else {
+                self.close_copy_mode();
+                return Ok(KeyOutcome::Render);
+            };
             if text.is_empty() {
                 self.status = "copy selection is empty".into();
                 return Ok(KeyOutcome::Render);
@@ -6020,6 +6379,9 @@ impl App {
                     self.toggle_pane_selection(self.focus);
                 }
             }
+            Action::ToggleGridSelection => {
+                self.toggle_grid_selection(self.active_tab);
+            }
             Action::SelectAll => {
                 if self.selected.len() == self.panes.len() {
                     self.selected.clear();
@@ -6050,7 +6412,11 @@ impl App {
                 self.open_grid_resizer();
             }
             Action::SwapPanes => {
-                self.swap_selected_tiles();
+                if self.selected_grids.is_empty() {
+                    self.swap_selected_tiles();
+                } else {
+                    self.swap_selected_grids();
+                }
             }
             Action::ZoomPane => {
                 self.toggle_zoom();
@@ -6187,10 +6553,16 @@ impl App {
 
     fn open_new_tab(&mut self, terminal: &mut Tui) -> Result<()> {
         let current_dir = self.active_pane_cwd().unwrap_or(resolved_current_dir()?);
-        let mut composer = Composer::new(current_dir, self.worktrees.clone(), &self.config)?;
+        let default_name = self.peek_tab_title();
+        let mut composer = Composer::new(
+            current_dir,
+            self.worktrees.clone(),
+            &self.config,
+            &default_name,
+        )?;
         match composer.run(terminal, &self.config)? {
-            Some(plan) => {
-                self.add_tab_from_plan(plan)?;
+            Some(outcome) => {
+                self.add_tab_from_plan(Some(outcome.title), outcome.plan)?;
                 self.sync_initial_pane_sizes(terminal)?;
             }
             None => {
@@ -6257,7 +6629,7 @@ impl App {
             self.pane_render_cache.borrow_mut().remove(&pane_id);
             self.applied_workloads.remove(&pane_id);
             self.activity_summary_states.remove(&pane_id);
-            if pane.terminate().is_err() {
+            if retire_pane(&mut pane).is_err() {
                 termination_failures += 1;
             }
         }
@@ -6265,6 +6637,21 @@ impl App {
         self.voice_destination = None;
 
         self.tabs.remove(closing_index);
+        self.selected_grids = self
+            .selected_grids
+            .iter()
+            .filter_map(|index| {
+                if *index == closing_index {
+                    None
+                } else {
+                    Some(if *index > closing_index {
+                        *index - 1
+                    } else {
+                        *index
+                    })
+                }
+            })
+            .collect();
         let snapshot = self.tabs[next_index]
             .take()
             .ok_or_else(|| anyhow!("surviving grid {} is unavailable", next_index + 1))?;
@@ -6293,6 +6680,25 @@ impl App {
                 .push_str("; restored exited agent panes to shells");
         }
         Ok(())
+    }
+
+    fn toggle_grid_selection(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+
+        let selected = toggle_selection(&mut self.selected_grids, index);
+        self.status = format!(
+            "{} grid {} ({} grid{} selected)",
+            if selected { "selected" } else { "deselected" },
+            index + 1,
+            self.selected_grids.len(),
+            if self.selected_grids.len() == 1 {
+                ""
+            } else {
+                "s"
+            }
+        );
     }
 
     fn switch_to_tab(&mut self, index: usize) {
@@ -6529,6 +6935,7 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
             return KeyOutcome::Quit;
         }
+
         let changed = match key.code {
             KeyCode::Esc if self.port_inspector.pending_terminate.is_some() => {
                 self.port_inspector.pending_terminate = None;
@@ -6569,6 +6976,7 @@ impl App {
             }
             _ => false,
         };
+
         if changed {
             KeyOutcome::Render
         } else {
@@ -6586,6 +6994,7 @@ impl App {
             self.status = "no agent-owned port selected".into();
             return;
         };
+
         if self.port_inspector.pending_terminate != Some(port.pid) {
             self.port_inspector.pending_terminate = Some(port.pid);
             self.status = format!(
@@ -6777,6 +7186,13 @@ impl App {
         Ok(())
     }
 
+    /// Puts a job back where it was after an insertion could not be completed.
+    fn restore_background_job(&mut self, index: usize, job: BackgroundJob) {
+        self.background_jobs
+            .insert(index.min(self.background_jobs.len()), job);
+        self.status = "background agent could not be inserted into the focused pane".into();
+    }
+
     fn insert_background_job(&mut self, index: usize) -> Result<()> {
         let Some(job) = self.background_jobs.get(index) else {
             self.status = "no background agent selected".into();
@@ -6792,11 +7208,12 @@ impl App {
             return Ok(());
         }
 
-        let target = self.focus.min(self.panes.len() - 1);
-        if self
-            .launch_plan
-            .as_ref()
-            .is_none_or(|plan| target >= plan.panes.len())
+        let target = self.focus.min(self.panes.len().saturating_sub(1));
+        if target >= self.panes.len()
+            || self
+                .launch_plan
+                .as_ref()
+                .is_none_or(|plan| target >= plan.panes.len())
         {
             self.status = "focused pane configuration is unavailable".into();
             return Ok(());
@@ -6808,8 +7225,33 @@ impl App {
             .clone()
             .or_else(|| job.spec.agent_label())
             .unwrap_or_else(|| "terminal".into());
-        let restored_pane = job.pane.take().expect("checked live background pane");
-        let displaced_pane = mem::replace(&mut self.panes[target], restored_pane);
+        // The checks above establish every slot this swap touches. Each bail-out
+        // below hands the live pane straight back to the background list, so a
+        // stale focus index costs the insertion rather than the pane or the
+        // session.
+        let Some((restored_pane, displaced_spec)) =
+            job.pane
+                .take()
+                .zip(self.launch_plan.as_mut().and_then(|plan| {
+                    plan.panes
+                        .get_mut(target)
+                        .map(|slot| mem::replace(slot, job.spec.clone()))
+                }))
+        else {
+            self.restore_background_job(index, job);
+            return Ok(());
+        };
+        let Some(visible_slot) = self.panes.get_mut(target) else {
+            if let Some(plan) = self.launch_plan.as_mut()
+                && let Some(slot) = plan.panes.get_mut(target)
+            {
+                *slot = displaced_spec;
+            }
+            job.pane = Some(restored_pane);
+            self.restore_background_job(index, job);
+            return Ok(());
+        };
+        let displaced_pane = mem::replace(visible_slot, restored_pane);
         let displaced_name = self
             .pane_names
             .get_mut(target)
@@ -6820,10 +7262,6 @@ impl App {
             .get_mut(target)
             .map(|idle| mem::replace(idle, job.idle))
             .unwrap_or_else(|| PaneIdleState::new(Instant::now()));
-        let displaced_spec = {
-            let plan = self.launch_plan.as_mut().expect("checked launch plan");
-            mem::replace(&mut plan.panes[target], job.spec)
-        };
         let displaced_history = SavedPaneHistory::from_pane(&displaced_pane);
         let displaced_id = self.next_background_job_id;
         self.next_background_job_id = self.next_background_job_id.saturating_add(1);
@@ -6906,12 +7344,15 @@ impl App {
             return Ok(());
         }
 
-        let mut job = self.background_jobs.remove(index);
-        if let Some(pane) = job.pane.as_mut()
+        if let Some(pane) = self.background_jobs[index].pane.as_mut()
             && !pane.exited
+            && let Err(error) = retire_pane(pane)
         {
-            pane.terminate()?;
+            self.background_picker.pending_delete = None;
+            self.status = format!("failed to stop background agent {label}: {error:#}");
+            return Ok(());
         }
+        let _job = self.background_jobs.remove(index);
         self.background_picker.pending_delete = None;
         self.background_picker
             .clamp_cursor(self.background_jobs.len());
@@ -7240,7 +7681,17 @@ impl App {
             .cloned()
             .ok_or_else(|| anyhow!("pane {} has no launch settings", pane_index + 1))?;
         set_spec_auth(&mut spec, auth_env);
-        let pane = self.spawn_pane_instance(&spec, pane_index)?;
+        let mut pane = self.spawn_pane_instance(&spec, pane_index)?;
+
+        if let Err(error) = retire_pane(&mut self.panes[pane_index]) {
+            let cleanup_error = retire_pane(&mut pane).err();
+            return Err(match cleanup_error {
+                Some(cleanup_error) => error.context(format!(
+                    "replacement pane cleanup also failed: {cleanup_error:#}"
+                )),
+                None => error,
+            });
+        }
 
         self.panes[pane_index] = pane;
         if let Some(plan) = &mut self.launch_plan {
@@ -7446,6 +7897,51 @@ impl App {
         swap_set_indices(&mut self.sleeping, first, second);
         self.focus = swapped_index(self.focus, first, second);
         self.status = format!("swapped panes {} and {}", first + 1, second + 1);
+    }
+
+    fn swap_selected_grids(&mut self) {
+        let (first, second) = match selected_swap_pair(&self.selected_grids) {
+            SwapSelection::NeedsMore => {
+                self.status = "select two grids to swap".into();
+                return;
+            }
+            SwapSelection::TooMany => {
+                self.status = "deselect grids until only two are selected".into();
+                return;
+            }
+            SwapSelection::Pair(first, second) => (first, second),
+        };
+
+        if first >= self.tabs.len() || second >= self.tabs.len() {
+            self.status = "select two available grids to swap".into();
+            return;
+        }
+
+        self.save_current_tab();
+        swap_grid_slots(&mut self.tabs, &mut self.active_tab, first, second);
+        if let Some(VoiceDestination::Panes { tab, .. }) = self.voice_destination.as_mut() {
+            *tab = swapped_index(*tab, first, second);
+        }
+
+        // `save_current_tab` just stored the active snapshot and `swap_grid_slots`
+        // moved `active_tab` with it, so this is present. Leaving the swap
+        // applied without a reload beats taking the session down.
+        let Some(snapshot) = self.tabs.get_mut(self.active_tab).and_then(Option::take) else {
+            self.status = "swapped grids; the active grid could not be reloaded".into();
+            return;
+        };
+        self.restore_tab_snapshot(snapshot);
+        self.sync_pane_sizes_for_current_layout();
+        self.status = format!("swapped grids {} and {}", first + 1, second + 1);
+    }
+
+    #[allow(dead_code)]
+    fn delete_selected_grids(&mut self) {
+        self.status = if self.selected_grids.is_empty() {
+            "select one or more grids to delete".into()
+        } else {
+            "selected-grid deletion is not wired yet".into()
+        };
     }
 
     fn handle_settings_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
@@ -7678,7 +8174,9 @@ impl App {
                 };
                 let value = edit.buffer.trim().to_string();
                 match edit.target {
-                    ManagerSettingTarget::ActivitySummaries => unreachable!(),
+                    // A switch has no text buffer to commit, so there is nothing
+                    // to save and nothing worth panicking over.
+                    ManagerSettingTarget::ActivitySummaries => return Ok(KeyOutcome::Render),
                     ManagerSettingTarget::Endpoint => self.config.manager.endpoint = value,
                     ManagerSettingTarget::Model => self.config.manager.model = value,
                     ManagerSettingTarget::ApiKey => self.config.manager.api_key = value,
@@ -7762,6 +8260,39 @@ impl App {
 
         if self.copy_mode.is_some() {
             return Ok(false);
+        }
+
+        if self.mouse_enabled
+            && matches!(
+                mouse.kind,
+                MouseEventKind::Down(MouseButton::Left | MouseButton::Right)
+            )
+            && let Some(index) = self.tab_at(mouse.column, mouse.row)
+        {
+            let selecting = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right))
+                || mouse
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+            if selecting {
+                self.toggle_grid_selection(index);
+                return Ok(true);
+            }
+
+            let changed = index != self.active_tab;
+            self.switch_to_tab(index);
+            return Ok(changed);
+        }
+
+        if self.mouse_enabled
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.ports_button_at(mouse.column, mouse.row)
+        {
+            if self.port_inspector.open {
+                self.close_port_inspector();
+            } else {
+                self.open_port_inspector();
+            }
+            return Ok(true);
         }
 
         if self.mouse_enabled
@@ -7985,6 +8516,7 @@ impl App {
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return false;
         }
+
         let Some(index) = self.port_row_at(mouse.column, mouse.row) else {
             return false;
         };
@@ -8046,6 +8578,12 @@ impl App {
     fn previous_panes_button_at(&self, x: u16, y: u16) -> bool {
         self.previous_panes_button
             .is_some_and(|rect| rect_contains(rect, x, y))
+    }
+
+    fn tab_at(&self, x: u16, y: u16) -> Option<usize> {
+        self.tab_rects
+            .iter()
+            .find_map(|(index, rect)| rect_contains(*rect, x, y).then_some(*index))
     }
 
     fn previous_pane_row_at(&self, x: u16, y: u16) -> Option<usize> {
@@ -8224,6 +8762,18 @@ impl App {
 
         let before = self.panes.len();
         let slots = grid_resize_slots(current, next, before);
+        // Rebuilding the pane vectors below moves panes out by index and cannot
+        // be undone partway through, so reject an impossible slot map while the
+        // live grid is still whole.
+        let mut claimed = BTreeSet::new();
+        for old_index in slots.iter().flatten().copied() {
+            if old_index >= before || !claimed.insert(old_index) {
+                return Err(anyhow!(
+                    "grid resize mapped pane {} more than once or out of range",
+                    old_index + 1
+                ));
+            }
+        }
         let old_to_new = slots
             .iter()
             .enumerate()
@@ -8287,32 +8837,34 @@ impl App {
         self.pane_idle = Vec::with_capacity(next.count());
         self.pane_names = Vec::with_capacity(next.count());
         for (new_index, old_index) in slots.iter().copied().enumerate() {
-            if let Some(old_index) = old_index {
-                self.panes.push(
-                    old_panes
-                        .get_mut(old_index)
-                        .and_then(Option::take)
-                        .expect("retained pane index"),
-                );
-                self.pane_idle.push(
-                    old_idle
-                        .get_mut(old_index)
-                        .and_then(Option::take)
-                        .unwrap_or_else(|| PaneIdleState::new(Instant::now())),
-                );
-                self.pane_names.push(
-                    old_names
-                        .get_mut(old_index)
-                        .and_then(Option::take)
-                        .unwrap_or(None),
-                );
-            } else {
-                self.panes
-                    .push(spawned.remove(&new_index).expect("spawned resize pane"));
-                self.pane_idle.push(PaneIdleState::new(Instant::now()));
-                self.pane_names.push(None);
-            }
+            // The slot check above and the spawn loop together guarantee a pane
+            // for every slot. Dropping an unexpectedly empty slot keeps the grid
+            // usable where indexing would have taken the session down.
+            let pane = match old_index {
+                Some(old_index) => old_panes.get_mut(old_index).and_then(Option::take),
+                None => spawned.remove(&new_index),
+            };
+            let Some(pane) = pane else {
+                continue;
+            };
+            self.panes.push(pane);
+            self.pane_idle.push(match old_index {
+                Some(old_index) => old_idle
+                    .get_mut(old_index)
+                    .and_then(Option::take)
+                    .unwrap_or_else(|| PaneIdleState::new(Instant::now())),
+                None => PaneIdleState::new(Instant::now()),
+            });
+            self.pane_names.push(match old_index {
+                Some(old_index) => old_names
+                    .get_mut(old_index)
+                    .and_then(Option::take)
+                    .flatten(),
+                None => None,
+            });
         }
+        let removed_cleanup_error =
+            retire_panes(old_panes.iter_mut().filter_map(Option::as_mut)).err();
 
         let old_focus = self.focus;
         self.focus = resized_focus_index(old_focus, current, next, &old_to_new);
@@ -8355,6 +8907,10 @@ impl App {
         } else {
             format!("grid resized to {}x{}", next.rows, next.columns)
         };
+        if let Some(error) = removed_cleanup_error {
+            self.status
+                .push_str(&format!("; pane cleanup reported: {error:#}"));
+        }
 
         Ok(())
     }
@@ -8368,6 +8924,11 @@ impl App {
         if pane_index >= before {
             self.pane_settings.close();
             self.status = format!("pane {} is no longer available", pane_index + 1);
+            return;
+        }
+
+        if let Err(error) = retire_pane(&mut self.panes[pane_index]) {
+            self.status = format!("failed to deactivate pane {}: {error:#}", pane_index + 1);
             return;
         }
 
@@ -8412,6 +8973,7 @@ impl App {
 
         self.pane_render_cache.borrow_mut().remove(&removed_id);
         self.applied_workloads.remove(&removed_id);
+        self.activity_summary_states.remove(&removed_id);
 
         let next_plan = self.launch_plan.as_mut().map(|plan| {
             if pane_index < plan.panes.len() {
@@ -8717,6 +9279,13 @@ impl App {
                 }
             }
         }
+        for job in &mut self.background_jobs {
+            if let Some(pane) = job.pane.as_mut()
+                && let Err(error) = pane.set_keep_running(keep_running)
+            {
+                first_error.get_or_insert(error);
+            }
+        }
         if let Some(error) = first_error {
             self.status = format!("saved setting; failed to update a pane host: {error:#}");
         }
@@ -8934,6 +9503,46 @@ impl App {
     fn route_input(&mut self, bytes: &[u8]) -> Result<bool> {
         let targets = self.input_targets();
         self.route_input_to_targets(bytes, targets)
+    }
+
+    /// Delivers pasted text as a paste rather than as keystrokes, so a
+    /// multi-line paste lands in the pane program's editor instead of
+    /// submitting each line. The wrapping is decided per pane because only the
+    /// program running there knows whether it asked for bracketed paste.
+    fn route_paste(&mut self, text: &str) -> Result<bool> {
+        let mut skipped_exited = 0;
+        let mut changed = false;
+
+        for index in self.input_targets() {
+            let pane = self
+                .panes
+                .get_mut(index)
+                .ok_or_else(|| anyhow!("invalid pane index {index}"))?;
+            if pane.exited {
+                skipped_exited += 1;
+                continue;
+            }
+            let bytes = paste_bytes(text, pane.screen().bracketed_paste());
+            changed |= pane.reset_view();
+            pane.write(&bytes)
+                .with_context(|| format!("failed to paste into pane {}", index + 1))?;
+            pane.record_input(&bytes);
+            self.mark_pane_touched(index);
+        }
+
+        if skipped_exited > 0 {
+            self.status = if skipped_exited == 1 {
+                "pane exited; press R or Enter to restart, Z to sleep".into()
+            } else {
+                format!(
+                    "skipped {skipped_exited} exited {}; press Alt+t to restart them",
+                    pane_word(skipped_exited)
+                )
+            };
+            return Ok(true);
+        }
+
+        Ok(changed)
     }
 
     fn route_input_to_targets(&mut self, bytes: &[u8], targets: Vec<usize>) -> Result<bool> {
@@ -9250,6 +9859,10 @@ impl App {
         &self.selected
     }
 
+    pub fn selected_grid_count(&self) -> usize {
+        self.selected_grids.len()
+    }
+
     pub fn selection_for_pane(&self, index: usize) -> Option<PaneSelection> {
         self.text_selection
             .filter(|selection| selection.pane == index)
@@ -9258,6 +9871,23 @@ impl App {
 
     pub fn pane_sleeping(&self, index: usize) -> bool {
         self.sleeping.contains(&index)
+    }
+
+    /// True when an agent pane has gone quiet, which is how an agent signals it
+    /// is waiting on the user.
+    pub fn pane_needs_input(&self, index: usize) -> bool {
+        let Some(pane) = self.panes.get(index) else {
+            return false;
+        };
+        pane_needs_user_input(
+            self.launch_plan
+                .as_ref()
+                .and_then(|plan| plan.panes.get(index))
+                .is_some_and(PaneLaunchSpec::is_agent),
+            self.sleeping.contains(&index),
+            pane.exited,
+            pane.output_quiet(),
+        )
     }
 
     pub fn pane_logging(&self, index: usize) -> bool {
@@ -9269,6 +9899,14 @@ impl App {
 
     pub fn status(&self) -> &str {
         &self.status
+    }
+
+    pub fn quit_confirmation_view(&self) -> Option<QuitConfirmationView> {
+        self.quit_confirmation_pending.then_some(())?;
+        Some(QuitConfirmationView {
+            resume_command: self.resume_command()?,
+            keeps_terminals_running: self.settings.keep_terminals_running,
+        })
     }
 
     pub fn close_grid_confirmation_view(&self) -> Option<CloseGridConfirmationView> {
@@ -9445,6 +10083,12 @@ impl App {
                     return TabLabel {
                         title: self.tab_title.clone(),
                         active: true,
+                        selected: self.selected_grids.contains(&index),
+                        waiting: tab_has_waiting_agent(
+                            &self.panes,
+                            &self.sleeping,
+                            self.launch_plan.as_ref(),
+                        ),
                         activity: self.panes.iter().any(|pane| pane.active),
                         exited: !self.panes.is_empty() && self.panes.iter().all(|pane| pane.exited),
                     };
@@ -9454,6 +10098,8 @@ impl App {
                     return TabLabel {
                         title: format!("Grid {}", index + 1),
                         active: false,
+                        selected: self.selected_grids.contains(&index),
+                        waiting: false,
                         activity: false,
                         exited: false,
                     };
@@ -9462,6 +10108,12 @@ impl App {
                 TabLabel {
                     title: tab.title.clone(),
                     active: false,
+                    selected: self.selected_grids.contains(&index),
+                    waiting: tab_has_waiting_agent(
+                        &tab.panes,
+                        &tab.sleeping,
+                        tab.launch_plan.as_ref(),
+                    ),
                     activity: tab.assistant.unread || tab.panes.iter().any(|pane| pane.active),
                     exited: !tab.panes.is_empty() && tab.panes.iter().all(|pane| pane.exited),
                 }
@@ -9969,8 +10621,10 @@ impl App {
         self.status = "refreshing auth profiles".into();
 
         thread::spawn(move || {
-            let result = auth::discover_profiles_with_usage(&auth_config)
-                .map_err(|error| format!("{error:#}"));
+            let result = diagnostics::recovering("the auth profile refresh", || {
+                auth::discover_profiles_with_usage(&auth_config)
+                    .map_err(|error| format!("{error:#}"))
+            });
             let _ = tx.send(result);
         });
     }
@@ -10173,6 +10827,12 @@ impl App {
         Ok(())
     }
 
+    fn resume_command(&self) -> Option<String> {
+        self.session_recorder
+            .as_ref()
+            .map(SessionRecorder::resume_command)
+    }
+
     fn save_session_snapshot(&mut self) -> Result<()> {
         let Some(plan) = self.launch_plan.clone() else {
             return Ok(());
@@ -10257,6 +10917,17 @@ fn agent_shell_fallback_spec(
     shell_spec.auth_kind = None;
     shell_spec.auth_dir = None;
     Ok(Some((shell_spec, agent_label, shell_label)))
+}
+
+fn agent_recovery_targets(exited: &[bool], specs: &[PaneLaunchSpec]) -> Vec<usize> {
+    exited
+        .iter()
+        .zip(specs)
+        .enumerate()
+        .filter_map(|(index, (exited, spec))| {
+            (*exited && spec.agent_label().is_some()).then_some(index)
+        })
+        .collect()
 }
 
 fn port_owner_label(tab_title: &str, pane_names: &[Option<String>], index: usize) -> String {
@@ -10451,6 +11122,31 @@ fn pane_awareness_state(
     } else {
         "active"
     }
+}
+
+fn tab_has_waiting_agent(
+    panes: &[PtyPane],
+    sleeping: &BTreeSet<usize>,
+    launch_plan: Option<&LaunchPlan>,
+) -> bool {
+    // Quiet output is the local attention signal; limiting it to known agent
+    // launch specs keeps ordinary idle shells from lighting up their tabs.
+    let Some(plan) = launch_plan else {
+        return false;
+    };
+
+    panes.iter().enumerate().any(|(index, pane)| {
+        pane_needs_user_input(
+            plan.panes.get(index).is_some_and(PaneLaunchSpec::is_agent),
+            sleeping.contains(&index),
+            pane.exited,
+            pane.output_quiet(),
+        )
+    })
+}
+
+fn pane_needs_user_input(is_agent: bool, sleeping: bool, exited: bool, output_quiet: bool) -> bool {
+    is_agent && !sleeping && !exited && output_quiet
 }
 
 fn bounded_tail_chars(value: &str, max_chars: usize) -> (String, bool) {
@@ -10916,17 +11612,18 @@ fn goal_target_index(
         .iter()
         .find(|target| target.pane_number == pane_number)
         .ok_or_else(|| format!("pane {pane_number} was not an available target"))?;
-    let index = current
+    let (index, state) = current
         .iter()
-        .position(|pane| {
+        .enumerate()
+        .find(|(_, pane)| {
             pane.pane_id == target.pane_id && pane.pane_generation == target.pane_generation
         })
         .ok_or_else(|| format!("pane {pane_number} changed before dispatch"))?;
-    if current[index].unavailable {
+    if state.unavailable {
         return Err(format!("pane {pane_number} became unavailable"));
     }
-    if current[index].screen_revision != target.screen_revision
-        || current[index].input_revision != target.input_revision
+    if state.screen_revision != target.screen_revision
+        || state.input_revision != target.input_revision
     {
         return Err(format!("pane {pane_number} changed before dispatch"));
     }
@@ -10958,10 +11655,15 @@ fn goal_command_plan<'a>(
     for command in commands {
         match goal_target_index(targets, command.pane, current) {
             Ok(index) => {
-                let target = &targets[targets
+                // `goal_target_index` only succeeds for a pane that is in
+                // `targets`, so this lookup mirrors the one it already made.
+                let Some(target) = targets
                     .iter()
-                    .position(|target| target.pane_number == command.pane)
-                    .expect("validated goal target")];
+                    .find(|target| target.pane_number == command.pane)
+                else {
+                    failures.push(format!("pane {} was not an available target", command.pane));
+                    continue;
+                };
                 let key = GoalCommandKey {
                     pane_id: target.pane_id,
                     pane_generation: target.pane_generation,
@@ -11315,12 +12017,54 @@ fn trim_goal_buffer(buffer: &mut String) {
     }
     buffer.drain(..keep_from);
 }
-fn paste_and_enter_bytes(text: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(text.len() + 16);
+/// Terminals hand pasted line breaks to the child as carriage returns, and must
+/// not let the payload smuggle in its own paste terminator.
+fn normalize_paste_text(text: &str) -> String {
+    text.replace("\x1b[201~", "")
+        .replace("\r\n", "\r")
+        .replace('\n', "\r")
+}
+
+/// Encodes pasted text for a pane, bracketing it when the program running there
+/// enabled bracketed paste so the whole block arrives as one paste instead of
+/// one Enter per line.
+fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let text = normalize_paste_text(text);
+    if !bracketed {
+        return text.into_bytes();
+    }
+
+    let mut bytes = Vec::with_capacity(text.len() + 12);
     bytes.extend_from_slice(b"\x1b[200~");
     bytes.extend_from_slice(text.as_bytes());
-    bytes.extend_from_slice(b"\x1b[201~\r");
+    bytes.extend_from_slice(b"\x1b[201~");
     bytes
+}
+
+fn paste_and_enter_bytes(text: &str) -> Vec<u8> {
+    let mut bytes = paste_bytes(text, true);
+    bytes.push(b'\r');
+    bytes
+}
+
+fn paste_burst_char(event: &Event) -> Option<char> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+    if key.kind != KeyEventKind::Press
+        || key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+    {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Char(ch) => Some(ch),
+        KeyCode::Enter => Some('\n'),
+        KeyCode::Tab => Some('\t'),
+        _ => None,
+    }
 }
 
 fn toggle_selection(selected: &mut BTreeSet<usize>, index: usize) -> bool {
@@ -11339,7 +12083,10 @@ fn spawn_hidden_command(
     event_tx: mpsc::UnboundedSender<CommandRunEvent>,
 ) {
     thread::spawn(move || {
-        let event = match run_shell_command(&command, &cwd) {
+        let output = diagnostics::recovering("the command", || {
+            run_shell_command(&command, &cwd).map_err(|error| format!("{error:#}"))
+        });
+        let event = match output {
             Ok(output) => CommandRunEvent {
                 grid_id,
                 command,
@@ -11354,7 +12101,7 @@ fn spawn_hidden_command(
                 stdout: String::new(),
                 stderr: String::new(),
                 exit_code: None,
-                error: Some(format!("{error:#}")),
+                error: Some(error),
             },
         };
         let _ = event_tx.send(event);
@@ -11698,9 +12445,10 @@ fn selected_swap_pair(selected: &BTreeSet<usize>) -> SwapSelection {
         0 | 1 => SwapSelection::NeedsMore,
         2 => {
             let mut selected = selected.iter().copied();
-            let first = selected.next().expect("pair has a first index");
-            let second = selected.next().expect("pair has a second index");
-            SwapSelection::Pair(first, second)
+            match (selected.next(), selected.next()) {
+                (Some(first), Some(second)) => SwapSelection::Pair(first, second),
+                _ => SwapSelection::NeedsMore,
+            }
         }
         _ => SwapSelection::TooMany,
     }
@@ -11730,6 +12478,11 @@ fn swapped_index(index: usize, first: usize, second: usize) -> usize {
 
 fn tab_index_after_close(active: usize, tab_count: usize) -> Option<usize> {
     (tab_count > 1).then(|| active.min(tab_count - 2))
+}
+
+fn swap_grid_slots<T>(slots: &mut [T], active: &mut usize, first: usize, second: usize) {
+    slots.swap(first, second);
+    *active = swapped_index(*active, first, second);
 }
 
 fn wrapped_row_focus_target(
@@ -12792,6 +13545,69 @@ mod tests {
     }
 
     #[test]
+    fn pasted_line_breaks_become_carriage_returns() {
+        assert_eq!(normalize_paste_text("one\ntwo"), "one\rtwo");
+        assert_eq!(normalize_paste_text("one\r\ntwo\n"), "one\rtwo\r");
+        assert_eq!(normalize_paste_text("one\rtwo"), "one\rtwo");
+    }
+
+    #[test]
+    fn pasted_text_cannot_close_the_bracketed_region_early() {
+        assert_eq!(
+            paste_bytes("safe\x1b[201~rm -rf /\n", true),
+            b"\x1b[200~saferm -rf /\r\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn paste_is_bracketed_only_when_the_pane_program_asked_for_it() {
+        assert_eq!(
+            paste_bytes("one\ntwo", true),
+            b"\x1b[200~one\rtwo\x1b[201~".to_vec()
+        );
+        assert_eq!(paste_bytes("one\ntwo", false), b"one\rtwo".to_vec());
+    }
+
+    #[test]
+    fn agent_commands_still_paste_and_submit() {
+        assert_eq!(
+            paste_and_enter_bytes("echo hi"),
+            b"\x1b[200~echo hi\x1b[201~\r".to_vec()
+        );
+    }
+
+    #[test]
+    fn paste_bursts_only_collect_unmodified_text_keys() {
+        let press = |code, modifiers| Event::Key(KeyEvent::new(code, modifiers));
+
+        assert_eq!(
+            paste_burst_char(&press(KeyCode::Char('a'), KeyModifiers::NONE)),
+            Some('a')
+        );
+        assert_eq!(
+            paste_burst_char(&press(KeyCode::Char('A'), KeyModifiers::SHIFT)),
+            Some('A')
+        );
+        assert_eq!(
+            paste_burst_char(&press(KeyCode::Enter, KeyModifiers::NONE)),
+            Some('\n')
+        );
+        assert_eq!(
+            paste_burst_char(&press(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            None
+        );
+        assert_eq!(
+            paste_burst_char(&press(KeyCode::Char('t'), KeyModifiers::ALT)),
+            None
+        );
+        assert_eq!(
+            paste_burst_char(&press(KeyCode::Up, KeyModifiers::NONE)),
+            None
+        );
+        assert_eq!(paste_burst_char(&Event::FocusGained), None);
+    }
+
+    #[test]
     fn swapped_index_follows_the_swapped_pair() {
         assert_eq!(swapped_index(0, 0, 2), 2);
         assert_eq!(swapped_index(2, 0, 2), 0);
@@ -12804,6 +13620,41 @@ mod tests {
         assert_eq!(tab_index_after_close(1, 3), Some(1));
         assert_eq!(tab_index_after_close(2, 3), Some(1));
         assert_eq!(tab_index_after_close(0, 1), None);
+    }
+
+    #[test]
+    fn close_grid_confirmation_requires_an_explicit_choice() {
+        assert_eq!(
+            close_grid_confirmation_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            CloseGridConfirmationAction::Confirm
+        );
+        assert_eq!(
+            close_grid_confirmation_action(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT)),
+            CloseGridConfirmationAction::Confirm
+        );
+        assert_eq!(
+            close_grid_confirmation_action(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
+            CloseGridConfirmationAction::Cancel
+        );
+        assert_eq!(
+            close_grid_confirmation_action(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            CloseGridConfirmationAction::Cancel
+        );
+        assert_eq!(
+            close_grid_confirmation_action(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT)),
+            CloseGridConfirmationAction::Continue
+        );
+    }
+
+    #[test]
+    fn swapping_grid_slots_moves_the_active_grid_with_its_contents() {
+        let mut grids = vec!["frontend", "backend", "tests"];
+        let mut active = 0;
+
+        swap_grid_slots(&mut grids, &mut active, 0, 2);
+
+        assert_eq!(grids, vec!["tests", "backend", "frontend"]);
+        assert_eq!(active, 2);
     }
 
     #[test]
@@ -12987,6 +13838,12 @@ mod tests {
                 .expect("terminal fallback check")
                 .is_none()
         );
+
+        let specs = vec![spec.clone(), spec.clone(), shell_spec.clone(), spec.clone()];
+        assert_eq!(
+            agent_recovery_targets(&[true, true, true, true], &specs),
+            vec![0, 1, 3]
+        );
     }
 
     #[test]
@@ -13022,30 +13879,6 @@ mod tests {
         assert_eq!(
             exited_recovery_action_for(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT)),
             None
-        );
-    }
-
-    #[test]
-    fn close_grid_confirmation_requires_an_explicit_choice() {
-        assert_eq!(
-            close_grid_confirmation_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            CloseGridConfirmationAction::Confirm
-        );
-        assert_eq!(
-            close_grid_confirmation_action(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT)),
-            CloseGridConfirmationAction::Confirm
-        );
-        assert_eq!(
-            close_grid_confirmation_action(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)),
-            CloseGridConfirmationAction::Cancel
-        );
-        assert_eq!(
-            close_grid_confirmation_action(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
-            CloseGridConfirmationAction::Cancel
-        );
-        assert_eq!(
-            close_grid_confirmation_action(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT)),
-            CloseGridConfirmationAction::Continue
         );
     }
 
@@ -13530,57 +14363,204 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 fn setup_terminal(enable_mouse: bool) -> Result<Tui> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(
+    if let Err(error) = execute!(
         stdout,
         EnterAlternateScreen,
         EnableBracketedPaste,
         EnableFocusChange
-    )?;
-    if enable_mouse {
-        execute!(stdout, EnableMouseCapture)?;
+    ) {
+        let _ = restore_terminal_output(&mut stdout, enable_mouse);
+        return Err(error).context("failed to initialize terminal screen state");
+    }
+    if enable_mouse && let Err(error) = execute!(stdout, EnableMouseCapture) {
+        let _ = restore_terminal_output(&mut stdout, enable_mouse);
+        return Err(error).context("failed to enable terminal mouse capture");
     }
     let backend = CrosstermBackend::new(stdout);
-    Terminal::new(backend).context("failed to create terminal")
+    match Terminal::new(backend) {
+        Ok(terminal) => Ok(terminal),
+        Err(error) => {
+            let mut stdout = io::stdout();
+            let _ = restore_terminal_output(&mut stdout, enable_mouse);
+            Err(error).context("failed to create terminal")
+        }
+    }
 }
 
 fn teardown_terminal(terminal: &mut Tui, enable_mouse: bool) -> Result<()> {
-    disable_raw_mode()?;
-    if enable_mouse {
-        execute!(terminal.backend_mut(), DisableMouseCapture)?;
-    }
-    execute!(
-        terminal.backend_mut(),
-        DisableBracketedPaste,
-        DisableFocusChange,
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
+    restore_terminal_output(terminal.backend_mut(), enable_mouse)
 }
 
 fn suspend_terminal(terminal: &mut Tui) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        DisableBracketedPaste,
-        DisableFocusChange,
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
+    restore_terminal_output(terminal.backend_mut(), true)
 }
 
 fn resume_terminal(terminal: &mut Tui) -> Result<()> {
     enable_raw_mode()?;
-    execute!(
+    if let Err(error) = execute!(
         terminal.backend_mut(),
         EnterAlternateScreen,
         EnableBracketedPaste,
         EnableFocusChange
-    )?;
+    ) {
+        let _ = restore_terminal_output(terminal.backend_mut(), true);
+        return Err(error).context("failed to restore terminal screen state");
+    }
     Ok(())
+}
+
+fn restore_terminal_output(output: &mut impl Write, enable_mouse: bool) -> Result<()> {
+    let mut first_error = disable_raw_mode()
+        .err()
+        .map(|error| anyhow!(error).context("failed to disable raw terminal mode"));
+
+    macro_rules! attempt {
+        ($command:expr, $context:literal) => {
+            if let Err(error) = execute!(output, $command) {
+                if first_error.is_none() {
+                    first_error = Some(anyhow!(error).context($context));
+                }
+            }
+        };
+    }
+
+    if enable_mouse {
+        attempt!(
+            DisableMouseCapture,
+            "failed to disable terminal mouse capture"
+        );
+    }
+    attempt!(DisableBracketedPaste, "failed to disable bracketed paste");
+    attempt!(DisableFocusChange, "failed to disable focus tracking");
+    attempt!(
+        DisableMouseCapture,
+        "failed to reset terminal mouse capture"
+    );
+    attempt!(LeaveAlternateScreen, "failed to leave alternate screen");
+    attempt!(Show, "failed to restore terminal cursor");
+
+    first_error.map_or(Ok(()), Err)
+}
+
+/// Render bookkeeping the event loop carries between iterations.
+///
+/// It lives in a struct rather than in locals so the loop body can be a method
+/// that `run_loop` calls behind `catch_unwind`.
+struct LoopState {
+    immediate_render: bool,
+    output_render: bool,
+    last_render: Instant,
+    mouse_capture_enabled: bool,
+}
+
+enum LoopStep {
+    Continue,
+    Quit,
+}
+
+/// Rolling allowance for failures the event loop recovers from.
+///
+/// Recovering forever would be worse than exiting: a session that panics on
+/// every frame would spin without ever telling the user why. The window means a
+/// long session is not condemned by failures it already shrugged off.
+struct FailureBudget {
+    window_started: Instant,
+    count: u32,
+    max: u32,
+}
+
+impl FailureBudget {
+    const WINDOW: Duration = Duration::from_secs(60);
+
+    fn new(max: u32) -> Self {
+        Self {
+            window_started: Instant::now(),
+            count: 0,
+            max,
+        }
+    }
+
+    /// Records a failure, returning true when the loop should give up.
+    fn record(&mut self) -> bool {
+        if self.window_started.elapsed() >= Self::WINDOW {
+            self.window_started = Instant::now();
+            self.count = 0;
+        }
+        self.count = self.count.saturating_add(1);
+        self.count > self.max
+    }
+
+    fn count(&self) -> u32 {
+        self.count
+    }
+}
+
+struct TerminalRestoreGuard {
+    enable_mouse: bool,
+    armed: bool,
+}
+
+impl TerminalRestoreGuard {
+    fn new(enable_mouse: bool) -> Self {
+        Self {
+            enable_mouse,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = restore_terminal_output(&mut io::stdout(), self.enable_mouse);
+        }
+    }
+}
+
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
+
+struct TerminalPanicHookGuard {
+    previous: std::sync::Arc<std::sync::Mutex<Option<PanicHook>>>,
+}
+
+impl TerminalPanicHookGuard {
+    fn install(enable_mouse: bool) -> Self {
+        let previous = std::sync::Arc::new(std::sync::Mutex::new(Some(std::panic::take_hook())));
+        let hook_previous = previous.clone();
+        let ui_thread = thread::current().id();
+        std::panic::set_hook(Box::new(move |info| {
+            // A shielded panic is about to be caught and recovered, so the
+            // alternate screen has to survive it.
+            if thread::current().id() == ui_thread && !diagnostics::panics_are_shielded() {
+                let _ = restore_terminal_output(&mut io::stdout(), enable_mouse);
+            }
+            let guard = hook_previous
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(previous) = guard.as_ref() {
+                previous(info);
+            }
+        }));
+        Self { previous }
+    }
+}
+
+impl Drop for TerminalPanicHookGuard {
+    fn drop(&mut self) {
+        let _installed = std::panic::take_hook();
+        let previous = self
+            .previous
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(previous) = previous {
+            std::panic::set_hook(previous);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -13603,6 +14583,53 @@ mod selection_tests {
             byte_budget.record(32 * 1024);
         }
         assert!(!byte_budget.within_size_limits());
+    }
+
+    /// The event loop recovers from failures instead of exiting, so the budget
+    /// is the only thing stopping a session that panics on every frame from
+    /// spinning silently forever.
+    #[test]
+    fn the_failure_budget_gives_up_only_after_its_allowance() {
+        let mut budget = FailureBudget::new(3);
+        for expected in 1..=3 {
+            assert!(
+                !budget.record(),
+                "failure {expected} is within the allowance"
+            );
+            assert_eq!(budget.count(), expected);
+        }
+        assert!(budget.record(), "the fourth failure exhausts the allowance");
+
+        // A window that has elapsed starts the count over, so a long session is
+        // not condemned by failures it already recovered from.
+        budget.window_started = Instant::now() - FailureBudget::WINDOW;
+        assert!(!budget.record());
+        assert_eq!(budget.count(), 1);
+    }
+
+    /// A worker thread answers over a channel. A panicking worker that never
+    /// answers leaves its request in flight for the rest of the session, so the
+    /// panic has to come back as an error instead.
+    #[test]
+    fn a_panicking_worker_reports_an_error_instead_of_going_silent() {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let panicked =
+            diagnostics::recovering::<u8>("the test worker", || panic!("worker exploded"));
+        let succeeded = diagnostics::recovering("the test worker", || Ok(7_u8));
+        let failed =
+            diagnostics::recovering::<u8>("the test worker", || Err("ordinary failure".into()));
+        std::panic::set_hook(previous);
+
+        let message = panicked.expect_err("a panicking worker must report a failure");
+        assert!(message.contains("the test worker"), "message: {message}");
+        assert!(message.contains("worker exploded"), "message: {message}");
+        assert_eq!(succeeded, Ok(7));
+        assert_eq!(failed, Err("ordinary failure".into()));
+        assert!(
+            !diagnostics::panics_are_shielded(),
+            "the shield must lift once the panic is handled"
+        );
     }
 
     #[test]
@@ -13709,6 +14736,15 @@ mod selection_tests {
         assert!(!activity_summary_request_eligible(
             &state, false, true, true, now
         ));
+    }
+
+    #[test]
+    fn waiting_tabs_require_a_live_awake_quiet_agent() {
+        assert!(pane_needs_user_input(true, false, false, true));
+        assert!(!pane_needs_user_input(false, false, false, true));
+        assert!(!pane_needs_user_input(true, true, false, true));
+        assert!(!pane_needs_user_input(true, false, true, true));
+        assert!(!pane_needs_user_input(true, false, false, false));
     }
 
     #[test]
@@ -14391,7 +15427,9 @@ mod selection_tests {
             pending_terminate: Some(30),
             ..PortInspectorState::default()
         };
+
         inspector.move_cursor(1);
+
         assert_eq!(inspector.cursor, 1);
         assert_eq!(inspector.pending_terminate, None);
     }

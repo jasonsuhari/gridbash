@@ -580,8 +580,12 @@ fn mask_email(email: &str) -> String {
     let Some((local, domain)) = email.split_once('@') else {
         return email.to_string();
     };
-    if local.len() > 4 {
-        format!("{}...@{domain}", &local[..4])
+    // Count characters, not bytes: a byte slice of a non-ASCII local part can
+    // land mid-character, and slicing there panics.
+    let mut kept = local.chars();
+    let prefix = kept.by_ref().take(4).collect::<String>();
+    if kept.next().is_some() {
+        format!("{prefix}...@{domain}")
     } else {
         format!("{local}@{domain}")
     }
@@ -623,6 +627,23 @@ mod tests {
     };
 
     use super::*;
+
+    /// Byte-slicing the local part panicked whenever the fourth byte landed
+    /// inside a character, which any non-ASCII address can do. The address comes
+    /// out of an agent's credential file, so it is not GridBash's to validate.
+    #[test]
+    fn masking_a_multibyte_email_keeps_whole_characters() {
+        assert_eq!(mask_email("aé😀xx@example.com"), "aé😀x...@example.com");
+        assert_eq!(
+            mask_email("日本語のなまえ@example.com"),
+            "日本語の...@example.com"
+        );
+        assert_eq!(mask_email("abcde@example.com"), "abcd...@example.com");
+        assert_eq!(mask_email("abcd@example.com"), "abcd@example.com");
+        assert_eq!(mask_email("a@example.com"), "a@example.com");
+        assert_eq!(mask_email("@example.com"), "@example.com");
+        assert_eq!(mask_email("not-an-email"), "not-an-email");
+    }
 
     struct TempHome {
         path: PathBuf,

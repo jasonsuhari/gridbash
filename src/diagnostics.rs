@@ -6,6 +6,7 @@
 //! reports are the only durable evidence after the process is gone.
 
 use std::{
+    cell::Cell,
     fs::{self, OpenOptions},
     io::Write,
     panic::PanicHookInfo,
@@ -20,6 +21,72 @@ use directories::ProjectDirs;
 /// the directory grow without bound.
 const MAX_REPORTS: usize = 50;
 
+thread_local! {
+    /// Set while this thread is about to catch and recover from a panic.
+    ///
+    /// A shielded panic still gets a report on disk, but nothing may print to
+    /// the terminal or tear down the alternate screen: the TUI keeps running,
+    /// and stderr output would land on top of it as garbage. It is per-thread
+    /// because a panic hook runs on the thread that panicked, and a worker
+    /// recovering from its own panic must not change what a UI-thread panic
+    /// does.
+    static SHIELDED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// True while a panic on this thread is expected to be caught and recovered
+/// rather than fatal.
+pub fn panics_are_shielded() -> bool {
+    SHIELDED
+        .try_with(|shielded| shielded.get())
+        .unwrap_or(false)
+}
+
+/// Suppresses terminal-visible panic output on this thread for as long as the
+/// guard lives.
+///
+/// The guard drops during unwinding as well as on the happy path, so the shield
+/// always lifts before the caught panic is handled.
+pub struct PanicShield {
+    previous: bool,
+}
+
+impl PanicShield {
+    pub fn new() -> Self {
+        let previous = SHIELDED
+            .try_with(|shielded| shielded.replace(true))
+            .unwrap_or(false);
+        Self { previous }
+    }
+}
+
+impl Drop for PanicShield {
+    fn drop(&mut self) {
+        let previous = self.previous;
+        let _ = SHIELDED.try_with(|shielded| shielded.set(previous));
+    }
+}
+
+/// Runs `work`, turning a panic into the error the work would have reported.
+///
+/// Worker threads answer the interface over a channel. A panicking worker never
+/// answers at all, so whatever it was asked to do stays in flight for the rest
+/// of the session, spinner and all. Reporting the panic as a failure keeps the
+/// request completable and puts the reason on screen.
+pub fn recovering<T>(label: &str, work: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let outcome = {
+        let _shield = PanicShield::new();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+    };
+    match outcome {
+        Ok(result) => result,
+        Err(payload) => {
+            let detail = panic_payload_message(payload.as_ref());
+            record_recovered("tui", label, &detail);
+            Err(format!("{label} failed unexpectedly: {detail}"))
+        }
+    }
+}
+
 pub fn logs_dir() -> Option<PathBuf> {
     ProjectDirs::from("", "", "GridBash").map(|dirs| dirs.data_local_dir().join("logs"))
 }
@@ -33,7 +100,12 @@ pub fn install_panic_logger(role: &'static str) {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         record_panic(info, role);
-        previous(info);
+        // The default hook writes the message and backtrace to stderr. That is
+        // what a plain CLI run wants, and exactly what a recovering TUI must
+        // not have painted over its alternate screen.
+        if !panics_are_shielded() {
+            previous(info);
+        }
     }));
 }
 
@@ -61,7 +133,7 @@ pub fn record_panic(info: &PanicHookInfo<'_>, role: &str) {
          backtrace:\n{}\n",
         report_preamble(role),
         thread.name().unwrap_or("unnamed"),
-        panic_message(info),
+        panic_payload_message(info.payload()),
         std::backtrace::Backtrace::force_capture(),
     );
     write_report("panic", role, &report);
@@ -76,6 +148,18 @@ pub fn record_error_exit(role: &str, error: &anyhow::Error) {
     write_report("error", role, &report);
 }
 
+/// Record a failure the process survived.
+///
+/// Recovered failures never reach the user's terminal, so without this they
+/// would leave no trace at all beyond a status-bar line that scrolls away.
+pub fn record_recovered(role: &str, context: &str, detail: &str) {
+    let report = format!(
+        "kind: recovered\n{}context: {context}\ndetail: {detail}\n",
+        report_preamble(role)
+    );
+    write_report("recovered", role, &report);
+}
+
 fn report_preamble(role: &str) -> String {
     format!(
         "role: {role}\nversion: {}\npid: {}\ntimestamp_ms: {}\n",
@@ -85,8 +169,11 @@ fn report_preamble(role: &str) -> String {
     )
 }
 
-fn panic_message(info: &PanicHookInfo<'_>) -> String {
-    let payload = info.payload();
+/// Best-effort text of a panic payload, for reports and status messages.
+///
+/// A panic payload is `Any`, so anything other than the two shapes `panic!`
+/// produces has to be described rather than read.
+pub fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_string()
     } else if let Some(message) = payload.downcast_ref::<String>() {
@@ -185,13 +272,21 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!reports.is_empty(), "panic must produce a report");
 
-        let body = fs::read_to_string(&reports[0]).expect("read report");
+        // The panic hook is process-wide, so a panic from any other test running
+        // at the same time also lands under this role. Match on the message this
+        // test panicked with instead of assuming which report came first.
+        let body = reports
+            .iter()
+            .filter_map(|report| fs::read_to_string(report).ok())
+            .find(|body| body.contains("gridbash crash log smoke test"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no report names the smoke-test panic; found {} report(s)",
+                    reports.len()
+                )
+            });
         assert!(body.contains("kind: panic"), "report body: {body}");
         assert!(body.contains("role: smoketest"), "report body: {body}");
-        assert!(
-            body.contains("gridbash crash log smoke test"),
-            "report body: {body}"
-        );
         assert!(
             body.contains("src\\diagnostics.rs") || body.contains("src/diagnostics.rs"),
             "report must name the panicking file: {body}"
@@ -200,6 +295,43 @@ mod tests {
         for report in reports {
             let _ = fs::remove_file(report);
         }
+    }
+
+    /// The shield decides whether a panic tears down the alternate screen and
+    /// prints to stderr. Leaving it stuck on would hide a genuinely fatal panic;
+    /// leaving it stuck off would let a recovered one garble the interface.
+    #[test]
+    fn the_panic_shield_lifts_on_both_the_happy_path_and_an_unwind() {
+        assert!(!panics_are_shielded());
+
+        {
+            let _outer = PanicShield::new();
+            assert!(panics_are_shielded());
+            {
+                let _inner = PanicShield::new();
+                assert!(panics_are_shielded());
+            }
+            assert!(
+                panics_are_shielded(),
+                "a nested guard must not lift the outer shield"
+            );
+        }
+        assert!(!panics_are_shielded());
+
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let result = std::panic::catch_unwind(|| {
+            let _shield = PanicShield::new();
+            assert!(panics_are_shielded());
+            panic!("unwind past the shield");
+        });
+        std::panic::set_hook(previous);
+
+        assert!(result.is_err(), "the test panic must have unwound");
+        assert!(
+            !panics_are_shielded(),
+            "unwinding out of the guard must lift the shield"
+        );
     }
 
     #[test]

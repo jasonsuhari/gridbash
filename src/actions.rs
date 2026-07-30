@@ -22,6 +22,7 @@ fn search_keywords(action: Action) -> &'static str {
         Action::CaptureOutput | Action::ToggleOutputLogging => "save terminal logs",
         Action::CopyMode => "scrollback clipboard search",
         Action::BackgroundPanes | Action::BackgroundJobs => "agents pool stash restore swap",
+        Action::SwapPanes => "reorder grids tabs rearrange",
         Action::CommandLine => "assistant director bashbot brief delegate coordinate shell",
         _ => "",
     }
@@ -68,6 +69,7 @@ mod tests {
         assert!(fuzzy_match_score("orchestrate", Action::CommandLine).is_some());
         assert!(fuzzy_match_score("tab next", Action::NextTab).is_some());
         assert!(fuzzy_match_score("delete grid", Action::CloseGrid).is_some());
+        assert!(fuzzy_match_score("reorder grids", Action::SwapPanes).is_some());
         assert!(fuzzy_match_score("unrelated", Action::NextTab).is_none());
     }
 }

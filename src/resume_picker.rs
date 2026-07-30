@@ -1,11 +1,12 @@
 use std::{
     collections::BTreeSet,
-    io::{self, Stdout},
+    io::{self, Stdout, Write},
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use crossterm::{
+    cursor::Show,
     event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -19,7 +20,7 @@ use ratatui::{
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::session::{SessionRecord, process_is_running};
+use crate::session::{SessionRecord, delete_saved_session, process_is_running};
 
 type ResumeTerminal = Terminal<CrosstermBackend<Stdout>>;
 
@@ -92,41 +93,52 @@ impl SessionState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PickerAction {
     Continue,
     Select(usize),
+    Delete(usize),
     Cancel,
 }
 
-struct ResumePicker<'a> {
-    sessions: &'a [SessionRecord],
+struct ResumePicker {
+    sessions: Vec<SessionRecord>,
     list_state: ListState,
     page_size: usize,
     notice: Option<String>,
+    pending_delete: Option<String>,
 }
 
 pub fn select_session(sessions: &[SessionRecord]) -> Result<Option<SessionRecord>> {
+    let mut restore_guard = ResumeTerminalRestoreGuard::new();
     let mut terminal = setup_terminal()?;
     let mut picker = ResumePicker::new(sessions);
     let result = picker.run(&mut terminal);
     let teardown_result = teardown_terminal(&mut terminal);
 
+    if teardown_result.is_ok() {
+        restore_guard.disarm();
+    }
     match (result, teardown_result) {
-        (Err(error), _) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(error.context(format!(
+            "resume picker terminal cleanup also failed: {cleanup_error:#}"
+        ))),
+        (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(error),
         (Ok(selection), Ok(())) => Ok(selection),
     }
 }
 
-impl<'a> ResumePicker<'a> {
-    fn new(sessions: &'a [SessionRecord]) -> Self {
+impl ResumePicker {
+    fn new(sessions: &[SessionRecord]) -> Self {
         let mut list_state = ListState::default();
         list_state.select((!sessions.is_empty()).then_some(0));
         Self {
-            sessions,
+            sessions: sessions.to_vec(),
             list_state,
             page_size: 1,
             notice: None,
+            pending_delete: None,
         }
     }
 
@@ -148,6 +160,25 @@ impl<'a> ResumePicker<'a> {
                 PickerAction::Continue => {}
                 PickerAction::Cancel => return Ok(None),
                 PickerAction::Select(index) => return Ok(Some(self.sessions[index].clone())),
+                PickerAction::Delete(index) => {
+                    let title = session_title(&self.sessions[index]);
+                    match delete_saved_session(&self.sessions[index]) {
+                        Ok(()) => {
+                            self.sessions.remove(index);
+                            self.pending_delete = None;
+                            if self.sessions.is_empty() {
+                                return Ok(None);
+                            }
+                            self.list_state
+                                .select(Some(index.min(self.sessions.len().saturating_sub(1))));
+                            self.notice = Some(format!("Deleted saved session {title}."));
+                        }
+                        Err(error) => {
+                            self.pending_delete = None;
+                            self.notice = Some(format!("Could not delete session: {error:#}"));
+                        }
+                    }
+                }
             }
         }
     }
@@ -156,7 +187,14 @@ impl<'a> ResumePicker<'a> {
         let Some(selected) = self.list_state.selected() else {
             return PickerAction::Cancel;
         };
+        if self.pending_delete.is_some() && !matches!(key.code, KeyCode::Delete | KeyCode::Esc) {
+            self.pending_delete = None;
+        }
         match key.code {
+            KeyCode::Esc if self.pending_delete.take().is_some() => {
+                self.notice = Some("Session deletion canceled.".into());
+                PickerAction::Continue
+            }
             KeyCode::Esc | KeyCode::Char('q') => PickerAction::Cancel,
             KeyCode::Up | KeyCode::Char('k') => {
                 self.select(selected.saturating_sub(1));
@@ -182,6 +220,7 @@ impl<'a> ResumePicker<'a> {
                 self.select((selected + self.page_size).min(self.sessions.len().saturating_sub(1)));
                 PickerAction::Continue
             }
+            KeyCode::Delete => self.request_delete(selected),
             KeyCode::Enter => {
                 if let SessionState::Open(owner_pid) =
                     SessionState::for_record(&self.sessions[selected])
@@ -201,6 +240,32 @@ impl<'a> ResumePicker<'a> {
     fn select(&mut self, index: usize) {
         self.list_state.select(Some(index));
         self.notice = None;
+        self.pending_delete = None;
+    }
+
+    fn request_delete(&mut self, selected: usize) -> PickerAction {
+        let record = &self.sessions[selected];
+        if let SessionState::Open(owner_pid) = SessionState::for_record(record) {
+            self.pending_delete = None;
+            self.notice = Some(format!(
+                "Session is open in PID {owner_pid}. Close that GridBash window before deleting it."
+            ));
+            return PickerAction::Continue;
+        }
+
+        if self.pending_delete.as_deref() == Some(record.session.id.as_str()) {
+            return PickerAction::Delete(selected);
+        }
+
+        self.pending_delete = Some(record.session.id.clone());
+        let detached = all_panes(record).any(|pane| pane.host.is_some());
+        self.notice = Some(if detached {
+            "Press Delete again to stop detached terminals and permanently delete this session."
+                .into()
+        } else {
+            "Press Delete again to permanently delete this saved session.".into()
+        });
+        PickerAction::Continue
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>) {
@@ -412,6 +477,8 @@ impl<'a> ResumePicker<'a> {
                 Span::styled(" NAVIGATE   ", Style::default().fg(MUTED)),
                 launch_keycap("ENTER"),
                 Span::styled(" RESUME   ", Style::default().fg(MUTED)),
+                keycap("DELETE x2"),
+                Span::styled(" REMOVE   ", Style::default().fg(MUTED)),
                 keycap("Q or ESC"),
                 Span::styled(" CANCEL", Style::default().fg(MUTED)),
             ])
@@ -531,26 +598,61 @@ fn setup_terminal() -> Result<ResumeTerminal> {
     enable_raw_mode().context("failed to enable raw terminal mode")?;
     let mut stdout = io::stdout();
     if let Err(error) = execute!(stdout, EnterAlternateScreen) {
-        let _ = disable_raw_mode();
+        let _ = restore_terminal_output(&mut stdout);
         return Err(error).context("failed to enter alternate screen");
     }
     let backend = CrosstermBackend::new(stdout);
     match Terminal::new(backend) {
         Ok(terminal) => Ok(terminal),
         Err(error) => {
-            let _ = disable_raw_mode();
             let mut stdout = io::stdout();
-            let _ = execute!(stdout, LeaveAlternateScreen);
+            let _ = restore_terminal_output(&mut stdout);
             Err(error).context("failed to create resume terminal")
         }
     }
 }
 
 fn teardown_terminal(terminal: &mut ResumeTerminal) -> Result<()> {
-    disable_raw_mode().context("failed to disable raw terminal mode")?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .context("failed to leave alternate screen")?;
-    terminal.show_cursor().context("failed to restore cursor")
+    restore_terminal_output(terminal.backend_mut())
+}
+
+fn restore_terminal_output(output: &mut impl Write) -> Result<()> {
+    let mut first_error = disable_raw_mode()
+        .err()
+        .map(|error| anyhow!(error).context("failed to disable raw terminal mode"));
+    if let Err(error) = execute!(output, LeaveAlternateScreen)
+        && first_error.is_none()
+    {
+        first_error = Some(anyhow!(error).context("failed to leave alternate screen"));
+    }
+    if let Err(error) = execute!(output, Show)
+        && first_error.is_none()
+    {
+        first_error = Some(anyhow!(error).context("failed to restore cursor"));
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+struct ResumeTerminalRestoreGuard {
+    armed: bool,
+}
+
+impl ResumeTerminalRestoreGuard {
+    fn new() -> Self {
+        Self { armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ResumeTerminalRestoreGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = restore_terminal_output(&mut io::stdout());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -609,6 +711,7 @@ mod tests {
         assert!(rendered.contains("gridbash resume"));
         assert!(rendered.contains("Fluent workspace"));
         assert!(rendered.contains("DETACHED"));
+        assert!(rendered.contains("DELETE x2"));
         assert!(!rendered.contains("01 /"));
         assert!(!rendered.contains("02 /"));
         assert!(
@@ -616,6 +719,38 @@ mod tests {
                 .content()
                 .iter()
                 .any(|cell| cell.fg == TERMINAL_GREEN)
+        );
+    }
+
+    #[test]
+    fn session_deletion_requires_a_second_delete_press() {
+        let sessions = vec![record("Saved workspace", false, None, false)];
+        let mut picker = ResumePicker::new(&sessions);
+        let delete = KeyEvent::new(KeyCode::Delete, crossterm::event::KeyModifiers::NONE);
+
+        assert_eq!(picker.handle_key(delete), PickerAction::Continue);
+        assert!(picker.pending_delete.is_some());
+        assert_eq!(picker.handle_key(delete), PickerAction::Delete(0));
+    }
+
+    #[test]
+    fn open_sessions_cannot_be_deleted_from_the_picker() {
+        let sessions = vec![record(
+            "Open workspace",
+            true,
+            Some(std::process::id()),
+            false,
+        )];
+        let mut picker = ResumePicker::new(&sessions);
+        let delete = KeyEvent::new(KeyCode::Delete, crossterm::event::KeyModifiers::NONE);
+
+        assert_eq!(picker.handle_key(delete), PickerAction::Continue);
+        assert!(picker.pending_delete.is_none());
+        assert!(
+            picker
+                .notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("Close that GridBash window"))
         );
     }
 
@@ -639,6 +774,7 @@ mod tests {
             host: host.then(|| crate::pane_host::PtyHostRef {
                 endpoint: "127.0.0.1:12345".into(),
                 token: "token".into(),
+                process_id: None,
                 codex_sqlite_home: None,
                 started_at_ms: None,
             }),

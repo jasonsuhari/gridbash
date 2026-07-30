@@ -106,8 +106,18 @@ impl PaneLaunchSpec {
         self.command.resolved_command()
     }
 
+    pub fn is_agent(&self) -> bool {
+        command_basename(&self.command.command)
+            .is_some_and(|name| name.eq_ignore_ascii_case("vibe"))
+            || is_agent_like(&self.profile_name)
+            || self.command.title.as_deref().is_some_and(is_agent_like)
+            || command_basename(&self.command.command).is_some_and(is_agent_like)
+    }
+
     pub fn agent_label(&self) -> Option<String> {
-        if command_basename(&self.command.command).as_deref() == Some("vibe") {
+        if command_basename(&self.command.command)
+            .is_some_and(|name| name.eq_ignore_ascii_case("vibe"))
+        {
             return self
                 .command
                 .args
@@ -118,12 +128,7 @@ impl PaneLaunchSpec {
                 .map(clean_agent_label);
         }
 
-        if is_agent_like(&self.profile_name)
-            || self.command.title.as_deref().is_some_and(is_agent_like)
-            || command_basename(&self.command.command)
-                .as_deref()
-                .is_some_and(is_agent_like)
-        {
+        if self.is_agent() {
             return Some(clean_agent_label(
                 self.command
                     .title
@@ -164,36 +169,25 @@ fn run_git(path: &Path, args: &[&str]) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn command_basename(command: &str) -> Option<String> {
+fn command_basename(command: &str) -> Option<&str> {
     let path = Path::new(command);
-    let file_name = path
-        .file_stem()
+    path.file_stem()
         .or_else(|| path.file_name())
-        .and_then(|value| value.to_str())?;
-    Some(file_name.to_ascii_lowercase())
+        .and_then(|value| value.to_str())
 }
 
 fn is_agent_like(value: &str) -> bool {
-    let normalized = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    let parts = normalized
-        .split('-')
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
         .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-
-    AGENT_PROFILE_NAMES.iter().any(|agent| {
-        parts
-            .iter()
-            .any(|part| *part == *agent || part.starts_with(agent))
-    })
+        .any(|part| {
+            AGENT_PROFILE_NAMES.iter().any(|agent| {
+                part.eq_ignore_ascii_case(agent)
+                    || part
+                        .get(..agent.len())
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(agent))
+            })
+        })
 }
 
 fn clean_agent_label(value: String) -> String {
@@ -231,6 +225,7 @@ mod tests {
             auth_dir: None,
         };
 
+        assert!(spec.is_agent());
         assert_eq!(spec.agent_label().as_deref(), Some("claude-1"));
     }
 
@@ -254,6 +249,7 @@ mod tests {
             auth_dir: None,
         };
 
+        assert!(spec.is_agent());
         assert_eq!(spec.agent_label().as_deref(), Some("Codex Review"));
     }
 
@@ -277,6 +273,7 @@ mod tests {
             auth_dir: None,
         };
 
+        assert!(!spec.is_agent());
         assert_eq!(spec.agent_label(), None);
     }
 }
