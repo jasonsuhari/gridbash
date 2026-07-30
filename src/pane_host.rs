@@ -217,6 +217,10 @@ pub struct PtyPane {
     host_process_id: Option<u32>,
     view: PtyView,
     keep_running: bool,
+    /// Conversation this pane's agent is talking to, when GridBash knows it
+    /// exactly. Codex is discovered from its state DB after the fact; Claude is
+    /// pinned at launch, so the snapshot can name it without guessing.
+    agent_session_id: Option<String>,
     pub active: bool,
     pub exited: bool,
 }
@@ -476,6 +480,7 @@ impl PtyPane {
             host_process_id,
             view,
             keep_running,
+            agent_session_id: None,
             active: !background_output.is_empty(),
             exited,
         })
@@ -495,6 +500,23 @@ impl PtyPane {
 
     pub fn host_process_id(&self) -> Option<u32> {
         self.host_process_id
+    }
+
+    /// When this terminal started, used to tell the agent state it created apart
+    /// from whatever was already on disk.
+    pub fn started_at_ms(&self) -> Option<u64> {
+        self.host.started_at_ms
+    }
+
+    /// Conversation id GridBash pinned when this pane launched. Snapshots trust
+    /// this over any search of the agent's own state, because it cannot be
+    /// confused by a sibling pane working in the same directory.
+    pub fn agent_session_id(&self) -> Option<&str> {
+        self.agent_session_id.as_deref()
+    }
+
+    pub fn set_agent_session_id(&mut self, session_id: Option<String>) {
+        self.agent_session_id = session_id.filter(|value| !value.trim().is_empty());
     }
 
     pub fn codex_thread_id(&self, cwd: &Path) -> Option<String> {
