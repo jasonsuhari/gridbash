@@ -331,12 +331,7 @@ mod tests {
         let mut layout = GridLayout::new(absurd);
         assert!(layout.rects(Rect::new(0, 0, 40, 10), 4).len() <= 4);
         layout.set_size(absurd);
-        assert!(
-            layout
-                .rects(Rect::new(0, 0, 40, 10), usize::MAX)
-                .len()
-                <= MAX_PANES
-        );
+        assert!(layout.rects(Rect::new(0, 0, 40, 10), usize::MAX).len() <= MAX_PANES);
     }
 
     #[test]

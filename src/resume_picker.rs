@@ -355,7 +355,7 @@ impl ResumePicker {
                 Paragraph::new(vec![
                     Line::from(state_badge(selected_state)),
                     Line::from(Span::styled(
-                        format!("{selected:02} / {:02}", self.sessions.len()),
+                        format!("{selected} of {}", self.sessions.len()),
                         Style::default().fg(MUTED),
                     )),
                 ])

@@ -301,10 +301,7 @@ impl CopyMode {
                     .max(self.cursor.line)
                     .min(last_line)
                     .max(start);
-                self.lines
-                    .get(start..=end)
-                    .unwrap_or_default()
-                    .join("\n")
+                self.lines.get(start..=end).unwrap_or_default().join("\n")
             }
             SelectionKind::Characters => {
                 let (start, end) = normalize_points(selection.anchor, self.cursor);

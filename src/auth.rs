@@ -634,7 +634,10 @@ mod tests {
     #[test]
     fn masking_a_multibyte_email_keeps_whole_characters() {
         assert_eq!(mask_email("aé😀xx@example.com"), "aé😀x...@example.com");
-        assert_eq!(mask_email("日本語のなまえ@example.com"), "日本語の...@example.com");
+        assert_eq!(
+            mask_email("日本語のなまえ@example.com"),
+            "日本語の...@example.com"
+        );
         assert_eq!(mask_email("abcde@example.com"), "abcd...@example.com");
         assert_eq!(mask_email("abcd@example.com"), "abcd@example.com");
         assert_eq!(mask_email("a@example.com"), "a@example.com");

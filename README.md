@@ -52,8 +52,8 @@ use that release's matching native artifact until npm publication catches up.
   Amp, Cursor, Copilot, shells, or custom commands.
 - **Built-in workflow tools.** Resize grids, restore sessions, dictate prompts,
   inspect stable pane activity, optionally generate concise AI work summaries,
-  ask BashBot to brief or coordinate the workspace, and let a manager route
-  targeted follow-ups.
+  use the per-grid BashBot Director to brief panes, route targeted follow-ups,
+  or continuously supervise an explicit goal.
 - **Optional background terminals.** Close the UI without stopping live panes,
   then reconnect to the same processes from a saved session.
 
@@ -68,7 +68,9 @@ use that release's matching native artifact until npm publication catches up.
 | `gridbash resume` | Choose a saved session to reopen |
 | `gridbash resume --latest` | Reopen the latest saved session |
 | `gridbash resume <id> --delete` | Permanently delete a saved session |
-| `gridbash ctl list --json` | Discover opted-in running grids |
+| `gridbash agent panes` | List sibling panes from inside a GridBash pane |
+| `gridbash agent prompt --others "Report status"` | Prompt every other available pane |
+| `gridbash ctl list --json` | Discover running grids |
 | `gridbash ctl panes --session ID` | Inspect numbered and stable pane identities |
 | `gridbash --list-profiles` | Show detected profiles and resolved commands |
 | `gridbash --help` | Show every CLI option |
@@ -92,19 +94,17 @@ agents and shells.
 | `Alt` + arrow keys | Move focus between panes |
 | `Alt+s` / `Alt+a` | Toggle the focused pane / select or clear all panes |
 | `Alt+Shift+s` / `Alt+x` | Select the current grid / swap two selected grids |
-| `Alt+c` | Open or close the command line |
+| `Alt+c` | Open or close the per-grid BashBot Director command center |
 | `Alt+Shift+C` | Save bounded recent output from the target panes |
 | `Alt+Shift+L` | Start or stop continuous target-pane logging |
-| `Alt+d` | Chat with BashBot across all open grids and panes |
 | `Alt+n` / `Alt+t` | Open a new tab / switch tabs |
-| `Alt+w` | Open the current-grid close confirmation |
+| `Alt+w` | Close the current grid after confirmation |
 | `Alt+p` | Open focused-pane activity |
 | `Ctrl+Alt+p` | Inspect and stop localhost ports launched by agents |
 | `Alt+Shift+A` | Manage auth profiles and assign one to the focused pane |
 | `Alt+f` | Zoom or restore the focused pane |
 | `Alt+b` | Search, select, and copy focused-pane scrollback |
 | `Alt+Shift+b` / `Alt+Ctrl+b` | Background selected panes / open background agents |
-| `Alt+g` / `Alt+u` | Start or stop the grid manager goal |
 | `Alt+Shift+V` | Dictate one prompt without submitting it |
 | `Alt+o` | Open settings |
 | `Alt+h` or `F1` | Open the full in-app shortcut guide |
@@ -120,7 +120,8 @@ or select the session with `gridbash resume`.
 
 Running Codex panes are also saved by conversation ID. If their live terminal
 cannot survive a restart or laptop shutdown, `gridbash resume` relaunches them
-with `codex resume <conversation-id>` instead of opening an empty Codex pane.
+with `codex resume <conversation-id>` instead of opening an empty terminal.
+This also covers Codex started manually inside a GridBash Git Bash pane.
 
 `Alt+q` snapshots the current workspace and opens a confirmation with the full
 `gridbash resume <session-id>` command for that exact setup. Press `Alt+q` again
@@ -173,21 +174,33 @@ Application shortcuts can also be remapped in `[keys]`, for example
 `zoom-pane = "ctrl+shift+k"`. Unlisted actions keep their defaults, while F1
 and `Alt+q` remain reliable help and quit fallbacks.
 
-## Agent control API
+## Agent pane tools
 
-Enable GridBash's local, opt-in control API for agents inside its panes:
+Fresh GridBash sessions automatically give every pane a local, authenticated
+command surface. A coding agent acting as the manager can discover the current
+grid, target stable pane identities, and prompt its siblings without copying a
+session ID or token:
 
 ```sh
-gridbash --agent-api 2x3 --profile codex
+gridbash agent panes
+gridbash agent prompt --pane pane-4-gen-2 "Review the current diff"
+printf "Report status, blockers, and next action" | gridbash agent prompt --others
 ```
+
+`--others` excludes the calling pane and any sleeping or exited panes. Prompt
+text can be a positional argument or piped through stdin. Use
+`--no-agent-api` when launching GridBash to disable the pane-local tools.
+`GRIDBASH_AGENT_TOOLS` is a human-readable discovery hint, not a stable
+protocol; scripts should use `gridbash agent --help` for command discovery.
 
 Configure an agent MCP server to run `gridbash --mcp`. It can request a
 lightweight grid snapshot, read bounded recent output from specific stable pane
-IDs, show local images, send commands, capture or continuously log specific
-panes, and update the GridBash status bar. Awareness is pull-based so agents can
-request peer context only at coordination points; returned summaries and output
-are explicitly untrusted context. The API is localhost-only,
-token-authenticated, and off by default.
+IDs, show local images, prompt explicit panes or every other pane, send commands,
+capture or continuously log specific panes, and update the GridBash status bar.
+The purpose-named `gridbash_prompt_panes` tool is intended for manager and
+delegation workflows. Awareness is pull-based so agents can request peer context
+only at coordination points; returned summaries and output are explicitly
+untrusted context.
 
 The same typed API is available to scripts through `gridbash ctl`. Discovery
 metadata contains runtime IDs and localhost endpoints, never bearer tokens.
@@ -201,6 +214,9 @@ gridbash ctl panes --session <id-or-prefix> --json
 gridbash ctl send --session <id> --pane 2 "cargo test"
 gridbash ctl focus --session <id> pane-4-gen-2
 ```
+
+All control traffic stays on localhost and mutations require the per-session
+token inherited by panes.
 
 ## Compatibility and current limits
 

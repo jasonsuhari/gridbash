@@ -11,12 +11,11 @@ pub fn palette_label(action: Action) -> &'static str {
 fn search_keywords(action: Action) -> &'static str {
     match action {
         Action::CommandPalette => "commands actions search",
-        Action::EditGoal | Action::StopGoal => "manager orchestrate coordinate",
         Action::SleepPanes => "wake pause resume",
         Action::ZoomPane => "maximize fullscreen restore",
         Action::RestartPanes => "exited dead",
         Action::PreviousPanes => "history list switch",
-        Action::CloseGrid => "remove delete tab workspace terminate",
+        Action::CloseGrid => "remove delete grid tab workspace terminate",
         Action::Ports => "localhost server listener process pid terminate",
         Action::VoiceInput => "microphone speech",
         Action::AuthProfiles => "accounts credentials profiles",
@@ -24,7 +23,7 @@ fn search_keywords(action: Action) -> &'static str {
         Action::CopyMode => "scrollback clipboard search",
         Action::BackgroundPanes | Action::BackgroundJobs => "agents pool stash restore swap",
         Action::SwapPanes => "reorder grids tabs rearrange",
-        Action::BashBot => "assistant brief delegate coordinate",
+        Action::CommandLine => "assistant director bashbot brief delegate coordinate shell",
         _ => "",
     }
 }
@@ -67,7 +66,7 @@ mod tests {
     #[test]
     fn fuzzy_matching_accepts_labels_ids_and_keywords() {
         assert!(fuzzy_match_score("rn pane", Action::RenamePane).is_some());
-        assert!(fuzzy_match_score("orchestrate", Action::EditGoal).is_some());
+        assert!(fuzzy_match_score("orchestrate", Action::CommandLine).is_some());
         assert!(fuzzy_match_score("tab next", Action::NextTab).is_some());
         assert!(fuzzy_match_score("delete grid", Action::CloseGrid).is_some());
         assert!(fuzzy_match_score("reorder grids", Action::SwapPanes).is_some());

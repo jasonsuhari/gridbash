@@ -12,10 +12,10 @@ use crate::{
     app::{
         App, AssistantMessageRole, BackgroundJobState, BackgroundJobView, BackgroundJobsView,
         CloseGridConfirmationView, CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog,
-        GoalEditorView, GridPalette, PaneSelection, PaneSettingsTarget, PaneSettingsView,
-        PortInspectorView, PreviousPaneView, PreviousPanesView, QuitConfirmationView,
-        RenamePaneView, RenameTabView, SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind,
-        TabLabel, WorkspaceAssistantView,
+        GridPalette, PaneSelection, PaneSettingsTarget, PaneSettingsView, PortInspectorView,
+        PreviousPaneView, PreviousPanesView, QuitConfirmationView, RenamePaneView, RenameTabView,
+        SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
+        WorkspaceAssistantView,
     },
     auth::{AgentKind, AuthProfile},
     copy_mode::{CopyCellKind, CopyModeView, TextPoint},
@@ -67,28 +67,25 @@ const PANE_SETTINGS_BUTTON: &str = " Summary ";
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
-    let command_height = command_line_height(app.command_focused());
-    let output_height = if app.command_output_expanded() {
-        command_output_height(area.height, app.command_output_lines().len())
-    } else {
-        0
-    };
+    let command_center_height = command_center_height(
+        area.height,
+        app.command_center_open(),
+        app.command_center_height(),
+    );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
-            Constraint::Length(output_height),
-            Constraint::Length(command_height),
+            Constraint::Length(command_center_height),
             Constraint::Length(1),
         ])
         .split(area);
 
     let tab_area = chunks[0];
     let grid_area = chunks[1];
-    let command_output_area = chunks[2];
-    let command_area = chunks[3];
-    let status_area = chunks[4];
+    let command_center_area = chunks[2];
+    let status_area = chunks[3];
     let rects = app.pane_rects(grid_area);
     let palette = app.palette();
     let rename_view = app.rename_pane_view();
@@ -97,7 +94,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let background_jobs_view = app.background_jobs_view();
     let port_inspector_view = app.port_inspector_view();
     let follow_up_dialog = app.follow_up_dialog();
-    let goal_editor_view = app.goal_editor_view();
     let pane_settings_view = app.pane_settings_view();
     let command_palette_view = app.command_palette_view();
     let pane_settings_open = pane_settings_view.is_some();
@@ -120,7 +116,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || tab_rename_view.is_some()
         || follow_up_dialog.is_some()
         || grid_resizer.is_some()
-        || goal_editor_view.is_some()
         || image_overlay.is_some()
         || assistant_view.is_some()
         || quit_confirmation.is_some()
@@ -142,7 +137,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || tab_rename_view.is_some()
         || follow_up_dialog.is_some()
         || grid_resizer.is_some()
-        || goal_editor_view.is_some()
         || image_overlay.is_some()
         || assistant_view.is_some()
         || quit_confirmation.is_some()
@@ -217,10 +211,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         }
     }
 
-    if output_height > 0 {
-        render_command_output(frame, command_output_area, app);
+    if let Some(assistant) = assistant_view.as_ref() {
+        render_workspace_assistant(frame, command_center_area, assistant, palette);
+    } else if app.command_focused() {
+        render_shell_command_center(frame, command_center_area, app, palette);
     }
-    render_command_line(frame, command_area, app);
 
     let input_scope = app.input_scope_label();
     let previous_panes_button = previous_panes_button_rect(status_area);
@@ -280,7 +275,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         Span::raw(" | "),
         Span::styled(
             input_scope,
-            Style::default().fg(if app.command_focused() {
+            Style::default().fg(if app.command_center_open() {
                 palette.accent()
             } else if app.selected().len() > 1 {
                 palette.selected()
@@ -345,9 +340,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     if let Some(rename) = tab_rename_view.as_ref() {
         render_rename_tab(frame, area, rename);
     }
-    if let Some(editor) = goal_editor_view.as_ref() {
-        render_goal_editor(frame, area, editor);
-    }
     if let Some(image) = image_overlay {
         render_image_overlay(frame, area, image);
     }
@@ -359,9 +351,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
     if help_open {
         render_help(frame, area, app, palette);
-    }
-    if let Some(assistant) = assistant_view.as_ref() {
-        render_workspace_assistant(frame, area, assistant, palette);
     }
     if let Some(view) = command_palette_view.as_ref() {
         render_command_palette(frame, area, view, palette);
@@ -564,48 +553,65 @@ fn render_tabs(
 
     tab_rects
 }
-
-fn command_line_height(focused: bool) -> u16 {
-    u16::from(focused)
-}
-
-fn command_output_height(total_height: u16, line_count: usize) -> u16 {
-    let available = total_height.saturating_sub(3);
-    if available < 3 {
+fn command_center_height(total_height: u16, open: bool, requested: u16) -> u16 {
+    if !open {
         return 0;
     }
-
-    let max_height = (total_height / 3).clamp(3, 12).min(available);
-    (line_count as u16).saturating_add(2).clamp(3, max_height)
+    requested.min(total_height.saturating_sub(3))
 }
 
-fn render_command_output(frame: &mut Frame<'_>, area: Rect, app: &App) {
+fn render_shell_command_center(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    palette: &GridPalette,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
-
-    let border_style = if app.command_focused() {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
     let title = if app.command_running() {
-        " Command output | running "
+        " BashBot Director · Shell [ Chat | Shell ] · running "
     } else {
-        " Command output "
+        " BashBot Director · Shell [ Chat | Shell ] "
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(border_style)
-        .title(title);
+        .border_style(
+            Style::default()
+                .fg(palette.accent())
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(title)
+        .title_bottom(" Alt+C or Esc closes ");
     let inner = block.inner(area);
-    frame.render_widget(block, area);
+    frame.render_widget(block.style(Style::default().bg(SETTINGS_BG)), area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    if inner.height < 3 {
+        frame.render_widget(
+            Paragraph::new(" Shell · enlarge the terminal for output")
+                .style(Style::default().fg(SETTINGS_MUTED).bg(SETTINGS_BG)),
+            inner,
+        );
+        return;
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
 
     let lines = app.command_output_lines();
-    let start = lines.len().saturating_sub(inner.height as usize);
-    let visible = lines[start..]
+    let end = lines
+        .len()
+        .saturating_sub(app.command_output_scroll_from_bottom())
+        .max(lines.len().min(chunks[0].height as usize));
+    let start = end.saturating_sub(chunks[0].height as usize);
+    let visible = lines[start..end]
         .iter()
         .cloned()
         .map(Line::from)
@@ -617,16 +623,10 @@ fn render_command_output(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 .fg(Color::Rgb(230, 237, 243))
                 .bg(Color::Rgb(11, 15, 20)),
         ),
-        inner,
+        chunks[0],
     );
-}
 
-fn render_command_line(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-
-    let width = area.width as usize;
+    let width = chunks[1].width as usize;
     let cwd = app.command_cwd().display().to_string();
     let cwd_budget = command_cwd_budget(width, app.command_input());
     let cwd = truncate_start(&cwd, cwd_budget);
@@ -635,35 +635,38 @@ fn render_command_line(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let input_width = width.saturating_sub(prompt_width);
     let (input, cursor_offset) =
         visible_input(app.command_input(), app.command_cursor_chars(), input_width);
-    let focused = app.command_focused();
-
-    let prompt_style = if focused {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Gray)
-    };
-    let input_style = if focused {
-        Style::default().fg(Color::White)
-    } else {
-        Style::default().fg(Color::Rgb(180, 190, 202))
-    };
-
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(prompt, prompt_style),
-            Span::styled(input, input_style),
+            Span::styled(
+                prompt,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(input, Style::default().fg(Color::White)),
         ]))
-        .style(Style::default().bg(Color::Rgb(14, 20, 28))),
-        area,
+        .style(Style::default().bg(SETTINGS_SURFACE)),
+        chunks[1],
     );
-
-    if focused {
-        let x = area
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            command_key("Tab"),
+            Span::styled(" chat  ", Style::default().fg(SETTINGS_MUTED)),
+            command_key("Enter"),
+            Span::styled(" run  ", Style::default().fg(SETTINGS_MUTED)),
+            command_key("Ctrl+↑/↓"),
+            Span::styled(" resize  ", Style::default().fg(SETTINGS_MUTED)),
+            command_key("PgUp/PgDn"),
+            Span::styled(" scroll", Style::default().fg(SETTINGS_MUTED)),
+        ]))
+        .style(Style::default().bg(SETTINGS_BG)),
+        chunks[2],
+    );
+    if input_width > 0 {
+        let x = chunks[1]
             .x
             .saturating_add((prompt_width + cursor_offset).min(width.saturating_sub(1)) as u16);
-        frame.set_cursor_position((x, area.y));
+        frame.set_cursor_position((x, chunks[1].y));
     }
 }
 
@@ -1189,7 +1192,7 @@ fn pane_settings_lines(
     lines.push(settings_section(
         "PANE CONTROLS",
         if view.manager_configured {
-            "grid manager ready to orchestrate panes"
+            "BashBot Director ready in Alt+C"
         } else {
             "configure the grid Manager in global settings"
         },
@@ -1250,60 +1253,16 @@ fn pane_settings_reload_line(width: u16, palette: &GridPalette, selected: bool) 
     pane_settings_action_line("[ Refresh activity ]", width, palette.focus(), selected)
 }
 
-fn render_goal_editor(frame: &mut Frame<'_>, area: Rect, editor: &GoalEditorView) {
-    let width = area.width.saturating_sub(8).clamp(32, 88).min(area.width);
-    let prompt_area = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(5) / 2,
-        width,
-        height: 5.min(area.height),
-    };
-    frame.render_widget(Clear, prompt_area);
-    let input = if editor.input.is_empty() {
-        "Describe the goal for this grid...".into()
-    } else {
-        format!("{}_", editor.input)
-    };
-    let lines = vec![
-        Line::from(Span::styled(
-            truncate_text(&input, width.saturating_sub(4) as usize),
-            Style::default().fg(if editor.input.is_empty() {
-                Color::DarkGray
-            } else {
-                SETTINGS_TEXT
-            }),
-        )),
-        Line::from(vec![
-            command_key("Enter"),
-            Span::styled(" start/update  ", Style::default().fg(Color::Gray)),
-            command_key("Esc"),
-            Span::styled(" cancel", Style::default().fg(Color::Gray)),
-        ]),
-    ];
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::LightCyan))
-        .title(" Grid manager goal ");
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .style(Style::default().fg(SETTINGS_TEXT).bg(APP_BG)),
-        prompt_area,
-    );
-}
-
 fn render_workspace_assistant(
     frame: &mut Frame<'_>,
     area: Rect,
     view: &WorkspaceAssistantView,
     palette: &GridPalette,
 ) {
-    let dock = workspace_assistant_rect(area);
-    if dock.width == 0 || dock.height == 0 {
+    if area.width == 0 || area.height == 0 {
         return;
     }
 
-    frame.render_widget(Clear, dock);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(
@@ -1311,20 +1270,23 @@ fn render_workspace_assistant(
                 .fg(palette.accent())
                 .add_modifier(Modifier::BOLD),
         )
-        .title(" BashBot [>_] ")
-        .title_bottom(" Alt+D or Esc closes ");
-    let inner = block.inner(dock);
+        .title(format!(
+            " BashBot Director · {} · Chat [ Chat | Shell ] ",
+            view.grid_title
+        ))
+        .title_bottom(" Alt+C or Esc closes ");
+    let inner = block.inner(area);
     frame.render_widget(
         block.style(Style::default().fg(SETTINGS_TEXT).bg(SETTINGS_BG)),
-        dock,
+        area,
     );
 
     if inner.width == 0 || inner.height == 0 {
         return;
     }
-    if inner.height < 6 {
+    if inner.height < 5 {
         frame.render_widget(
-            Paragraph::new(" [>_] BashBot · enlarge the terminal to chat")
+            Paragraph::new(" [>_] BashBot Director · enlarge the terminal to chat")
                 .style(Style::default().fg(palette.focus()).bg(SETTINGS_BG)),
             inner,
         );
@@ -1334,7 +1296,7 @@ fn render_workspace_assistant(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(2),
             Constraint::Min(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -1349,28 +1311,21 @@ fn render_workspace_assistant(
     };
     let header = vec![
         Line::from(vec![
-            Span::styled(" .----.  ", Style::default().fg(palette.focus())),
+            Span::styled(" [>_]  ", Style::default().fg(palette.focus())),
             Span::styled(
-                format!("BashBot · {state}"),
+                format!("BashBot Director · {state} · {} panes", view.pane_count),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
-        Line::from(vec![
-            Span::styled("| [] []| ", Style::default().fg(palette.focus())),
-            Span::styled(
-                format!("{} grids · {} panes", view.grid_count, view.pane_count),
-                Style::default().fg(SETTINGS_MUTED),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("|  >_  | ", Style::default().fg(palette.focus())),
-            Span::styled(
-                "brief · prompt · delegate",
-                Style::default().fg(SETTINGS_MUTED),
-            ),
-        ]),
+        Line::from(vec![Span::styled(
+            view.goal
+                .as_deref()
+                .map(|goal| format!(" goal · {goal}"))
+                .unwrap_or_else(|| " /goal start · /stop end · brief · delegate".into()),
+            Style::default().fg(SETTINGS_MUTED),
+        )]),
     ];
     frame.render_widget(
         Paragraph::new(header).style(Style::default().bg(SETTINGS_BG)),
@@ -1381,6 +1336,7 @@ fn render_workspace_assistant(
         view,
         chunks[1].width as usize,
         chunks[1].height as usize,
+        view.scroll_from_bottom,
         palette,
     );
     frame.render_widget(
@@ -1394,7 +1350,7 @@ fn render_workspace_assistant(
         .saturating_sub(prefix.chars().count() as u16) as usize;
     let (visible, cursor_offset) = visible_input(&view.input, view.cursor_chars, input_width);
     let input = if view.input.is_empty() {
-        "Ask about the workspace...".to_string()
+        "Ask about this grid or use /goal...".to_string()
     } else {
         visible
     };
@@ -1423,8 +1379,12 @@ fn render_workspace_assistant(
         Paragraph::new(Line::from(vec![
             command_key("Enter"),
             Span::styled(" send  ", Style::default().fg(SETTINGS_MUTED)),
+            command_key("Tab"),
+            Span::styled(" shell  ", Style::default().fg(SETTINGS_MUTED)),
             command_key("Ctrl+U"),
-            Span::styled(" clear", Style::default().fg(SETTINGS_MUTED)),
+            Span::styled(" clear  ", Style::default().fg(SETTINGS_MUTED)),
+            command_key("Ctrl+↑/↓"),
+            Span::styled(" resize", Style::default().fg(SETTINGS_MUTED)),
         ]))
         .style(Style::default().bg(SETTINGS_BG)),
         chunks[3],
@@ -1439,33 +1399,11 @@ fn render_workspace_assistant(
     }
 }
 
-fn workspace_assistant_rect(area: Rect) -> Rect {
-    let width = area.width.saturating_sub(2).min(64).max(area.width.min(1));
-    let height = area
-        .height
-        .saturating_sub(2)
-        .min(17)
-        .max(area.height.min(1));
-    Rect {
-        x: area.x
-            + area
-                .width
-                .saturating_sub(width)
-                .saturating_sub(u16::from(area.width > width)),
-        y: area.y
-            + area
-                .height
-                .saturating_sub(height)
-                .saturating_sub(u16::from(area.height > height)),
-        width,
-        height,
-    }
-}
-
 fn assistant_transcript_lines(
     view: &WorkspaceAssistantView,
     width: usize,
     height: usize,
+    scroll_from_bottom: usize,
     palette: &GridPalette,
 ) -> Vec<Line<'static>> {
     if width == 0 || height == 0 {
@@ -1475,7 +1413,7 @@ fn assistant_transcript_lines(
     let mut lines = Vec::new();
     if view.messages.is_empty() {
         let welcome = if view.configured {
-            "Ask me to brief all panes, sharpen a prompt, or delegate a task."
+            "Ask me to brief this grid, sharpen a prompt, delegate work, or start a /goal."
         } else {
             "Set the Manager endpoint, model, and API key in Alt+O to start chatting."
         };
@@ -1509,14 +1447,18 @@ fn assistant_transcript_lines(
         push_assistant_message_lines(
             &mut lines,
             "bot › ",
-            "looking across every grid...",
+            "reviewing this grid...",
             width,
             Style::default().fg(palette.accent()),
         );
     }
 
-    let skip = lines.len().saturating_sub(height);
-    lines.into_iter().skip(skip).collect()
+    let end = lines
+        .len()
+        .saturating_sub(scroll_from_bottom)
+        .max(lines.len().min(height));
+    let start = end.saturating_sub(height);
+    lines.into_iter().skip(start).take(end - start).collect()
 }
 
 fn push_assistant_message_lines(
@@ -1614,9 +1556,9 @@ fn pane_settings_goal_line(
 ) -> Line<'static> {
     pane_settings_action_line(
         if has_goal {
-            "[ Edit grid goal ]"
+            "[ Edit goal in Director ]"
         } else {
-            "[ Set grid goal ]"
+            "[ Set goal in Director ]"
         },
         width,
         palette.accent(),
@@ -1629,7 +1571,7 @@ fn pane_settings_stop_goal_line(
     palette: &GridPalette,
     selected: bool,
 ) -> Line<'static> {
-    pane_settings_action_line("[ Stop grid goal ]", width, palette.exited(), selected)
+    pane_settings_action_line("[ Stop Director goal ]", width, palette.exited(), selected)
 }
 
 fn pane_settings_action_line(
@@ -2717,7 +2659,7 @@ fn render_close_grid_confirmation(
     confirmation: &CloseGridConfirmationView,
     palette: &GridPalette,
 ) {
-    let modal = quit_confirmation_modal_rect(area);
+    let modal = close_grid_confirmation_modal_rect(area);
     let shadow = settings_shadow_rect(area, modal);
 
     if shadow != modal {
@@ -3870,6 +3812,22 @@ fn exited_recovery_modal_rect(area: Rect) -> Rect {
     }
 }
 
+fn close_grid_confirmation_modal_rect(area: Rect) -> Rect {
+    let width = area.width.saturating_sub(4).min(66).max(area.width.min(1));
+    let height = area
+        .height
+        .saturating_sub(2)
+        .min(11)
+        .max(area.height.min(1));
+
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
 fn follow_up_modal_rect(area: Rect) -> Rect {
     let width = area.width.saturating_sub(4).min(74).max(area.width.min(1));
     let height = area
@@ -4190,8 +4148,9 @@ fn refresh_screen_cache(
 /// Rendering must never take GridBash down. A pane rect can outlive the frame it
 /// was measured against — the terminal can shrink between layout and draw — and
 /// both `Buffer::index_of` and slice indexing panic outright on an out-of-range
-/// position. Clamping to what the two buffers actually cover makes a stale rect
-/// drop cells for one frame instead of killing the process.
+/// position. Because those checks were only `debug_assert!`s, a release build
+/// aborted the whole process. Clamping to what the two buffers actually cover
+/// makes a stale rect drop cells for one frame instead.
 fn blit_buffer(source: &Buffer, target: &mut Buffer, area: Rect) {
     debug_assert_eq!(source.area.width, area.width);
     debug_assert_eq!(source.area.height, area.height);
@@ -4596,9 +4555,10 @@ mod tests {
     }
 
     #[test]
-    fn command_line_is_hidden_until_focused() {
-        assert_eq!(command_line_height(false), 0);
-        assert_eq!(command_line_height(true), 1);
+    fn command_center_is_hidden_and_clamped_to_the_available_height() {
+        assert_eq!(command_center_height(24, false, 12), 0);
+        assert_eq!(command_center_height(24, true, 12), 12);
+        assert_eq!(command_center_height(8, true, 12), 5);
     }
 
     #[test]
@@ -4676,24 +4636,17 @@ mod tests {
     }
 
     #[test]
-    fn workspace_assistant_dock_anchors_to_bottom_right() {
-        let area = Rect::new(10, 20, 100, 40);
-        let dock = workspace_assistant_rect(area);
-        assert_eq!(dock, Rect::new(45, 42, 64, 17));
-        assert_eq!(dock.right() + 1, area.right());
-        assert_eq!(dock.bottom() + 1, area.bottom());
-    }
-
-    #[test]
-    fn workspace_assistant_renders_avatar_status_and_input() {
+    fn workspace_assistant_renders_director_status_and_input() {
         let view = WorkspaceAssistantView {
+            grid_title: "Frontend".into(),
             input: "brief me".into(),
             cursor_chars: 8,
             messages: Vec::new(),
             busy: false,
             configured: true,
-            grid_count: 2,
             pane_count: 8,
+            goal: None,
+            scroll_from_bottom: 0,
         };
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
@@ -4709,15 +4662,16 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("BashBot"));
-        assert!(rendered.contains("| [] []|"));
-        assert!(rendered.contains("2 grids · 8 panes"));
+        assert!(rendered.contains("BashBot Director"));
+        assert!(rendered.contains("Frontend"));
+        assert!(rendered.contains("8 panes"));
         assert!(rendered.contains("you › brief me"));
     }
 
     #[test]
     fn assistant_transcript_keeps_latest_wrapped_lines() {
         let view = WorkspaceAssistantView {
+            grid_title: "Backend".into(),
             input: String::new(),
             cursor_chars: 0,
             messages: vec![
@@ -4732,10 +4686,11 @@ mod tests {
             ],
             busy: false,
             configured: true,
-            grid_count: 2,
             pane_count: 8,
+            goal: None,
+            scroll_from_bottom: 0,
         };
-        let lines = assistant_transcript_lines(&view, 24, 3, &GridPalette::default());
+        let lines = assistant_transcript_lines(&view, 24, 3, 0, &GridPalette::default());
         let text = lines
             .iter()
             .flat_map(|line| line.spans.iter())

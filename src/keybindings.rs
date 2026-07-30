@@ -24,12 +24,9 @@ pub enum Action {
     ZoomPane,
     CommandLine,
     CommandPalette,
-    BashBot,
     CaptureOutput,
     ToggleOutputLogging,
     VoiceInput,
-    EditGoal,
-    StopGoal,
     Settings,
     PreviousPanes,
     PaneActivity,
@@ -56,7 +53,6 @@ const ACTIONS: &[Action] = &[
     Action::RenameTab,
     Action::CommandLine,
     Action::CommandPalette,
-    Action::BashBot,
     Action::CaptureOutput,
     Action::ToggleOutputLogging,
     Action::PaneActivity,
@@ -72,8 +68,6 @@ const ACTIONS: &[Action] = &[
     Action::RestartPanes,
     Action::SwapPanes,
     Action::SleepPanes,
-    Action::EditGoal,
-    Action::StopGoal,
     Action::Settings,
     Action::VoiceInput,
     Action::Quit,
@@ -106,12 +100,9 @@ impl Action {
             Self::ZoomPane => "zoom-pane",
             Self::CommandLine => "command-line",
             Self::CommandPalette => "command-palette",
-            Self::BashBot => "bashbot",
             Self::CaptureOutput => "capture-output",
             Self::ToggleOutputLogging => "toggle-output-logging",
             Self::VoiceInput => "voice-input",
-            Self::EditGoal => "edit-goal",
-            Self::StopGoal => "stop-goal",
             Self::Settings => "settings",
             Self::PreviousPanes => "previous-panes",
             Self::PaneActivity => "pane-activity",
@@ -144,14 +135,11 @@ impl Action {
             Self::ResizeGrid => "resize the grid",
             Self::SwapPanes => "swap selected panes or grids",
             Self::ZoomPane => "zoom or restore focused pane",
-            Self::CommandLine => "expand or close command line",
+            Self::CommandLine => "open or close BashBot Director command center",
             Self::CommandPalette => "open searchable command palette",
-            Self::BashBot => "open or close BashBot workspace assistant",
             Self::CaptureOutput => "capture target pane output",
             Self::ToggleOutputLogging => "start or stop target pane logging",
             Self::VoiceInput => "dictate without submitting",
-            Self::EditGoal => "create or edit grid goal",
-            Self::StopGoal => "stop grid goal",
             Self::Settings => "open settings and profiles",
             Self::PreviousPanes => "show previous panes",
             Self::PaneActivity => "show focused-pane activity",
@@ -190,12 +178,9 @@ impl Action {
             Self::ZoomPane => "alt+f",
             Self::CommandLine => "alt+c",
             Self::CommandPalette => "alt+k",
-            Self::BashBot => "alt+d",
             Self::CaptureOutput => "alt+shift+c",
             Self::ToggleOutputLogging => "alt+shift+l",
             Self::VoiceInput => "alt+shift+v",
-            Self::EditGoal => "alt+g",
-            Self::StopGoal => "alt+u",
             Self::Settings => "alt+o",
             Self::PreviousPanes => "alt+shift+p",
             Self::PaneActivity => "alt+p",
@@ -359,6 +344,11 @@ impl KeyBindings {
 
         for (name, chord) in overrides {
             let normalized = name.trim().to_ascii_lowercase();
+            if matches!(normalized.as_str(), "bashbot" | "edit-goal" | "stop-goal") {
+                bail!(
+                    "[keys] action '{name}' was removed; use 'command-line' and the Alt+C BashBot Director command center"
+                );
+            }
             let action = Action::from_name(&normalized).ok_or_else(|| {
                 anyhow!(
                     "unknown [keys] action '{name}'; supported actions: {}",
@@ -488,7 +478,11 @@ mod tests {
             "a missing binding falls back to the action's default chord"
         );
         assert_eq!(bindings.help_entries().len(), ACTIONS.len());
-        assert!(bindings.action_for(&KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT)).is_none());
+        assert!(
+            bindings
+                .action_for(&KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT))
+                .is_none()
+        );
     }
 
     #[test]
@@ -518,6 +512,26 @@ mod tests {
         let unknown = KeyBindings::from_overrides(&overrides(&[("warp-pane", "alt+w")]))
             .expect_err("unknown action");
         assert!(unknown.to_string().contains("unknown [keys] action"));
+    }
+
+    #[test]
+    fn removed_director_shortcuts_have_a_clear_migration_error() {
+        for action in ["bashbot", "edit-goal", "stop-goal"] {
+            let error = KeyBindings::from_overrides(&overrides(&[(action, "alt+d")]))
+                .expect_err("removed action");
+            assert!(error.to_string().contains("Alt+C BashBot Director"));
+        }
+    }
+
+    #[test]
+    fn former_director_shortcuts_are_free_by_default() {
+        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
+        for key in ['d', 'g', 'u'] {
+            assert_eq!(
+                bindings.action_for(&KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT)),
+                None
+            );
+        }
     }
 
     #[test]

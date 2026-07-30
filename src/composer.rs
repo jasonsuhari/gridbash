@@ -732,9 +732,7 @@ impl Composer {
             Line::from(vec![
                 Span::styled(
                     format!("{panes:02}"),
-                    Style::default()
-                        .fg(SOFT_GREEN)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(SOFT_GREEN).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" PANES   ", Style::default().fg(MUTED)),
                 Span::styled(
@@ -972,7 +970,11 @@ impl Composer {
             lines.push(Line::from(vec![
                 Span::styled(
                     if is_selected { " ▸ " } else { "   " },
-                    Style::default().fg(if is_selected { TERMINAL_GREEN } else { HAIRLINE }),
+                    Style::default().fg(if is_selected {
+                        TERMINAL_GREEN
+                    } else {
+                        HAIRLINE
+                    }),
                 ),
                 Span::styled(
                     format!(" {} ", truncate(&leaf_name(candidate), width)),
@@ -1067,9 +1069,7 @@ impl Composer {
             Span::styled(" COLS  =  ", Style::default().fg(MUTED)),
             Span::styled(
                 format!("{:02}", self.grid().count()),
-                Style::default()
-                    .fg(SOFT_GREEN)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(SOFT_GREEN).add_modifier(Modifier::BOLD),
             ),
             Span::styled(" PANES", Style::default().fg(MUTED)),
         ])];
@@ -1620,13 +1620,14 @@ fn draw_preview_cell(frame: &mut Frame<'_>, rect: Rect, cell: &PreviewCell) {
             .add_modifier(Modifier::BOLD),
     ))];
     // Below this width a branch name is all ellipsis, so the number stands alone.
-    if inner.height >= 3 && inner.width >= 12 {
-        if let Some(subtitle) = cell.subtitle.as_deref() {
-            lines.push(Line::from(Span::styled(
-                truncate(subtitle, inner.width as usize),
-                Style::default().fg(dim_color(cell.accent)),
-            )));
-        }
+    if inner.height >= 3
+        && inner.width >= 12
+        && let Some(subtitle) = cell.subtitle.as_deref()
+    {
+        lines.push(Line::from(Span::styled(
+            truncate(subtitle, inner.width as usize),
+            Style::default().fg(dim_color(cell.accent)),
+        )));
     }
 
     let text_height = (lines.len() as u16).min(inner.height);
@@ -1727,7 +1728,7 @@ fn paint_starfield(frame: &mut Frame<'_>, area: Rect, tick: u64, seed: u64) {
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             let noise = hash3(x as u64, (y as u64).wrapping_add(drift), seed);
-            if noise % 29 != 0 {
+            if !noise.is_multiple_of(29) {
                 continue;
             }
             let (glyph, color) = match (noise >> 8).wrapping_add(tick / 6) % 14 {
@@ -1756,9 +1757,8 @@ fn paint_border_runner(frame: &mut Frame<'_>, rect: Rect, tick: u64) {
     let buffer = frame.buffer_mut();
     for trail in 0..6u16 {
         // Walk backwards in `u32` so a wide dialog cannot overflow the sum.
-        let index =
-            ((u32::from(head) + u32::from(perimeter) - u32::from(trail)) % u32::from(perimeter))
-                as u16;
+        let index = ((u32::from(head) + u32::from(perimeter) - u32::from(trail))
+            % u32::from(perimeter)) as u16;
         let (x, y) = perimeter_point(rect, index);
         let color = lerp_color(TERMINAL_GREEN, HAIRLINE_HI, trail as f32 / 6.0);
         if let Some(cell) = buffer.cell_mut((x, y)) {
@@ -2400,9 +2400,7 @@ impl GridPicker {
                 Span::styled(" COLS  =  ", Style::default().fg(MUTED)),
                 Span::styled(
                     format!("{:02}", self.grid().count()),
-                    Style::default()
-                        .fg(SOFT_GREEN)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(SOFT_GREEN).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(" PANES", Style::default().fg(MUTED)),
             ]),
@@ -2564,7 +2562,13 @@ mod tests {
     #[test]
     fn a_text_row_survives_a_cursor_past_the_end_of_its_value() {
         let long = "C:/Users/Jason/Documents/GitHub/gridbash/src/composer.rs";
-        for cursor in [0, 4, long.chars().count(), long.chars().count() + 500, usize::MAX] {
+        for cursor in [
+            0,
+            4,
+            long.chars().count(),
+            long.chars().count() + 500,
+            usize::MAX,
+        ] {
             for width in [0, 1, 6, 12, 400] {
                 let field = TextField {
                     value: long.into(),
@@ -2585,7 +2589,11 @@ mod tests {
             cursor: usize::MAX,
             limit: None,
         };
-        assert!(!text_row("project", &field, true, 0, 8, None, SOFT_GREEN).spans.is_empty());
+        assert!(
+            !text_row("project", &field, true, 0, 8, None, SOFT_GREEN)
+                .spans
+                .is_empty()
+        );
     }
 
     /// A character index at the end of the value maps to a byte index equal to

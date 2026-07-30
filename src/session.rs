@@ -768,6 +768,8 @@ pub fn select_resume_session(args: &ResumeArgs) -> Result<Option<SessionRecord>>
             .find(|record| live_owner_pid(record).is_none())
             .cloned()
             .or_else(|| sessions.first().cloned())
+    } else if sessions.len() == 1 {
+        sessions.first().cloned()
     } else {
         prompt_for_session(&sessions)?
     };
@@ -795,6 +797,10 @@ fn claim_resume_session_locked(record: SessionRecord) -> Result<SessionRecord> {
 
 pub fn delete_saved_session(record: &SessionRecord) -> Result<()> {
     with_session_state_lock(|| {
+        // Check the caller's snapshot before touching the filesystem. A session
+        // whose owner is still alive must be refused even when its file is
+        // already gone, otherwise a live workspace loses its saved state.
+        ensure_session_is_closed(record)?;
         let current = match load_session_record(&record.path) {
             Ok(current) => current,
             Err(_) if !record.path.exists() => return Ok(()),
@@ -810,13 +816,18 @@ pub fn delete_saved_session(record: &SessionRecord) -> Result<()> {
     })
 }
 
-fn delete_saved_session_locked(record: &SessionRecord) -> Result<()> {
+fn ensure_session_is_closed(record: &SessionRecord) -> Result<()> {
     if let Some(owner_pid) = live_owner_pid(record) {
         bail!(
             "session {} is open in GridBash (PID {owner_pid}); close that client before deleting it",
             record.session.id
         );
     }
+    Ok(())
+}
+
+fn delete_saved_session_locked(record: &SessionRecord) -> Result<()> {
+    ensure_session_is_closed(record)?;
 
     let mut hosts = BTreeMap::<String, PtyHostRef>::new();
     for pane in record

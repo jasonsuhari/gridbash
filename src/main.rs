@@ -64,6 +64,10 @@ fn run(cli: Cli) -> Result<()> {
         return control::run_mcp_server();
     }
 
+    if let Some(Command::Agent(args)) = &cli.command {
+        return control::run_agent(args);
+    }
+
     if let Some(Command::Ctl(args)) = &cli.command {
         return control::run_ctl(args);
     }
@@ -101,14 +105,26 @@ fn run(cli: Cli) -> Result<()> {
             return Ok(());
         };
 
-        let mut app = App::resume(config, record, !cli.no_mouse)?;
+        let mut app = App::resume(
+            config,
+            record,
+            !cli.no_mouse,
+            cli.agent_control_enabled(),
+            cli.agent_api_port,
+        )?;
         return app.run();
     }
 
     if cli.allows_automatic_recovery()
         && let Some(recovery) = claim_interrupted_recovery()?
     {
-        let mut app = App::recover_interrupted(config, recovery, !cli.no_mouse)?;
+        let mut app = App::recover_interrupted(
+            config,
+            recovery,
+            !cli.no_mouse,
+            cli.agent_control_enabled(),
+            cli.agent_api_port,
+        )?;
         return app.run();
     }
 

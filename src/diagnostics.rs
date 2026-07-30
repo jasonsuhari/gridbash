@@ -36,7 +36,9 @@ thread_local! {
 /// True while a panic on this thread is expected to be caught and recovered
 /// rather than fatal.
 pub fn panics_are_shielded() -> bool {
-    SHIELDED.try_with(|shielded| shielded.get()).unwrap_or(false)
+    SHIELDED
+        .try_with(|shielded| shielded.get())
+        .unwrap_or(false)
 }
 
 /// Suppresses terminal-visible panic output on this thread for as long as the
@@ -270,13 +272,21 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(!reports.is_empty(), "panic must produce a report");
 
-        let body = fs::read_to_string(&reports[0]).expect("read report");
+        // The panic hook is process-wide, so a panic from any other test running
+        // at the same time also lands under this role. Match on the message this
+        // test panicked with instead of assuming which report came first.
+        let body = reports
+            .iter()
+            .filter_map(|report| fs::read_to_string(report).ok())
+            .find(|body| body.contains("gridbash crash log smoke test"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no report names the smoke-test panic; found {} report(s)",
+                    reports.len()
+                )
+            });
         assert!(body.contains("kind: panic"), "report body: {body}");
         assert!(body.contains("role: smoketest"), "report body: {body}");
-        assert!(
-            body.contains("gridbash crash log smoke test"),
-            "report body: {body}"
-        );
         assert!(
             body.contains("src\\diagnostics.rs") || body.contains("src/diagnostics.rs"),
             "report must name the panicking file: {body}"

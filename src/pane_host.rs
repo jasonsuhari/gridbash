@@ -725,6 +725,12 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", 0)).context("failed to bind pane host")?;
     prevent_listener_inheritance(&listener)
         .context("failed to protect pane host listener from child-process inheritance")?;
+    // The accept worker owns this listener and blocks on `accept`, so the socket
+    // stays in blocking mode. Making it nonblocking here would surface a
+    // `WouldBlock` error on the very first accept and take the host down with it.
+    listener
+        .set_nonblocking(false)
+        .context("failed to make pane host listener blocking")?;
     let endpoint = listener
         .local_addr()
         .context("failed to read pane host endpoint")?;
@@ -780,6 +786,8 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
     let mut background_output = Vec::new();
     let mut output_scratch = String::new();
     let mut last_exit_poll = Instant::now();
+    let initial_client_deadline = Instant::now() + HOST_START_TIMEOUT;
+    let mut accepted_client_once = false;
 
     loop {
         let wait = HOST_EXIT_POLL_INTERVAL.saturating_sub(last_exit_poll.elapsed());
@@ -817,11 +825,14 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
                             next_client_id,
                             &spec.token,
                             &pane,
-                            codex_sqlite_home.as_deref(),
-                            started_at_ms,
+                            HostCodexMetadata {
+                                sqlite_home: codex_sqlite_home.as_deref(),
+                                started_at_ms,
+                            },
                             &mut background_output,
                             loop_tx.clone(),
                         )? {
+                            accepted_client_once = true;
                             keep_running = connected.keep_running;
                             active_client_id = Some(connected.client.id);
                             last_owner_pid = connected.client.owner_pid;
@@ -981,6 +992,7 @@ pub fn run_pane_host(spec_path: &Path) -> Result<()> {
         }
 
         if client.is_none()
+            && (accepted_client_once || Instant::now() >= initial_client_deadline)
             && should_shut_down_detached_host(
                 keep_running,
                 pane.exited,
@@ -1024,6 +1036,11 @@ struct AcceptedClient {
     keep_running: bool,
 }
 
+struct HostCodexMetadata<'a> {
+    sqlite_home: Option<&'a Path>,
+    started_at_ms: u64,
+}
+
 struct HostInput {
     client_id: u64,
     message: HostInputMessage,
@@ -1055,6 +1072,16 @@ fn spawn_host_acceptor(
                         if sender.send(HostLoopEvent::Connection(stream)).is_err() {
                             return;
                         }
+                    }
+                    // A retryable accept error must not end the pane. Only a
+                    // genuinely broken listener is worth reporting upward.
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        thread::sleep(Duration::from_millis(25));
                     }
                     Err(error) => {
                         let _ = sender.send(HostLoopEvent::ListenerFailed(error));
@@ -1090,8 +1117,7 @@ fn accept_client(
     client_id: u64,
     expected_token: &str,
     pane: &LocalPtyPane,
-    codex_sqlite_home: Option<&Path>,
-    started_at_ms: u64,
+    codex: HostCodexMetadata<'_>,
     background_output: &mut Vec<u8>,
     command_tx: std_mpsc::SyncSender<HostLoopEvent>,
 ) -> Result<Option<AcceptedClient>> {
@@ -1152,8 +1178,8 @@ fn accept_client(
             background_output: BASE64.encode(&*background_output),
             cwd: pane.cwd().to_path_buf(),
             exited: pane.exited,
-            codex_sqlite_home: codex_sqlite_home.map(Path::to_path_buf),
-            started_at_ms: Some(started_at_ms),
+            codex_sqlite_home: codex.sqlite_home.map(Path::to_path_buf),
+            started_at_ms: Some(codex.started_at_ms),
         },
     )?;
     release_background_output(background_output);
@@ -1632,6 +1658,78 @@ mod tests {
         // A later detach still buffers normally.
         append_background_output(&mut output, b"after reattach");
         assert_eq!(output, b"after reattach");
+    }
+
+    #[test]
+    fn non_persistent_host_waits_for_its_initial_client() {
+        let _guard = PANE_HOST_TEST_LOCK.lock().expect("lock pane host test");
+        let files = TestHostFiles::new();
+        let host_token = random_token().expect("host token");
+        #[cfg(windows)]
+        let (profile_name, command, args, line_ending) = (
+            "cmd",
+            PathBuf::from("cmd.exe"),
+            vec!["/d".to_string(), "/q".to_string()],
+            "\r",
+        );
+        #[cfg(unix)]
+        let (profile_name, command, args, line_ending) =
+            ("sh", PathBuf::from("/bin/sh"), vec!["-i".to_string()], "\n");
+        let spec = HostLaunchSpec {
+            token: host_token.clone(),
+            ready_path: files.ready.clone(),
+            profile_name: profile_name.into(),
+            pane_id: 6,
+            generation: 0,
+            command,
+            args,
+            env: BTreeMap::new(),
+            cwd: std::env::current_dir().expect("current directory"),
+            extra_env: Vec::new(),
+            scrollback_rows: 1_000,
+            process_priority: PaneProcessPriority::Normal,
+            workload_policy: PaneWorkloadPolicy::Unrestricted,
+            keep_running: false,
+        };
+        fs::write(
+            &files.spec,
+            serde_json::to_vec(&spec).expect("serialize host spec"),
+        )
+        .expect("write host spec");
+        let spec_path = files.spec.clone();
+        let host_thread = thread::spawn(move || run_pane_host(&spec_path));
+
+        let ready = wait_for_ready(&files.ready);
+        thread::sleep(Duration::from_millis(100));
+        let host = PtyHostRef {
+            endpoint: ready.endpoint,
+            token: host_token,
+            process_id: None,
+            codex_sqlite_home: None,
+            started_at_ms: None,
+        };
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let pane = PtyPane::attach(
+            host,
+            PaneId(6),
+            0,
+            &spec.cwd,
+            1_000,
+            false,
+            "",
+            &[],
+            event_tx,
+        )
+        .expect("attach initial client after startup delay");
+        pane.write(format!("echo initial-client{line_ending}").as_bytes())
+            .expect("write to initial client");
+        assert_output_contains(&mut event_rx, "initial-client");
+        drop(pane);
+
+        host_thread
+            .join()
+            .expect("join pane host")
+            .expect("non-persistent pane host exits cleanly");
     }
 
     #[test]
