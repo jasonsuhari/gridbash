@@ -326,7 +326,7 @@ Output capture writes the same bounded, ANSI-stripped pane tail used for session
 context. Continuous logging appends only new PTY output; submitted input,
 environment variables, and sibling panes are never added separately. With
 multiple selected panes, capture and logging create one file per selected pane;
-otherwise they target the focused pane. Active logs show a `logging` pane badge.
+otherwise they target the focused pane. Active logs show a `rec` pane badge.
 Default collision-safe files live under GridBash's platform-local data `output`
 directory, and every operation reports its resolved path. Agent API capture and
 start-log calls may provide an explicit output directory. A write failure stops
@@ -390,7 +390,9 @@ customize `command-line` instead.
 
 The resize picker starts from the current dimensions and shows each existing pane's latest activity summary when one is available. Shrinking a grid deactivates live panes outside the retained upper-left rectangle; changing `3x3` to `3x2`, for example, removes the rightmost column.
 
-A pane's top border shows a stable activity state by default. Opt-in AI activity summaries replace that state with a concise work headline after output settles; GridBash never uses raw typing or terminal UI fragments as the displayed summary. A configured manager goal replaces pane summaries across the grid until removed. A quiet marker appears after roughly three seconds without output; it indicates output followed by inactivity, not completion or process exit. Saving a blank pane name restores its default number.
+A pane's top border carries its number and name on the left and its state on the right. Opt-in AI activity summaries add a concise work headline after the name once output settles; GridBash never uses raw typing or terminal UI fragments as the displayed summary. A configured manager goal replaces pane summaries across the grid until removed. Saving a blank pane name restores its default number.
+
+The state on the right is whichever one matters most: `exited`, `asleep`, `needs you`, or `idle`. `needs you` marks an agent pane that has stopped producing output for roughly three seconds, which is how an agent asks for input — it indicates output followed by inactivity, not completion or process exit. A non-agent pane that goes quiet reads `idle` instead. As a pane narrows, its header drops its usage figure first, then its activity summary; the number, name, and state are kept. Focused and selected panes are marked by a filled number chip and a coloured border, which outrank a pane's own state.
 
 ## Voice mode
 

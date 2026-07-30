@@ -185,19 +185,28 @@ fn weighted_grid_rects(
     let column_widths = weighted_lengths(area.width, column_weights);
     let row_heights = weighted_lengths(area.height, row_weights);
 
+    let row_count = row_heights.len();
+    let column_count = column_widths.len();
     let mut y = area.y;
-    for row_height in row_heights {
+    for (row, row_height) in row_heights.into_iter().enumerate() {
         let mut x = area.x;
-        for column_width in column_widths.iter().copied() {
+        for (column, column_width) in column_widths.iter().copied().enumerate() {
             if rects.len() >= count {
                 break;
             }
 
+            // Neighbours share the line that divides them: a pane reaches one
+            // cell into the next so both draw the same border row or column, and
+            // ratatui's border merging collapses the overlap into a single line.
+            // Two abutting frames would otherwise spend two cells on what reads
+            // as one divider, and the pair of parallel lines makes a grid look
+            // like a spreadsheet instead of a workspace. The last row and column
+            // have nothing to reach into, so they stay inside `area`.
             rects.push(Rect {
                 x,
                 y,
-                width: column_width,
-                height: row_height,
+                width: column_width.saturating_add(u16::from(column + 1 < column_count)),
+                height: row_height.saturating_add(u16::from(row + 1 < row_count)),
             });
             x = x.saturating_add(column_width);
         }
@@ -391,6 +400,30 @@ mod tests {
 
     #[test]
     fn grid_rects_cover_area() {
+        let area = Rect::new(0, 0, 100, 40);
+        let rects = grid_rects(
+            area,
+            GridSize {
+                rows: 2,
+                columns: 3,
+            },
+            6,
+        );
+
+        assert_eq!(rects.len(), 6);
+        // The grid fills the area exactly: the first pane starts at its origin
+        // and the last pane in each direction ends on its far edge.
+        assert_eq!(rects[0].x, area.x);
+        assert_eq!(rects[0].y, area.y);
+        assert_eq!(rects[2].right(), area.right());
+        assert_eq!(rects[3].bottom(), area.bottom());
+    }
+
+    /// Adjacent panes are meant to land on the same divider cell so the two
+    /// borders merge into one line. Losing the overlap costs a cell per boundary
+    /// and puts two parallel lines between every pair of panes.
+    #[test]
+    fn neighbouring_panes_share_one_dividing_line() {
         let rects = grid_rects(
             Rect::new(0, 0, 100, 40),
             GridSize {
@@ -399,9 +432,27 @@ mod tests {
             },
             6,
         );
-        assert_eq!(rects.len(), 6);
-        assert_eq!(rects[0].height + rects[3].height, 40);
-        assert_eq!(rects[0].width + rects[1].width + rects[2].width, 100);
+
+        assert_eq!(rects[1].x, rects[0].right() - 1, "columns must overlap by 1");
+        assert_eq!(rects[2].x, rects[1].right() - 1, "columns must overlap by 1");
+        assert_eq!(rects[3].y, rects[0].bottom() - 1, "rows must overlap by 1");
+    }
+
+    /// The overlap only exists to be shared. A single pane has no neighbour to
+    /// share with, so it must not reach outside the area it was given.
+    #[test]
+    fn a_lone_pane_stays_inside_its_area() {
+        let area = Rect::new(2, 3, 40, 12);
+        let rects = grid_rects(
+            area,
+            GridSize {
+                rows: 1,
+                columns: 1,
+            },
+            1,
+        );
+
+        assert_eq!(rects, vec![area]);
     }
 
     #[test]

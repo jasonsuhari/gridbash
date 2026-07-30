@@ -9873,6 +9873,23 @@ impl App {
         self.sleeping.contains(&index)
     }
 
+    /// True when an agent pane has gone quiet, which is how an agent signals it
+    /// is waiting on the user.
+    pub fn pane_needs_input(&self, index: usize) -> bool {
+        let Some(pane) = self.panes.get(index) else {
+            return false;
+        };
+        pane_needs_user_input(
+            self.launch_plan
+                .as_ref()
+                .and_then(|plan| plan.panes.get(index))
+                .is_some_and(PaneLaunchSpec::is_agent),
+            self.sleeping.contains(&index),
+            pane.exited,
+            pane.output_quiet(),
+        )
+    }
+
     pub fn pane_logging(&self, index: usize) -> bool {
         self.panes.get(index).is_some_and(|pane| {
             self.output_logs
