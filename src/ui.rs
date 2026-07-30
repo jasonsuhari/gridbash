@@ -246,7 +246,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         render_shell_command_center(frame, command_center_area, app, palette);
     }
 
-    let status_buttons = render_status_bar(frame, status_area, app, palette);
+    let status_buttons =
+        render_status_bar(frame, status_area, &StatusBar::from_app(app), palette);
     let previous_panes_button = status_buttons.previous_panes;
     let pane_settings_button = status_buttons.pane_settings;
     let background_jobs_button = status_buttons.background_jobs;
@@ -924,6 +925,72 @@ struct StatusButtons {
     ports: Option<Rect>,
 }
 
+/// Everything the status bar draws, with nothing left to look up.
+///
+/// Like `PaneFrame`, this exists so the bar can be rendered without a live
+/// `App` behind it. That is not only convenience: `App::new` starts the agent
+/// control server, so building one just to read a handful of booleans leaves a
+/// bound port and a listener thread behind for the rest of the process.
+#[derive(Debug, Clone, Default)]
+pub struct StatusBar {
+    pub previous_panes_open: bool,
+    pub pane_settings_open: bool,
+    pub background_jobs_open: bool,
+    pub port_inspector_open: bool,
+    pub background_jobs: usize,
+    pub ports: usize,
+    pub voice_listening: bool,
+    pub zoomed: bool,
+    pub command_center_open: bool,
+    pub input_scope: &'static str,
+    pub selected_panes: usize,
+    pub selected_grids: usize,
+    pub status: String,
+}
+
+impl StatusBar {
+    fn from_app(app: &App) -> Self {
+        Self {
+            previous_panes_open: app.previous_panes_open(),
+            pane_settings_open: app.pane_settings_open(),
+            background_jobs_open: app.background_jobs_open(),
+            port_inspector_open: app.port_inspector_open(),
+            background_jobs: app.background_job_count(),
+            ports: app.agent_port_count(),
+            voice_listening: app.voice_listening(),
+            zoomed: app.zoomed(),
+            command_center_open: app.command_center_open(),
+            input_scope: app.input_scope_label(),
+            selected_panes: app.selected().len(),
+            selected_grids: app.selected_grid_count(),
+            status: app.status().to_string(),
+        }
+    }
+
+    fn mode(&self) -> &'static str {
+        if self.voice_listening {
+            "MIC"
+        } else if self.zoomed {
+            "ZOOM"
+        } else {
+            "LIVE"
+        }
+    }
+
+    /// The selection count, or nothing at all when nothing is selected.
+    ///
+    /// "0 panes selected" used to sit on screen permanently, reporting that the
+    /// normal state was the normal state.
+    fn selection_summary(&self) -> Option<String> {
+        match (self.selected_panes, self.selected_grids) {
+            (0, 0) => None,
+            (panes, 0) => Some(format!("{panes} selected")),
+            (0, grids) => Some(format!("{grids} grids selected")),
+            (panes, grids) => Some(format!("{panes} panes, {grids} grids selected")),
+        }
+    }
+}
+
 /// Draws the status bar and reports where its chips landed.
 ///
 /// The chip rects used to be derived a second time by a set of functions that
@@ -934,7 +1001,7 @@ struct StatusButtons {
 fn render_status_bar(
     frame: &mut Frame<'_>,
     area: Rect,
-    app: &App,
+    view: &StatusBar,
     palette: &GridPalette,
 ) -> StatusButtons {
     if area.width == 0 || area.height == 0 {
@@ -973,7 +1040,7 @@ fn render_status_bar(
         &mut spans,
         &mut cursor,
         PREVIOUS_PANES_BUTTON.to_string(),
-        chip_style(app.previous_panes_open(), palette.focus()),
+        chip_style(view.previous_panes_open, palette.focus()),
     );
     spans.push(Span::raw(" "));
     cursor = cursor.saturating_add(1);
@@ -981,19 +1048,18 @@ fn render_status_bar(
         &mut spans,
         &mut cursor,
         PANE_SETTINGS_BUTTON.to_string(),
-        chip_style(app.pane_settings_open(), palette.focus()),
+        chip_style(view.pane_settings_open, palette.focus()),
     );
     spans.push(Span::raw(" "));
     cursor = cursor.saturating_add(1);
-    let jobs = app.background_job_count();
     buttons.background_jobs = chip(
         &mut spans,
         &mut cursor,
-        background_jobs_button_label(jobs),
-        if jobs > 0 {
-            chip_style(app.background_jobs_open(), palette.accent())
+        background_jobs_button_label(view.background_jobs),
+        if view.background_jobs > 0 {
+            chip_style(view.background_jobs_open, palette.accent())
         } else {
-            quiet_chip_style(app.background_jobs_open())
+            quiet_chip_style(view.background_jobs_open)
         },
     );
 
@@ -1002,9 +1068,9 @@ fn render_status_bar(
     // then the last thing that happened.
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
-        session_mode_label(app),
+        view.mode(),
         Style::default()
-            .fg(if app.voice_listening() {
+            .fg(if view.voice_listening {
                 palette.accent()
             } else {
                 palette.focus()
@@ -1012,16 +1078,16 @@ fn render_status_bar(
             .add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled(
-        format!("  {}", app.input_scope_label()),
-        Style::default().fg(if app.command_center_open() {
+        format!("  {}", view.input_scope),
+        Style::default().fg(if view.command_center_open {
             palette.accent()
-        } else if app.selected().len() > 1 {
+        } else if view.selected_panes > 1 {
             palette.selected()
         } else {
             TEXT_DIM
         }),
     ));
-    if let Some(selection) = selection_summary(app) {
+    if let Some(selection) = view.selection_summary() {
         spans.push(Span::styled(
             format!("  {selection}"),
             Style::default().fg(palette.selected()),
@@ -1031,8 +1097,7 @@ fn render_status_bar(
     // into what is left over rather than across the whole bar. Rendering both
     // over the full width let a long status message run underneath the chip and
     // get overwritten.
-    let ports = app.agent_port_count();
-    buttons.ports = ports_button_rect(area, ports);
+    buttons.ports = ports_button_rect(area, view.ports);
     let text_area = Rect {
         width: buttons
             .ports
@@ -1043,12 +1108,12 @@ fn render_status_bar(
     // Status messages are sentences and routinely outrun the bar. Trimming to
     // what is left over ends them in an ellipsis rather than mid-word, so a cut
     // message reads as cut rather than as a typo.
-    if !app.status().is_empty() {
+    if !view.status.is_empty() {
         let used = spans.iter().map(Span::width).sum::<usize>();
         let room = (text_area.width as usize).saturating_sub(used + 2);
         if room >= 4 {
             spans.push(Span::styled(
-                format!("  {}", truncate_text(app.status(), room)),
+                format!("  {}", truncate_text(&view.status, room)),
                 Style::default().fg(TEXT_FAINT),
             ));
         }
@@ -1060,12 +1125,12 @@ fn render_status_bar(
 
     if let Some(button) = buttons.ports {
         frame.render_widget(
-            Paragraph::new(ports_button_label(ports))
+            Paragraph::new(ports_button_label(view.ports))
                 .alignment(Alignment::Center)
-                .style(if ports > 0 {
-                    chip_style(app.port_inspector_open(), palette.accent())
+                .style(if view.ports > 0 {
+                    chip_style(view.port_inspector_open, palette.accent())
                 } else {
-                    quiet_chip_style(app.port_inspector_open())
+                    quiet_chip_style(view.port_inspector_open)
                 }),
             button,
         );
@@ -1100,31 +1165,6 @@ fn quiet_chip_style(open: bool) -> Style {
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(TEXT_FAINT).bg(SURFACE_HI)
-    }
-}
-
-fn session_mode_label(app: &App) -> &'static str {
-    if app.voice_listening() {
-        "MIC"
-    } else if app.zoomed() {
-        "ZOOM"
-    } else {
-        "LIVE"
-    }
-}
-
-/// The selection count, or nothing at all when nothing is selected.
-///
-/// "0 panes selected" was on screen permanently to say that the normal state is
-/// the normal state.
-fn selection_summary(app: &App) -> Option<String> {
-    let panes = app.selected().len();
-    let grids = app.selected_grid_count();
-    match (panes, grids) {
-        (0, 0) => None,
-        (panes, 0) => Some(format!("{panes} selected")),
-        (0, grids) => Some(format!("{grids} grids selected")),
-        (panes, grids) => Some(format!("{panes} panes, {grids} grids selected")),
     }
 }
 
@@ -4731,8 +4771,6 @@ mod tests {
     /// about glyphs on a screen. This draws the real chrome functions so that
     /// question can be answered without a terminal full of live PTYs behind it.
     fn preview_shell(width: u16, height: u16, grid: GridSize) -> String {
-        let cli = Cli::parse_from(["gridbash"]);
-        let app = App::new(cli, Config::default()).expect("app");
         let palette = GridPalette::default();
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test terminal");
@@ -4782,7 +4820,14 @@ mod tests {
                 render_status_bar(
                     frame,
                     Rect::new(0, height.saturating_sub(1), width, 1),
-                    &app,
+                    &StatusBar {
+                        input_scope: "focused pane",
+                        selected_panes: 1,
+                        background_jobs: 2,
+                        ports: 3,
+                        status: "agent pane tools ready | Drag copies within pane".into(),
+                        ..StatusBar::default()
+                    },
                     &palette,
                 );
             })
@@ -4943,6 +4988,40 @@ mod tests {
         );
     }
 
+    /// The chrome must be drawable from plain data.
+    ///
+    /// `App::new` starts the agent control server, so an `App` built purely to
+    /// read a few booleans leaves a bound port and a live listener behind for
+    /// the rest of the test process. Two such tests were enough to make the
+    /// timing-sensitive `pane_host` socket tests fail later in the same run.
+    /// Rendering from a view model keeps that out of the test binary entirely.
+    #[test]
+    fn the_status_bar_renders_without_a_live_app() {
+        let backend = TestBackend::new(100, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let view = StatusBar {
+            background_jobs: 4,
+            ports: 2,
+            zoomed: true,
+            input_scope: "selected panes",
+            selected_panes: 3,
+            status: "everything is fine".into(),
+            ..StatusBar::default()
+        };
+
+        terminal
+            .draw(|frame| {
+                render_status_bar(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render status bar");
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("ZOOM"), "bar: {rendered}");
+        assert!(rendered.contains(" BG 4 "), "bar: {rendered}");
+        assert!(rendered.contains(" Ports 2 "), "bar: {rendered}");
+        assert!(rendered.contains("3 selected"), "bar: {rendered}");
+    }
+
     /// The hints exist to be discoverable, not to be load-bearing. A terminal
     /// too narrow for them must spend its width on the tabs instead.
     #[test]
@@ -4964,15 +5043,17 @@ mod tests {
     /// renaming a button moved it on screen without moving its click target.
     #[test]
     fn status_bar_click_targets_match_what_was_drawn() {
-        let cli = Cli::parse_from(["gridbash"]);
-        let app = App::new(cli, Config::default()).expect("app");
         let backend = TestBackend::new(120, 1);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         let mut buttons = StatusButtons::default();
+        let view = StatusBar {
+            input_scope: "focused pane",
+            ..StatusBar::default()
+        };
 
         terminal
             .draw(|frame| {
-                buttons = render_status_bar(frame, frame.area(), &app, &GridPalette::default());
+                buttons = render_status_bar(frame, frame.area(), &view, &GridPalette::default());
             })
             .expect("render status bar");
 
@@ -5005,10 +5086,24 @@ mod tests {
     /// unusual was happening.
     #[test]
     fn the_status_bar_stays_silent_about_an_empty_selection() {
-        let cli = Cli::parse_from(["gridbash"]);
-        let app = App::new(cli, Config::default()).expect("app");
+        let quiet = StatusBar::default();
+        assert_eq!(quiet.selection_summary(), None);
 
-        assert_eq!(selection_summary(&app), None);
+        let panes = StatusBar {
+            selected_panes: 3,
+            ..StatusBar::default()
+        };
+        assert_eq!(panes.selection_summary().as_deref(), Some("3 selected"));
+
+        let both = StatusBar {
+            selected_panes: 3,
+            selected_grids: 2,
+            ..StatusBar::default()
+        };
+        assert_eq!(
+            both.selection_summary().as_deref(),
+            Some("3 panes, 2 grids selected")
+        );
     }
 
     #[test]
