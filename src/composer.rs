@@ -2420,10 +2420,14 @@ impl GridPicker {
     }
 
     fn preview_summary(&self, index: usize) -> Option<&str> {
-        let row = index / self.columns;
-        let column = index % self.columns;
+        // `GridSize` is a plain struct, and the loop that calls this already
+        // guards its own division the same way. Dividing by a zero column count
+        // here would panic mid-frame.
+        let columns = self.columns.max(1);
+        let row = index / columns;
+        let column = index % columns;
         let old_index = (row < self.initial.rows && column < self.initial.columns)
-            .then_some(row * self.initial.columns + column)?;
+            .then_some(row * self.initial.columns.max(1) + column)?;
 
         self.pane_summaries
             .get(old_index)
@@ -2486,6 +2490,25 @@ mod tests {
     use crate::auth::AgentKind;
 
     use super::*;
+
+    /// `GridSize` is a plain struct, so a zero dimension can reach the picker.
+    /// The preview loop already guarded its own division; the summary lookup it
+    /// calls did not, and dividing by zero there would panic mid-frame.
+    #[test]
+    fn the_resize_preview_survives_a_zero_dimension() {
+        let picker = GridPicker::new(GridSize {
+            rows: 0,
+            columns: 0,
+        })
+        .with_pane_summaries(vec![Some("busy".into())]);
+
+        assert_eq!(picker.preview_summary(0), None);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("build a test terminal");
+        terminal
+            .draw(|frame| picker.draw(frame, None))
+            .expect("drawing a zero-sized grid must not panic");
+    }
 
     const TEST_PROFILE: &str = "test-shell";
 
