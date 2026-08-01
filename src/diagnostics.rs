@@ -87,7 +87,22 @@ pub fn recovering<T>(label: &str, work: impl FnOnce() -> Result<T, String>) -> R
     }
 }
 
+/// Directory reports are written to.
+///
+/// `GRIDBASH_LOGS_DIR` overrides it. A test binary redirects itself, because a
+/// test that writes a report into the real directory does not just leave litter
+/// there: reports are pruned to a fixed count, so a test run repeated often
+/// enough evicts the user's genuine crash evidence before anyone reads it.
 pub fn logs_dir() -> Option<PathBuf> {
+    if let Some(configured) = std::env::var_os("GRIDBASH_LOGS_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+    {
+        return Some(configured);
+    }
+    if cfg!(test) {
+        return Some(std::env::temp_dir().join("gridbash-test-logs"));
+    }
     ProjectDirs::from("", "", "GridBash").map(|dirs| dirs.data_local_dir().join("logs"))
 }
 
@@ -209,6 +224,13 @@ fn write_report(kind: &str, role: &str, report: &str) {
     prune_reports(&directory);
 }
 
+/// Drop the oldest reports once the directory is full, taking everything else
+/// before a panic report.
+///
+/// A panic is the report that cannot be reconstructed: the process is gone and
+/// nothing else recorded why. Recovered failures and error exits are far more
+/// numerous and far less valuable, so a burst of them must not push the one
+/// panic worth reading out of the directory.
 fn prune_reports(directory: &Path) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;
@@ -218,7 +240,7 @@ fn prune_reports(directory: &Path) {
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "log"))
         .filter_map(|entry| {
             let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, entry.path()))
+            Some((is_panic_report(&entry.path()), modified, entry.path()))
         })
         .collect::<Vec<_>>();
     let Some(excess) = reports
@@ -228,10 +250,16 @@ fn prune_reports(directory: &Path) {
     else {
         return;
     };
-    reports.sort_by_key(|(modified, _)| *modified);
-    for (_, path) in reports.into_iter().take(excess) {
+    reports.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    for (_, _, path) in reports.into_iter().take(excess) {
         let _ = fs::remove_file(path);
     }
+}
+
+fn is_panic_report(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("panic-"))
 }
 
 #[cfg(test)]
@@ -331,6 +359,61 @@ mod tests {
         assert!(
             !panics_are_shielded(),
             "unwinding out of the guard must lift the shield"
+        );
+    }
+
+    /// A panic report is the only evidence that a crash happened at all, so a
+    /// flood of routine reports must not be able to push one out.
+    #[test]
+    fn pruning_takes_routine_reports_before_panics() {
+        let directory = std::env::temp_dir().join(format!("gridbash-kinds-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("create log directory");
+        for index in 0..5 {
+            fs::write(directory.join(format!("panic-tui-{index:04}.log")), b"x")
+                .expect("write panic report");
+        }
+        for index in 0..MAX_REPORTS + 10 {
+            fs::write(
+                directory.join(format!("recovered-tui-{index:04}.log")),
+                b"x",
+            )
+            .expect("write recovered report");
+        }
+
+        prune_reports(&directory);
+
+        let remaining = fs::read_dir(&directory)
+            .expect("read log directory")
+            .flatten()
+            .filter_map(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| name.starts_with("panic-"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(remaining.len(), MAX_REPORTS);
+        assert_eq!(
+            remaining.iter().filter(|is_panic| **is_panic).count(),
+            5,
+            "every panic report must survive"
+        );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    /// A test binary that writes into the real diagnostics directory prunes the
+    /// user's genuine crash reports out of it.
+    #[test]
+    fn a_test_binary_never_writes_to_the_real_diagnostics_directory() {
+        let directory = logs_dir().expect("log directory");
+
+        let real = ProjectDirs::from("", "", "GridBash")
+            .map(|dirs| dirs.data_local_dir().join("logs"))
+            .expect("real log directory");
+        assert_ne!(
+            directory, real,
+            "tests must be redirected away from {real:?}"
         );
     }
 
