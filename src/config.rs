@@ -10,6 +10,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::{auth::AuthConfig, keybindings::KeyBindings, profiles::Profile};
 
+/// Scrollback a pane may be configured to keep.
+///
+/// This is the dominant memory cost of a running grid. A terminal parser holds
+/// a fixed-size cell for every column of every retained row, thirty two bytes
+/// each, whether or not anything was ever written there — so one pane two
+/// hundred columns wide costs about six megabytes per thousand rows regardless
+/// of what its agent actually printed. Twenty panes at the default are several
+/// hundred megabytes of scrollback alone.
+///
+/// The floor is low enough to be worth reaching for on a machine under memory
+/// pressure. A few hundred rows is a poor archive but a perfectly usable
+/// terminal, and panes that need history can be logged to disk instead.
+pub const MIN_SCROLLBACK_ROWS: usize = 200;
+pub const MAX_SCROLLBACK_ROWS: usize = 50_000;
+
+/// Clamp a configured scrollback to what a pane may actually be given.
+pub fn clamp_scrollback_rows(rows: usize) -> usize {
+    rows.clamp(MIN_SCROLLBACK_ROWS, MAX_SCROLLBACK_ROWS)
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default, skip_serializing_if = "Defaults::is_empty")]

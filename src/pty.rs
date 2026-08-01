@@ -21,7 +21,7 @@ use vt100::{Parser, Screen};
 
 use crate::{
     codex_sqlite::CodexSqliteLease,
-    config::{PaneProcessPriority, PaneWorkloadPolicy},
+    config::{PaneProcessPriority, PaneWorkloadPolicy, clamp_scrollback_rows},
     layout::PaneId,
     process_priority::{PaneWorkloadClass, PaneWorkloadController},
 };
@@ -280,7 +280,7 @@ pub(crate) struct PtyView {
 
 impl PtyView {
     pub(crate) fn new(cwd: PathBuf, scrollback_rows: usize) -> Self {
-        Self::with_history(cwd, scrollback_rows.clamp(1_000, 50_000), true)
+        Self::with_history(cwd, clamp_scrollback_rows(scrollback_rows), true)
     }
 
     /// View for a process that never renders the pane: the pane host.
