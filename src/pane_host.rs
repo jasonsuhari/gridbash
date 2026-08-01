@@ -28,7 +28,7 @@ use crate::{
     config::{PaneProcessPriority, PaneWorkloadPolicy},
     layout::PaneId,
     process_priority::PaneWorkloadClass,
-    pty::{PtyEvent, PtyPane as LocalPtyPane, PtyView, PtyWriteToken},
+    pty::{PtyEvent, PtyPane as LocalPtyPane, PtyView, PtyWriteToken, clamp_pane_size},
     session::process_is_running,
 };
 
@@ -624,6 +624,10 @@ impl PtyPane {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+        // Clamped before it goes over the wire so the host's parser and this
+        // one stay the same size, and so an old client cannot ask a host for a
+        // size that would panic it.
+        let (rows, cols) = clamp_pane_size(rows, cols);
         if !self.view.resize_view(rows, cols) {
             return Ok(());
         }
