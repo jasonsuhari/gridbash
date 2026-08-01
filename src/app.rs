@@ -2143,12 +2143,23 @@ impl SettingsState {
             return false;
         };
 
-        let available = TODO_INPUT_LIMIT.saturating_sub(edit.buffer.len());
+        // Counted in characters, because that is what is taken from `text`
+        // below. Measuring the buffer in bytes let a prompt of multi-byte
+        // characters run past the limit.
+        let available = TODO_INPUT_LIMIT.saturating_sub(edit.buffer.chars().count());
         if available == 0 {
             return false;
         }
 
-        edit.buffer.extend(text.chars().take(available));
+        let text = text
+            .chars()
+            .filter(|ch| !ch.is_control())
+            .take(available)
+            .collect::<String>();
+        if text.is_empty() {
+            return false;
+        }
+        edit.buffer.push_str(&text);
         true
     }
 
@@ -3313,7 +3324,6 @@ impl App {
         self.command_line.focused = false;
         self.assistant.open = false;
         self.grid_resizer = None;
-        self.close_grid_confirmation_pending = false;
     }
 
     fn activate_plan_as_tab(&mut self, title: String, mut plan: LaunchPlan) -> Result<()> {
@@ -6011,11 +6021,6 @@ impl App {
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
         }
 
-        if self.follow_up.is_some() {
-            let outcome = self.handle_follow_up_key(key)?;
-            return Ok(render_if_selection_cleared(outcome, selection_cleared));
-        }
-
         if self.settings.open {
             let outcome = self.handle_settings_key(key)?;
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
@@ -8436,18 +8441,6 @@ impl App {
             let changed = index != self.active_tab;
             self.switch_to_tab(index);
             return Ok(changed);
-        }
-
-        if self.mouse_enabled
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && self.ports_button_at(mouse.column, mouse.row)
-        {
-            if self.port_inspector.open {
-                self.close_port_inspector();
-            } else {
-                self.open_port_inspector();
-            }
-            return Ok(true);
         }
 
         if self.mouse_enabled
@@ -14940,6 +14933,53 @@ mod selection_tests {
         budget.window_started = Instant::now() - FailureBudget::WINDOW;
         assert!(!budget.record());
         assert_eq!(budget.count(), 1);
+    }
+
+    /// The todo limit counts characters, so a prompt of multi-byte characters
+    /// holds as many of them as an ASCII prompt holds letters.
+    ///
+    /// Typing fills the buffer one character at a time. Measuring what is
+    /// already there in bytes made a limit of 240 stop a three-byte script
+    /// after 80 characters.
+    #[test]
+    fn the_todo_limit_counts_characters_rather_than_bytes() {
+        let mut settings = SettingsState::default();
+        settings.start_todo_edit(TodoEditTarget::New);
+
+        let mut accepted = 0;
+        for _ in 0..TODO_INPUT_LIMIT {
+            if settings.insert_todo_text("貓") {
+                accepted += 1;
+            }
+        }
+
+        assert_eq!(accepted, TODO_INPUT_LIMIT);
+        assert_eq!(
+            settings
+                .todo_edit
+                .as_ref()
+                .map_or(0, |edit| edit.buffer.chars().count()),
+            TODO_INPUT_LIMIT
+        );
+        assert!(
+            !settings.insert_todo_text("貓"),
+            "a full buffer accepts nothing more"
+        );
+    }
+
+    /// Control characters would render as gaps in the settings row and travel
+    /// into a pane verbatim when the prompt is sent.
+    #[test]
+    fn todo_text_drops_control_characters() {
+        let mut settings = SettingsState::default();
+        settings.start_todo_edit(TodoEditTarget::New);
+
+        assert!(settings.insert_todo_text("run\ttests\nnow"));
+
+        assert_eq!(
+            settings.todo_edit.as_ref().map(|edit| edit.buffer.as_str()),
+            Some("runtestsnow")
+        );
     }
 
     /// A worker thread answers over a channel. A panicking worker that never
