@@ -399,14 +399,14 @@ fn authorize_request(
     }
 }
 
-/// Compare a presented token against the session's without letting how long the
-/// comparison took say how much of it was right.
+/// Compare a presented token against an expected one without letting how long
+/// the comparison took say how much of it was right.
 ///
 /// Guessing a two hundred and fifty six bit token a byte at a time is not a
 /// practical attack even against `==`, so this is depth rather than a fix for
 /// something reachable. It costs one pass over thirty two bytes on a path that
 /// runs once per control command.
-fn tokens_match(presented: &str, expected: &str) -> bool {
+pub(crate) fn tokens_match(presented: &str, expected: &str) -> bool {
     let presented = presented.as_bytes();
     let expected = expected.as_bytes();
     // Lengths are public: a token of the wrong length is rejected without

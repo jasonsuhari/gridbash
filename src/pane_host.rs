@@ -1186,7 +1186,9 @@ fn accept_client(
         );
         return Ok(None);
     }
-    if token != expected_token {
+    // Compared the same way the control API compares its own tokens, so the
+    // two authentication paths do not disagree about what a secret is.
+    if !crate::control::tokens_match(&token, expected_token) {
         let _ = send_json(
             &mut stream,
             &HostEvent::Error {
