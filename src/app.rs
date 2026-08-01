@@ -35,7 +35,10 @@ use crate::{
     auth::{self, AgentKind, AuthProfile},
     cli::{Cli, GridMode},
     composer::{Composer, GridPicker, GridPickerAction},
-    config::{Config, PaletteColor, PaneWorkloadPolicy, UiConfig, UiPalette},
+    config::{
+        Config, MAX_SCROLLBACK_ROWS, MIN_SCROLLBACK_ROWS, PaletteColor, PaneWorkloadPolicy,
+        UiConfig, UiPalette, clamp_scrollback_rows,
+    },
     control::{
         self, ControlCommand, ControlEnvelope, ControlHandle, ControlResponse, PaneIdentity,
         PaneTarget,
@@ -1988,7 +1991,7 @@ impl SettingsState {
                 .idle_seconds
                 .clamp(MIN_TODO_IDLE_SECONDS, MAX_TODO_IDLE_SECONDS),
             todo_prompts: config.todos.normalized_prompts(),
-            scrollback: config.ui.scrollback_rows.clamp(1_000, 50_000) as i32,
+            scrollback: clamp_scrollback_rows(config.ui.scrollback_rows) as i32,
             refresh_ms: config.ui.refresh_ms.clamp(8, 100) as i32,
             pane_workload: config.defaults.pane_workload,
             palette: GridPalette::from(config.ui.palette),
@@ -2085,7 +2088,7 @@ impl SettingsState {
                 SettingsChange::SaveTodos
             }
             Some(SettingsTarget::Scrollback) => {
-                self.scrollback = (self.scrollback + delta * 1000).clamp(1_000, 50_000);
+                self.scrollback = scrollback_step(self.scrollback, delta);
                 SettingsChange::SaveUi
             }
             Some(SettingsTarget::RefreshMs) => {
@@ -2215,7 +2218,7 @@ impl SettingsState {
             activity_badges: self.activity_badges,
             confirm_quit: self.confirm_quit,
             keep_terminals_running: self.keep_terminals_running,
-            scrollback_rows: self.scrollback.clamp(1_000, 50_000) as usize,
+            scrollback_rows: clamp_scrollback_rows(self.scrollback.max(0) as usize),
             refresh_ms: self.refresh_ms.clamp(8, 100) as u64,
             palette: UiPalette::from(self.palette),
         }
@@ -9408,7 +9411,7 @@ impl App {
                 self.settings.activity_badges = previous.activity_badges;
                 self.settings.confirm_quit = previous.confirm_quit;
                 self.settings.keep_terminals_running = previous.keep_terminals_running;
-                self.settings.scrollback = previous.scrollback_rows.clamp(1_000, 50_000) as i32;
+                self.settings.scrollback = clamp_scrollback_rows(previous.scrollback_rows) as i32;
                 self.settings.refresh_ms = previous.refresh_ms.clamp(8, 100) as i32;
                 self.settings.palette = GridPalette::from(previous.palette);
                 self.status = format!("failed to save UI settings: {error:#}");
@@ -11214,6 +11217,26 @@ fn port_owner_label(tab_title: &str, pane_names: &[Option<String>], index: usize
         .map(str::to_string)
         .unwrap_or_else(|| format!("Pane {}", index + 1));
     format!("{tab_title} / {pane}")
+}
+
+/// Move the scrollback setting one step.
+///
+/// Steps of a thousand rows are the right grain over most of the range, but
+/// they step straight over the low end, where the reason to be there at all is
+/// that a thousand rows per pane is already too much memory. Below that the
+/// step is fine enough to land on the floor.
+fn scrollback_step(current: i32, delta: i32) -> i32 {
+    let coarse = 1_000;
+    let fine = 200;
+    let step = if delta.is_negative() {
+        if current > coarse { coarse } else { fine }
+    } else if current < coarse {
+        fine
+    } else {
+        coarse
+    };
+    let next = current.saturating_add(delta.signum().saturating_mul(step));
+    next.clamp(MIN_SCROLLBACK_ROWS as i32, MAX_SCROLLBACK_ROWS as i32)
 }
 
 fn adaptive_output_frame_interval(refresh_ms: i32, pane_count: usize) -> Duration {
@@ -14933,6 +14956,35 @@ mod selection_tests {
         budget.window_started = Instant::now() - FailureBudget::WINDOW;
         assert!(!budget.record());
         assert_eq!(budget.count(), 1);
+    }
+
+    /// Scrollback is the largest thing a running grid holds, so the setting has
+    /// to be able to reach a value small enough to matter. Stepping down in
+    /// thousands walked straight over the only part of the range worth being in
+    /// when memory is the problem.
+    #[test]
+    fn the_scrollback_setting_can_be_stepped_all_the_way_down() {
+        let mut rows = UiConfig::default_scrollback_rows() as i32;
+        for _ in 0..200 {
+            rows = scrollback_step(rows, -1);
+        }
+
+        assert_eq!(rows, MIN_SCROLLBACK_ROWS as i32);
+
+        // And back up again, without the fine step trapping it at the bottom.
+        for _ in 0..200 {
+            rows = scrollback_step(rows, 1);
+        }
+        assert_eq!(rows, MAX_SCROLLBACK_ROWS as i32);
+    }
+
+    /// Every path that accepts a scrollback figure has to agree on the bounds,
+    /// including a config file edited by hand.
+    #[test]
+    fn scrollback_is_clamped_to_one_range_everywhere() {
+        assert_eq!(clamp_scrollback_rows(0), MIN_SCROLLBACK_ROWS);
+        assert_eq!(clamp_scrollback_rows(usize::MAX), MAX_SCROLLBACK_ROWS);
+        assert_eq!(clamp_scrollback_rows(2_400), 2_400);
     }
 
     /// The todo limit counts characters, so a prompt of multi-byte characters
