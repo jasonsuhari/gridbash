@@ -1,10 +1,13 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
     io::{self, BufRead, IsTerminal, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
-    sync::mpsc::{self, Sender},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Sender},
+    },
     thread,
     time::Duration,
 };
@@ -26,11 +29,55 @@ pub const DEFAULT_PANE_OUTPUT_CHARS: usize = 2_000;
 pub const MAX_PANE_OUTPUT_CHARS: usize = 8_000;
 pub const MAX_PANE_OUTPUT_TARGETS: usize = 8;
 
+/// Who a control request is from, established by the token it presented.
+///
+/// A pane used to say which pane it was in the request body, which is worth
+/// exactly as much as a return address on an envelope. `prompt --others` is
+/// resolved from it, so a pane that named a different one redirected a
+/// broadcast: excluding a pane it is not, and including itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlCaller {
+    /// The session token, held by a caller outside any pane.
+    Session,
+    /// A pane, identified by the token issued to it when it was launched.
+    Pane(usize),
+}
+
+/// Tokens the control server accepts, and who each one speaks for.
+#[derive(Debug, Default)]
+struct TokenRegistry {
+    panes: BTreeMap<PaneId, String>,
+}
+
+impl TokenRegistry {
+    /// Resolve a presented token to its holder, comparing every candidate so
+    /// the answer does not depend on how far down the list the match was.
+    fn caller_for(&self, presented: &str, session_token: &str) -> Option<ControlCaller> {
+        let mut caller = tokens_match(presented, session_token).then_some(ControlCaller::Session);
+        for (pane, token) in &self.panes {
+            if tokens_match(presented, token) {
+                caller = Some(ControlCaller::Pane(control_pane_number(*pane)));
+            }
+        }
+        caller
+    }
+}
+
+/// The number a pane is known by across the control API, which is its id plus
+/// one so that zero can mean "no pane".
+fn control_pane_number(pane: PaneId) -> usize {
+    pane.0.saturating_add(1)
+}
+
 #[derive(Debug)]
 pub struct ControlHandle {
     id: String,
     endpoint: String,
-    token: String,
+    /// Accepted alongside the per-pane tokens so a caller outside any pane —
+    /// `gridbash ctl --token` — still has a way in, and so a poisoned registry
+    /// cannot lock the session out of its own API.
+    session_token: String,
+    tokens: Arc<Mutex<TokenRegistry>>,
     _discovery: DiscoveryLease,
 }
 
@@ -43,8 +90,26 @@ impl ControlHandle {
         &self.endpoint
     }
 
-    pub fn token(&self) -> &str {
-        &self.token
+    /// Issue the token a pane will carry, replacing any it already had.
+    ///
+    /// Falls back to the session token only if the registry lock is poisoned,
+    /// which keeps a pane able to reach its own session rather than silently
+    /// losing the ability to coordinate.
+    pub fn issue_pane_token(&self, pane: PaneId) -> String {
+        let Ok(mut tokens) = self.tokens.lock() else {
+            return self.session_token.clone();
+        };
+        let token = new_token().unwrap_or_else(|_| self.session_token.clone());
+        tokens.panes.insert(pane, token.clone());
+        token
+    }
+
+    /// Drop tokens for panes that no longer exist, so a pane's credential dies
+    /// with it rather than outliving it for the rest of the session.
+    pub fn retain_panes(&self, live: &BTreeSet<PaneId>) {
+        if let Ok(mut tokens) = self.tokens.lock() {
+            tokens.panes.retain(|pane, _| live.contains(pane));
+        }
     }
 }
 
@@ -231,8 +296,6 @@ impl ControlResponse {
 struct ControlWireRequest {
     #[serde(default)]
     token: Option<String>,
-    #[serde(default)]
-    caller_pane_id: Option<usize>,
     command: ControlCommand,
 }
 
@@ -245,16 +308,24 @@ pub fn start_control_server(
         .local_addr()
         .context("failed to read agent API address")?
         .to_string();
-    let token = new_token()?;
+    let session_token = new_token()?;
     let id = new_instance_id()?;
     let discovery = DiscoveryLease::publish(&DiscoveryRecord::new(id.clone(), endpoint.clone()))?;
-    let server_token = token.clone();
+    let tokens = Arc::new(Mutex::new(TokenRegistry::default()));
+    let server_token = session_token.clone();
+    let server_tokens = Arc::clone(&tokens);
     let server_id = id.clone();
 
     thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
-                Ok(stream) => handle_control_stream(stream, &server_id, &server_token, &command_tx),
+                Ok(stream) => handle_control_stream(
+                    stream,
+                    &server_id,
+                    &server_token,
+                    &server_tokens,
+                    &command_tx,
+                ),
                 Err(error) => eprintln!("gridbash agent API accept failed: {error}"),
             }
         }
@@ -263,7 +334,8 @@ pub fn start_control_server(
     Ok(ControlHandle {
         id,
         endpoint,
-        token,
+        session_token,
+        tokens,
         _discovery: discovery,
     })
 }
@@ -271,12 +343,14 @@ pub fn start_control_server(
 fn handle_control_stream(
     mut stream: TcpStream,
     id: &str,
-    token: &str,
+    session_token: &str,
+    tokens: &Mutex<TokenRegistry>,
     command_tx: &Sender<ControlEnvelope>,
 ) {
     let _ = stream.set_read_timeout(Some(CONTROL_READ_TIMEOUT));
     let response = read_control_request(&mut stream).and_then(|request| {
-        if !request_authorized(&request, token) {
+        let caller = authorize_request(&request, session_token, tokens);
+        if request.command.requires_token() && caller.is_none() {
             return Ok(ControlResponse::error("invalid GridBash control token"));
         }
 
@@ -291,7 +365,12 @@ fn handle_control_stream(
         command_tx
             .send(ControlEnvelope {
                 command: request.command,
-                caller_pane_id: request.caller_pane_id,
+                // Taken from the token that authenticated, never from the
+                // request body.
+                caller_pane_id: match caller {
+                    Some(ControlCaller::Pane(pane)) => Some(pane),
+                    Some(ControlCaller::Session) | None => None,
+                },
                 response_tx,
             })
             .context("GridBash app is not accepting control commands")?;
@@ -305,14 +384,19 @@ fn handle_control_stream(
     let _ = stream.flush();
 }
 
-fn request_authorized(request: &ControlWireRequest, expected_token: &str) -> bool {
-    if !request.command.requires_token() {
-        return true;
+/// Who this request is from, or nothing when its token is not one this session
+/// issued. A poisoned registry falls back to the session token alone, which
+/// keeps the API reachable without ever inventing a pane identity.
+fn authorize_request(
+    request: &ControlWireRequest,
+    session_token: &str,
+    tokens: &Mutex<TokenRegistry>,
+) -> Option<ControlCaller> {
+    let presented = request.token.as_deref()?;
+    match tokens.lock() {
+        Ok(tokens) => tokens.caller_for(presented, session_token),
+        Err(_) => tokens_match(presented, session_token).then_some(ControlCaller::Session),
     }
-    request
-        .token
-        .as_deref()
-        .is_some_and(|token| tokens_match(token, expected_token))
 }
 
 /// Compare a presented token against the session's without letting how long the
@@ -1141,15 +1225,14 @@ fn call_control_with_timeout(
         .set_write_timeout(Some(timeout))
         .context("failed to set GridBash control write timeout")?;
 
-    let caller_pane_id = env::var("GRIDBASH_PANE_ID")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|pane_id| *pane_id > 0);
+    // The caller's identity is whatever its token proves, so there is nothing
+    // useful to declare here. `GRIDBASH_PANE_ID` remains in a pane's
+    // environment for the agent's own use; it is no longer an assertion the
+    // server would have believed.
     serde_json::to_writer(
         &mut stream,
         &json!({
             "token": token,
-            "caller_pane_id": caller_pane_id,
             "command": command
         }),
     )
@@ -1224,6 +1307,76 @@ mod tests {
         assert!(!tokens_match(&nearly, expected));
     }
 
+    /// A pane's identity comes from the token it presents. It used to come
+    /// from a field in the request body, which any pane could fill in with a
+    /// neighbour's number to redirect `prompt --others`.
+    #[test]
+    fn a_pane_is_identified_by_its_own_token_and_no_other() {
+        let session = "0".repeat(64);
+        let mut registry = TokenRegistry::default();
+        let first = "1".repeat(64);
+        let second = "2".repeat(64);
+        registry.panes.insert(PaneId(0), first.clone());
+        registry.panes.insert(PaneId(6), second.clone());
+
+        assert_eq!(
+            registry.caller_for(&first, &session),
+            Some(ControlCaller::Pane(1)),
+            "pane 0 is reported as pane number 1"
+        );
+        assert_eq!(
+            registry.caller_for(&second, &session),
+            Some(ControlCaller::Pane(7))
+        );
+        assert_eq!(
+            registry.caller_for(&session, &session),
+            Some(ControlCaller::Session),
+            "a caller outside any pane has no pane identity"
+        );
+        assert_eq!(registry.caller_for(&"3".repeat(64), &session), None);
+    }
+
+    /// The wire format no longer carries a caller identity, so a request that
+    /// tries to declare one is authorised as whoever its token says.
+    #[test]
+    fn a_declared_caller_identity_is_not_read_off_the_wire() {
+        let session = "0".repeat(64);
+        let pane_token = "1".repeat(64);
+        let mut registry = TokenRegistry::default();
+        registry.panes.insert(PaneId(0), pane_token.clone());
+        let tokens = Mutex::new(registry);
+
+        // Pane 1's token, claiming to be pane 7.
+        let raw = json!({
+            "token": pane_token,
+            "caller_pane_id": 7,
+            "command": { "type": "get_grid_snapshot" }
+        })
+        .to_string();
+        let request: ControlWireRequest =
+            serde_json::from_str(&raw).expect("a request with extra fields still parses");
+
+        assert_eq!(
+            authorize_request(&request, &session, &tokens),
+            Some(ControlCaller::Pane(1)),
+            "the token decides, not the claim"
+        );
+    }
+
+    /// A token stops working once its pane is gone, rather than staying valid
+    /// for the rest of the session.
+    #[test]
+    fn a_pane_token_is_revoked_with_its_pane() {
+        let session = "0".repeat(64);
+        let token = "1".repeat(64);
+        let mut registry = TokenRegistry::default();
+        registry.panes.insert(PaneId(3), token.clone());
+        assert!(registry.caller_for(&token, &session).is_some());
+
+        registry.panes.retain(|pane, _| *pane != PaneId(3));
+        assert_eq!(registry.caller_for(&token, &session), None);
+    }
+
     #[test]
     fn mcp_lists_the_gridbash_control_tools() {
         let response =
@@ -1292,8 +1445,10 @@ mod tests {
         );
     }
 
+    /// A caller identity declared in the body is ignored, and a request that
+    /// still carries one from an older client parses without it.
     #[test]
-    fn control_wire_request_accepts_a_stable_caller_identity() {
+    fn control_wire_request_ignores_a_declared_caller_identity() {
         let request: ControlWireRequest = serde_json::from_value(json!({
             "token": "session-token",
             "caller_pane_id": 9,
@@ -1301,7 +1456,7 @@ mod tests {
         }))
         .expect("wire request");
 
-        assert_eq!(request.caller_pane_id, Some(9));
+        assert_eq!(request.token.as_deref(), Some("session-token"));
         assert!(matches!(request.command, ControlCommand::GetGridSnapshot));
     }
 
@@ -1421,29 +1576,31 @@ mod tests {
 
     #[test]
     fn read_only_inspection_is_tokenless_but_mutations_require_authentication() {
-        let inspect = ControlWireRequest {
-            token: None,
-            caller_pane_id: None,
-            command: ControlCommand::Describe,
+        let session = "s".repeat(64);
+        let tokens = Mutex::new(TokenRegistry::default());
+        let request = |token: Option<&str>, command| ControlWireRequest {
+            token: token.map(str::to_string),
+            command,
         };
-        let unauthenticated_write = ControlWireRequest {
-            token: None,
-            caller_pane_id: None,
-            command: ControlCommand::SetStatus {
-                message: "working".into(),
-            },
-        };
-        let authenticated_write = ControlWireRequest {
-            token: Some("secret".into()),
-            caller_pane_id: None,
-            command: ControlCommand::SetStatus {
-                message: "working".into(),
-            },
+        let status = || ControlCommand::SetStatus {
+            message: "working".into(),
         };
 
-        assert!(request_authorized(&inspect, "secret"));
-        assert!(!request_authorized(&unauthenticated_write, "secret"));
-        assert!(request_authorized(&authenticated_write, "secret"));
+        let inspect = request(None, ControlCommand::Describe);
+        let unauthenticated_write = request(None, status());
+        let authenticated_write = request(Some(&session), status());
+
+        // Inspection needs no token, so it is allowed to arrive without one.
+        assert!(!inspect.command.requires_token());
+        assert!(authorize_request(&inspect, &session, &tokens).is_none());
+
+        assert!(unauthenticated_write.command.requires_token());
+        assert!(authorize_request(&unauthenticated_write, &session, &tokens).is_none());
+
+        assert_eq!(
+            authorize_request(&authenticated_write, &session, &tokens),
+            Some(ControlCaller::Session)
+        );
     }
 
     #[test]

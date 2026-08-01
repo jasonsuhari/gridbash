@@ -3523,8 +3523,11 @@ impl App {
                     control.endpoint().to_string().into(),
                 ),
                 (
+                    // A token that speaks only for this pane. The control
+                    // server reads the caller's identity off it, so a pane
+                    // cannot claim to be one of its neighbours.
                     "GRIDBASH_CONTROL_TOKEN".into(),
-                    control.token().to_string().into(),
+                    control.issue_pane_token(pane_id).into(),
                 ),
                 (
                     "GRIDBASH_CONTROL_SESSION".into(),
@@ -3937,6 +3940,11 @@ impl App {
         }
 
         self.applied_workloads.retain(|id, _| seen.contains(id));
+        // A pane's control token dies with the pane rather than staying valid
+        // for the rest of the session.
+        if let Some(control) = self.control_handle.as_ref() {
+            control.retain_panes(&seen);
+        }
         // Only the panes in the active grid are ever blitted, but `seen` also
         // covers inactive tabs and background jobs. Each stale entry is a full
         // pane-sized `Buffer`, so keep the cache to what is on screen; it
