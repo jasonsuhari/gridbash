@@ -28,6 +28,7 @@ const CONTROL_REQUEST_LIMIT_BYTES: u64 = 64 * 1024;
 pub const DEFAULT_PANE_OUTPUT_CHARS: usize = 2_000;
 pub const MAX_PANE_OUTPUT_CHARS: usize = 8_000;
 pub const MAX_PANE_OUTPUT_TARGETS: usize = 8;
+pub const MAX_PANE_NAME_CHARS: usize = 32;
 
 /// Who a control request is from, established by the token it presented.
 ///
@@ -242,6 +243,12 @@ pub enum ControlCommand {
     },
     Focus {
         pane: PaneTarget,
+    },
+    RenamePane {
+        /// Pane to rename, or the calling pane when omitted.
+        pane: Option<PaneTarget>,
+        /// New pane name, or `None` to clear it back to the pane number.
+        name: Option<String>,
     },
 }
 
@@ -508,6 +515,13 @@ pub fn run_agent(args: &AgentArgs) -> Result<()> {
             },
             Some(agent_token(args)?),
         ),
+        AgentAction::Rename { pane, name, clear } => (
+            ControlCommand::RenamePane {
+                pane: pane.as_deref().map(PaneTarget::parse).transpose()?,
+                name: rename_pane_name(name.as_deref(), *clear)?,
+            },
+            Some(agent_token(args)?),
+        ),
     };
 
     let response = call_control(&session.endpoint, token.as_deref(), command)?;
@@ -587,6 +601,13 @@ pub fn run_ctl(args: &CtlArgs) -> Result<()> {
         CtlAction::Focus { pane } => (
             ControlCommand::Focus {
                 pane: PaneTarget::parse(pane)?,
+            },
+            Some(ctl_token(args)?),
+        ),
+        CtlAction::Rename { pane, name, clear } => (
+            ControlCommand::RenamePane {
+                pane: Some(PaneTarget::parse(pane)?),
+                name: rename_pane_name(name.as_deref(), *clear)?,
             },
             Some(ctl_token(args)?),
         ),
@@ -672,6 +693,20 @@ fn agent_token(args: &AgentArgs) -> Result<String> {
         .ok_or_else(|| {
             anyhow!("prompting panes requires the current pane's GRIDBASH_CONTROL_TOKEN or --token")
         })
+}
+
+/// Resolve the `NAME` positional and `--clear` flag into the wire representation,
+/// where `None` means "clear this pane's title".
+fn rename_pane_name(name: Option<&str>, clear: bool) -> Result<Option<String>> {
+    match (name, clear) {
+        (Some(_), true) => bail!("pass a pane name or --clear, not both"),
+        (None, false) => bail!("provide a pane name or pass --clear"),
+        (Some(name), false) if name.trim().is_empty() => {
+            bail!("pane name cannot be empty; pass --clear to remove it")
+        }
+        (Some(name), false) => Ok(Some(name.to_string())),
+        (None, true) => Ok(None),
+    }
 }
 
 fn parse_pane_targets(values: &[String]) -> Result<Vec<PaneTarget>> {
@@ -926,6 +961,28 @@ fn tools_list_result() -> Value {
                 }
             },
             {
+                "name": "gridbash_rename_pane",
+                "title": "Rename Pane",
+                "description": "Set or clear a pane's title so the grid shows what each pane is working on. Omit target to rename the calling pane; omit name to clear the title back to the pane number.",
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "target": {
+                            "type": "string",
+                            "description": "Stable pane target string from the latest grid snapshot, such as pane-4-gen-2. Omit to rename this calling pane.",
+                            "pattern": "^pane-[0-9]+-gen-[0-9]+$"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "New pane title. Omit to clear the title back to the pane number.",
+                            "minLength": 1,
+                            "maxLength": MAX_PANE_NAME_CHARS
+                        }
+                    }
+                }
+            },
+            {
                 "name": "gridbash_set_status",
                 "title": "Set Status",
                 "description": "Set the GridBash status bar text for the current session.",
@@ -1104,6 +1161,27 @@ fn tool_arguments_to_command(tool_name: &str, arguments: Value) -> Result<Contro
                 prompt: args.prompt,
                 submit: args.submit.unwrap_or(true),
                 others: args.other_panes,
+            })
+        }
+        "gridbash_rename_pane" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Args {
+                target: Option<String>,
+                name: Option<String>,
+            }
+
+            let args: Args = serde_json::from_value(arguments).context("invalid rename args")?;
+            if args
+                .name
+                .as_ref()
+                .is_some_and(|name| name.trim().is_empty())
+            {
+                return Err(anyhow!("pane name cannot be empty; omit name to clear it"));
+            }
+            Ok(ControlCommand::RenamePane {
+                pane: args.target.as_deref().map(PaneTarget::parse).transpose()?,
+                name: args.name,
             })
         }
         "gridbash_set_status" => {
@@ -1396,12 +1474,66 @@ mod tests {
                 "gridbash_read_pane_output",
                 "gridbash_send_command",
                 "gridbash_prompt_panes",
+                "gridbash_rename_pane",
                 "gridbash_set_status",
                 "gridbash_capture_output",
                 "gridbash_start_logging",
                 "gridbash_stop_logging"
             ]
         );
+    }
+
+    #[test]
+    fn rename_defaults_to_the_calling_pane() {
+        let command =
+            tool_arguments_to_command("gridbash_rename_pane", json!({ "name": "Builder" }))
+                .expect("command");
+
+        assert!(matches!(
+            command,
+            ControlCommand::RenamePane { pane: None, name: Some(name) } if name == "Builder"
+        ));
+    }
+
+    #[test]
+    fn rename_targets_a_stable_pane_and_clears_without_a_name() {
+        let command =
+            tool_arguments_to_command("gridbash_rename_pane", json!({ "target": "pane-4-gen-2" }))
+                .expect("command");
+
+        assert!(matches!(
+            command,
+            ControlCommand::RenamePane {
+                pane: Some(PaneTarget::Stable {
+                    pane_id: 4,
+                    generation: 2
+                }),
+                name: None
+            }
+        ));
+    }
+
+    #[test]
+    fn rename_rejects_blank_names_and_unknown_fields() {
+        assert!(
+            tool_arguments_to_command("gridbash_rename_pane", json!({ "name": "   " }))
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be empty")
+        );
+        assert!(tool_arguments_to_command("gridbash_rename_pane", json!({ "pane": 2 })).is_err());
+    }
+
+    #[test]
+    fn rename_cli_requires_exactly_one_of_name_or_clear() {
+        assert_eq!(
+            rename_pane_name(Some("Reviewer"), false).expect("name"),
+            Some("Reviewer".to_string())
+        );
+        assert_eq!(rename_pane_name(None, true).expect("clear"), None);
+        assert!(rename_pane_name(Some("Reviewer"), true).is_err());
+        assert!(rename_pane_name(None, false).is_err());
+        assert!(rename_pane_name(Some("  "), false).is_err());
     }
 
     #[test]

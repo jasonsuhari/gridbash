@@ -159,6 +159,18 @@ pub enum AgentAction {
         #[arg(long)]
         no_submit: bool,
     },
+    /// Rename a pane's title, or clear it back to the pane number.
+    Rename {
+        /// Pane number or stable pane-<id>-gen-<generation> target. Defaults to the calling pane.
+        #[arg(short = 'p', long = "pane")]
+        pane: Option<String>,
+        /// New pane title. Omit it and pass --clear to remove the current title.
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        name: Option<String>,
+        /// Clear the pane title instead of setting one.
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 #[derive(Debug, Clone, Args)]
@@ -233,11 +245,69 @@ pub enum CtlAction {
         /// Pane number or stable pane-<id>-gen-<generation> identity.
         pane: String,
     },
+    /// Rename a pane's title, or clear it back to the pane number.
+    Rename {
+        /// Pane number or stable pane-<id>-gen-<generation> identity.
+        #[arg(short = 'p', long = "pane", required = true)]
+        pane: String,
+        /// New pane title. Omit it and pass --clear to remove the current title.
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        name: Option<String>,
+        /// Clear the pane title instead of setting one.
+        #[arg(long)]
+        clear: bool,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_rename_defaults_to_the_calling_pane() {
+        let cli = Cli::parse_from(["gridbash", "agent", "rename", "Reviewer"]);
+        let Some(Command::Agent(args)) = cli.command else {
+            panic!("expected agent command");
+        };
+        let AgentAction::Rename { pane, name, clear } = args.action else {
+            panic!("expected rename action");
+        };
+
+        assert_eq!(pane, None);
+        assert_eq!(name.as_deref(), Some("Reviewer"));
+        assert!(!clear);
+    }
+
+    #[test]
+    fn rename_accepts_clear_without_a_name_but_never_both() {
+        let cli = Cli::parse_from([
+            "gridbash",
+            "ctl",
+            "rename",
+            "--pane",
+            "pane-4-gen-2",
+            "--clear",
+        ]);
+        let Some(Command::Ctl(args)) = cli.command else {
+            panic!("expected ctl command");
+        };
+        let CtlAction::Rename { pane, name, clear } = args.action else {
+            panic!("expected rename action");
+        };
+
+        assert_eq!(pane, "pane-4-gen-2");
+        assert_eq!(name, None);
+        assert!(clear);
+
+        assert!(Cli::try_parse_from(["gridbash", "ctl", "rename", "--pane", "2"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "gridbash", "ctl", "rename", "--pane", "2", "Build", "--clear"
+            ])
+            .is_err()
+        );
+        assert!(Cli::try_parse_from(["gridbash", "ctl", "rename", "Build"]).is_err());
+    }
 
     #[test]
     fn parses_resume_subcommand() {

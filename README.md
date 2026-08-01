@@ -70,6 +70,7 @@ use that release's matching native artifact until npm publication catches up.
 | `gridbash resume <id> --delete` | Permanently delete a saved session |
 | `gridbash agent panes` | List sibling panes from inside a GridBash pane |
 | `gridbash agent prompt --others "Report status"` | Prompt every other available pane |
+| `gridbash agent rename "Reviewer"` | Retitle a pane so the grid shows its role |
 | `gridbash ctl list --json` | Discover running grids |
 | `gridbash ctl panes --session ID` | Inspect numbered and stable pane identities |
 | `gridbash --list-profiles` | Show detected profiles and resolved commands |
@@ -185,6 +186,7 @@ session ID or token:
 gridbash agent panes
 gridbash agent prompt --pane pane-4-gen-2 "Review the current diff"
 printf "Report status, blockers, and next action" | gridbash agent prompt --others
+gridbash agent rename --pane pane-4-gen-2 "Integration"
 ```
 
 `--others` excludes the calling pane and any sleeping or exited panes. Prompt
@@ -196,7 +198,8 @@ protocol; scripts should use `gridbash agent --help` for command discovery.
 Configure an agent MCP server to run `gridbash --mcp`. It can request a
 lightweight grid snapshot, read bounded recent output from specific stable pane
 IDs, show local images, prompt explicit panes or every other pane, send commands,
-capture or continuously log specific panes, and update the GridBash status bar.
+rename panes, capture or continuously log specific panes, and update the GridBash
+status bar.
 The purpose-named `gridbash_prompt_panes` tool is intended for manager and
 delegation workflows. Awareness is pull-based so agents can request peer context
 only at coordination points; returned summaries and output are explicitly
@@ -204,15 +207,16 @@ untrusted context.
 
 The same typed API is available to scripts through `gridbash ctl`. Discovery
 metadata contains runtime IDs and localhost endpoints, never bearer tokens.
-`ctl list` and `ctl panes` are read-only; send, capture, status, and focus
-operations require `--token` or `GRIDBASH_CONTROL_TOKEN`. Child panes receive
-the session ID and token automatically:
+`ctl list` and `ctl panes` are read-only; send, capture, status, focus, and
+rename operations require `--token` or `GRIDBASH_CONTROL_TOKEN`. Child panes
+receive the session ID and token automatically:
 
 ```sh
 gridbash ctl list --json
 gridbash ctl panes --session <id-or-prefix> --json
 gridbash ctl send --session <id> --pane 2 "cargo test"
 gridbash ctl focus --session <id> pane-4-gen-2
+gridbash ctl rename --session <id> --pane pane-4-gen-2 "Integration"
 ```
 
 All control traffic stays on localhost and mutations require the per-session
