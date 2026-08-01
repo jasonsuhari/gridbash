@@ -38,6 +38,17 @@ const OUTPUT_TAIL_TRIM_AT_CHARS: usize = 48_000;
 const MAX_REPLAY_OUTPUT_CHARS: usize = 18_000;
 const MAX_OSC_SCAN: usize = 4096;
 const PTY_READ_BUFFER_BYTES: usize = 32 * 1024;
+
+/// Smallest grid a pane may be given.
+///
+/// A one-row or one-column terminal cannot hold a double-width character, and
+/// vt100 does not defend itself there: writing a wide character to such a grid
+/// underflows its column arithmetic and then panics on the cell that should
+/// hold the character's second half. That kills the pane host, so the agent it
+/// was running dies with it. Nothing about a two-by-two pane is useful to look
+/// at, but it keeps a sliver of a pane from taking an agent down.
+pub(crate) const MIN_PANE_ROWS: u16 = 2;
+pub(crate) const MIN_PANE_COLS: u16 = 2;
 const PTY_WRITE_QUEUE_MESSAGES: usize = 256;
 /// PTY reader/writer threads only shuttle bytes between a pipe and a channel,
 /// so the platform default stack (1 MiB on Windows, 8 MiB on glibc) is reserved
@@ -46,6 +57,11 @@ const PTY_WORKER_STACK_BYTES: usize = 128 * 1024;
 const CHILD_REAP_GRACE: Duration = Duration::from_millis(100);
 const CHILD_REAP_AFTER_FORCE: Duration = Duration::from_millis(400);
 const CHILD_REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// Pane size that is safe to hand to a terminal parser.
+pub(crate) fn clamp_pane_size(rows: u16, cols: u16) -> (u16, u16) {
+    (rows.max(MIN_PANE_ROWS), cols.max(MIN_PANE_COLS))
+}
 
 #[derive(Debug, Clone)]
 pub enum PtyEvent {
@@ -410,6 +426,10 @@ impl PtyView {
     }
 
     pub(crate) fn resize_view(&mut self, rows: u16, cols: u16) -> bool {
+        // Every caller is expected to have clamped already. Clamping again here
+        // keeps a parser from ever seeing a size that would panic it, whichever
+        // path the size arrived by.
+        let (rows, cols) = clamp_pane_size(rows, cols);
         if self.rows == rows && self.cols == cols {
             return false;
         }
@@ -664,6 +684,9 @@ impl PtyPane {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+        // Clamped before the view so the process is told the same size the
+        // parser is holding, rather than a size the parser refused.
+        let (rows, cols) = clamp_pane_size(rows, cols);
         if !self.view.resize_view(rows, cols) {
             return Ok(());
         }
@@ -1872,6 +1895,46 @@ mod tests {
 
         assert_eq!(screen_history_lines(parser.screen_mut()), [""]);
         assert_eq!(parser.screen().scrollback(), 0);
+    }
+
+    /// A pane squeezed into a sliver of a restored grid still has to survive
+    /// the agent output replayed into it. Wide characters are the dangerous
+    /// case: at one row or one column vt100 panics on them, which used to take
+    /// the pane host and its agent down and leave a bare shell behind.
+    #[test]
+    fn tiny_panes_survive_wide_characters() {
+        for rows in 0..=3u16 {
+            for cols in 0..=3u16 {
+                let mut view = PtyView::new(PathBuf::from("."), 1_000);
+                view.resize_view(rows, cols);
+
+                let (held_rows, held_cols) = view.parser.screen().size();
+                assert!(
+                    held_rows >= MIN_PANE_ROWS,
+                    "{rows}x{cols} kept {held_rows} rows"
+                );
+                assert!(
+                    held_cols >= MIN_PANE_COLS,
+                    "{rows}x{cols} kept {held_cols} cols"
+                );
+
+                // Box drawing, CJK, and emoji all reach a pane by way of an
+                // agent's own interface.
+                view.parser.process("┌─┐\r\n日本語\r\n😀😀😀".as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn resizing_below_the_minimum_reports_a_change_only_once() {
+        let mut view = PtyView::new(PathBuf::from("."), 1_000);
+        view.resize_view(24, 80);
+
+        assert!(view.resize_view(0, 0), "clamped size differs from 24x80");
+        assert!(
+            !view.resize_view(1, 1),
+            "1x1 clamps to the size already held"
+        );
     }
 
     #[test]

@@ -424,9 +424,11 @@ fn launch_plan_from_saved(
             saved_grid.columns
         )
     })?;
-    let panes = ordered_panes(panes)
+    let ordered = ordered_panes(panes);
+    let panes = claimed_claude_sessions(&ordered)
         .into_iter()
-        .map(SavedPane::launch_spec)
+        .zip(&ordered)
+        .map(|(claude_session_id, pane)| pane.launch_spec_resuming(claude_session_id))
         .collect::<Vec<_>>();
     if panes.is_empty() {
         bail!("saved session {id} has no panes");
@@ -449,6 +451,26 @@ fn launch_plan_from_saved(
     Ok(LaunchPlan { panes, grid })
 }
 
+/// Conversation each saved pane resumes into.
+///
+/// Snapshots written before duplicates were prevented can name one Claude
+/// conversation on two panes, and one of those is on disk for every workspace
+/// that has already been resumed once. Resuming a conversation twice starts a
+/// second Claude that exits on the spot, leaving a bare shell wearing the
+/// scrollback of the agent that used to be there. The first pane in grid order
+/// keeps the conversation; the rest come back as a fresh agent in their folder.
+fn claimed_claude_sessions<'a>(panes: &[&'a SavedPane]) -> Vec<Option<&'a str>> {
+    let mut claimed = BTreeSet::new();
+    panes
+        .iter()
+        .map(|pane| {
+            pane.claude_session_id
+                .as_deref()
+                .filter(|session_id| claimed.insert(*session_id))
+        })
+        .collect()
+}
+
 /// Panes in grid order, so a snapshot written out of order still restores every
 /// pane to the cell it occupied.
 fn ordered_panes(panes: &[SavedPane]) -> Vec<&SavedPane> {
@@ -464,6 +486,7 @@ fn saved_panes_from_live(live: &LiveGrid<'_>) -> Vec<SavedPane> {
         .filter_map(PtyPane::host_process_id)
         .collect::<Vec<_>>();
     let codex_roots = roots_with_descendant_named(&host_processes, "codex").ok();
+    let claude_sessions = claude_sessions_from_live(live);
     live.plan
         .panes
         .iter()
@@ -485,7 +508,7 @@ fn saved_panes_from_live(live: &LiveGrid<'_>) -> Vec<SavedPane> {
                         .or_else(|| pane.and_then(|pane| pane.codex_thread_id(pane.cwd())))
                 })
                 .flatten();
-            let claude_session_id = claude_session_from_live(spec, pane, &history.input_history);
+            let claude_session_id = claude_sessions.get(index).cloned().flatten();
             let mut saved = SavedPane::from_spec(
                 index,
                 spec,
@@ -510,24 +533,88 @@ fn saved_panes_from_live(live: &LiveGrid<'_>) -> Vec<SavedPane> {
         .collect()
 }
 
-/// Claude conversation a live pane is attached to.
+/// Claude conversation each pane is attached to, with no conversation claimed
+/// by two panes.
 ///
-/// A pane GridBash launched carries the id it pinned at spawn, which cannot be
-/// confused by a sibling pane in the same directory. A pane where the user
-/// started Claude themselves is read back out of what they typed.
-fn claude_session_from_live(
-    spec: &PaneLaunchSpec,
-    pane: Option<&PtyPane>,
-    input_history: &[String],
-) -> Option<String> {
-    pane.and_then(PtyPane::agent_session_id)
-        .map(str::to_string)
-        .or_else(|| claude_resume_id(&spec.command, input_history))
+/// A pane GridBash launched carries the id it pinned at spawn and owns it. A
+/// pane where the user started Claude themselves is read back out of what they
+/// typed, which goes stale as soon as that conversation is picked up somewhere
+/// else — typing `claude --resume` in a second pane leaves the id in both
+/// histories.
+///
+/// Saving one conversation against two panes resumes it twice. Claude refuses
+/// the second, that pane exits immediately, and it comes back as a bare shell
+/// wearing the scrollback of the agent that used to be there. A pane that
+/// cannot prove it owns a conversation is saved without one instead, so it
+/// resumes as a fresh Claude in the right folder.
+fn claude_sessions_from_live(live: &LiveGrid<'_>) -> Vec<Option<String>> {
+    let claims = live
+        .plan
+        .panes
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            let pane = live.panes.get(index);
+            ClaudeSessionClaim {
+                pinned: pane.and_then(PtyPane::agent_session_id).map(str::to_string),
+                mentioned: claude_resume_id(
+                    &spec.command,
+                    pane.map(PtyPane::input_history).unwrap_or_default(),
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    resolve_claude_sessions(&claims)
+}
+
+/// What a pane knows about the conversation it is in: the id it pinned when
+/// GridBash launched it, and any id its command or the user's typing mentions.
+#[derive(Debug, Default, Clone)]
+struct ClaudeSessionClaim {
+    pinned: Option<String>,
+    mentioned: Option<String>,
+}
+
+/// Settle which pane resumes which conversation.
+///
+/// Pinned beats mentioned, and the first claimant of a conversation keeps it.
+/// Everything else is saved without a conversation and resumes as a fresh
+/// Claude in the same folder.
+fn resolve_claude_sessions(claims: &[ClaudeSessionClaim]) -> Vec<Option<String>> {
+    let pinned = claims
+        .iter()
+        .filter_map(|claim| claim.pinned.clone())
+        .collect::<BTreeSet<_>>();
+
+    let mut claimed = BTreeSet::new();
+    claims
+        .iter()
+        .map(|claim| {
+            let session_id = match &claim.pinned {
+                Some(pinned_here) => pinned_here.clone(),
+                None => claim
+                    .mentioned
+                    .clone()
+                    // A conversation some other pane pinned belongs to that
+                    // pane, however this one came to mention it.
+                    .filter(|session_id| !pinned.contains(session_id))?,
+            };
+
+            claimed.insert(session_id.clone()).then_some(session_id)
+        })
+        .collect()
 }
 
 impl SavedPane {
     pub fn launch_spec(&self) -> PaneLaunchSpec {
-        let (profile_name, command) = self.resume_command();
+        self.launch_spec_resuming(self.claude_session_id.as_deref())
+    }
+
+    /// Launch spec for a pane put back into a named conversation, or into none
+    /// when another pane is already resuming the one it recorded.
+    fn launch_spec_resuming(&self, claude_session_id: Option<&str>) -> PaneLaunchSpec {
+        let (profile_name, command) = self.resume_command(claude_session_id);
         self.spec_for(profile_name, command)
     }
 
@@ -563,11 +650,11 @@ impl SavedPane {
     /// A Claude transcript that is no longer on disk falls back to a plain
     /// launch, because `claude --resume` on a missing session fails outright and
     /// would leave the pane with no agent at all.
-    fn resume_command(&self) -> (String, Profile) {
+    fn resume_command(&self, claude_session_id: Option<&str>) -> (String, Profile) {
         if let Some(thread_id) = self.codex_thread_id.as_deref() {
             return codex_resume_profile(&self.profile_name, &self.command, thread_id);
         }
-        if let Some(session_id) = self.claude_session_id.as_deref()
+        if let Some(session_id) = claude_session_id
             && claude_session_exists(&self.cwd, session_id)
         {
             return claude_resume_profile(&self.profile_name, &self.command, session_id);
@@ -2621,6 +2708,102 @@ mod tests {
         assert_eq!(launch.command.command, "claude");
         assert!(launch.command.args.is_empty(), "{:?}", launch.command.args);
         assert_eq!(pane.resumable_conversation(), None);
+    }
+
+    fn pinned_claim(session_id: &str) -> ClaudeSessionClaim {
+        ClaudeSessionClaim {
+            pinned: Some(session_id.into()),
+            mentioned: Some(session_id.into()),
+        }
+    }
+
+    fn mentioned_claim(session_id: &str) -> ClaudeSessionClaim {
+        ClaudeSessionClaim {
+            pinned: None,
+            mentioned: Some(session_id.into()),
+        }
+    }
+
+    /// Resuming one conversation in two panes starts a second Claude that
+    /// exits on the spot, leaving a bare shell showing the previous agent's
+    /// scrollback. The pane that pinned it keeps it.
+    #[test]
+    fn one_conversation_is_never_saved_against_two_panes() {
+        let sessions = resolve_claude_sessions(&[
+            mentioned_claim("880714ff-e26d-4159-b36a-06d258a7d484"),
+            pinned_claim("880714ff-e26d-4159-b36a-06d258a7d484"),
+            pinned_claim("eb2c3542-edc3-4f6a-8c7c-9210b58603a1"),
+        ]);
+
+        assert_eq!(
+            sessions,
+            [
+                None,
+                Some("880714ff-e26d-4159-b36a-06d258a7d484".into()),
+                Some("eb2c3542-edc3-4f6a-8c7c-9210b58603a1".into()),
+            ]
+        );
+    }
+
+    /// Two shells that both had `claude --resume` typed into them cannot both
+    /// be in that conversation. The first keeps it.
+    #[test]
+    fn duplicate_mentions_are_resolved_in_pane_order() {
+        let sessions = resolve_claude_sessions(&[
+            mentioned_claim("76686a4e-df81-488c-b4e3-25f2300d8acb"),
+            mentioned_claim("76686a4e-df81-488c-b4e3-25f2300d8acb"),
+        ]);
+
+        assert_eq!(
+            sessions,
+            [Some("76686a4e-df81-488c-b4e3-25f2300d8acb".into()), None]
+        );
+    }
+
+    /// Panes that pin their own conversations are all preserved, and a pane in
+    /// no conversation stays that way.
+    #[test]
+    fn distinct_conversations_are_all_preserved() {
+        let sessions = resolve_claude_sessions(&[
+            pinned_claim("9e3eb587-72f5-46a1-8207-82319235666b"),
+            ClaudeSessionClaim::default(),
+            mentioned_claim("1cc9882b-fa28-44b4-b756-546815bf2033"),
+        ]);
+
+        assert_eq!(
+            sessions,
+            [
+                Some("9e3eb587-72f5-46a1-8207-82319235666b".into()),
+                None,
+                Some("1cc9882b-fa28-44b4-b756-546815bf2033".into()),
+            ]
+        );
+    }
+
+    /// The snapshots already on disk carry duplicates, because they were
+    /// written before duplicates were prevented. Loading one must not resume a
+    /// conversation twice.
+    #[test]
+    fn a_snapshot_naming_one_conversation_twice_resumes_it_once() {
+        let mut first = pane("kaggle", "claude");
+        first.claude_session_id = Some("880714ff-e26d-4159-b36a-06d258a7d484".into());
+        let mut second = pane("kaggle", "git-bash");
+        second.claude_session_id = Some("880714ff-e26d-4159-b36a-06d258a7d484".into());
+        let mut third = pane("kaggle", "claude");
+        third.claude_session_id = Some("eb2c3542-edc3-4f6a-8c7c-9210b58603a1".into());
+        let plain = pane("kaggle", "git-bash");
+
+        let claimed = claimed_claude_sessions(&[&first, &second, &third, &plain]);
+
+        assert_eq!(
+            claimed,
+            [
+                Some("880714ff-e26d-4159-b36a-06d258a7d484"),
+                None,
+                Some("eb2c3542-edc3-4f6a-8c7c-9210b58603a1"),
+                None,
+            ]
+        );
     }
 
     /// Snapshots written by older GridBash versions still load, with their newer

@@ -51,7 +51,7 @@ use crate::{
     ports::{self, AgentPort, AgentProcessRoot},
     process_priority::PaneWorkloadClass,
     profiles::{default_profile_name, find_profile, is_terminal_profile, startup_profiles},
-    pty::{PtyEvent, PtyWriteToken},
+    pty::{PtyEvent, PtyWriteToken, clamp_pane_size},
     session::{
         InterruptedRecovery, InterruptedRecoveryClaim, LiveGrid, LiveWorkspace,
         SavedBackgroundPane, SavedPane, SavedPaneHistory, SavedTab, SavedView, SessionRecord,
@@ -10718,8 +10718,11 @@ impl App {
                 continue;
             };
 
-            let rows = rect.height.saturating_sub(2).max(1);
-            let cols = rect.width.saturating_sub(2).max(1);
+            // A restored grid can put a pane in a rect too small to hold a
+            // terminal at all. It gets the smallest usable size instead, which
+            // renders as a sliver but keeps its agent alive.
+            let (rows, cols) =
+                clamp_pane_size(rect.height.saturating_sub(2), rect.width.saturating_sub(2));
             if let Err(error) = pane.resize(rows, cols) {
                 self.status = format!("resize failed: {error:#}");
             }
