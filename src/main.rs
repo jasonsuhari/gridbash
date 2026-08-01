@@ -45,14 +45,44 @@ fn main() -> Result<()> {
 
     // Installed before anything else can fail so the crash report survives the
     // terminal. App::run chains its terminal-restoring hook onto this one.
-    let role = if cli.pane_host.is_some() {
-        "pane-host"
-    } else {
-        "tui"
-    };
+    let role = diagnostics_role(&cli);
     diagnostics::install_panic_logger(role);
 
-    run(cli).inspect_err(|error| diagnostics::record_error_exit(role, error))
+    let result = run(cli);
+    if let Err(error) = &result
+        && records_error_exits(role)
+    {
+        diagnostics::record_error_exit(role, error);
+    }
+    result
+}
+
+/// What this process is, for crash reports.
+fn diagnostics_role(cli: &Cli) -> &'static str {
+    if cli.pane_host.is_some() {
+        return "pane-host";
+    }
+    if cli.mcp {
+        return "mcp";
+    }
+    match cli.command {
+        Some(Command::Agent(_)) => "agent",
+        Some(Command::Ctl(_)) => "ctl",
+        _ => "tui",
+    }
+}
+
+/// Whether a non-zero exit from this role is crash evidence.
+///
+/// A one-shot control command reports its own failure to a terminal the user is
+/// still looking at, so naming a pane that no longer exists is an ordinary
+/// usage error rather than something to record. Writing those would be actively
+/// harmful: reports are pruned to a fixed count, and agent panes address each
+/// other by pane number often enough that a stale one would keep evicting real
+/// reports. A panic in the same command is still recorded, because that is a
+/// defect wherever it happens.
+fn records_error_exits(role: &str) -> bool {
+    !matches!(role, "agent" | "ctl")
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -130,4 +160,36 @@ fn run(cli: Cli) -> Result<()> {
 
     let mut app = App::new(cli, config)?;
     app.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn role_for(args: &[&str]) -> &'static str {
+        diagnostics_role(&Cli::parse_from(args))
+    }
+
+    /// Reports are labelled by what the process actually was, so a control
+    /// command's failure is not filed as a crash of the interface.
+    #[test]
+    fn each_entry_point_reports_under_its_own_role() {
+        assert_eq!(role_for(&["gridbash"]), "tui");
+        assert_eq!(role_for(&["gridbash", "resume", "--latest"]), "tui");
+        assert_eq!(role_for(&["gridbash", "--mcp"]), "mcp");
+        assert_eq!(role_for(&["gridbash", "agent", "panes"]), "agent");
+        assert_eq!(role_for(&["gridbash", "ctl", "list"]), "ctl");
+    }
+
+    /// A mistyped pane number in an agent pane is an ordinary usage error. It
+    /// used to write a crash report, and reports are pruned to a fixed count,
+    /// so repeating it evicted real evidence.
+    #[test]
+    fn one_shot_control_commands_do_not_record_error_exits() {
+        assert!(!records_error_exits("agent"));
+        assert!(!records_error_exits("ctl"));
+        assert!(records_error_exits("tui"));
+        assert!(records_error_exits("pane-host"));
+        assert!(records_error_exits("mcp"));
+    }
 }
