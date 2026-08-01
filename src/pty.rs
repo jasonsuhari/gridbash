@@ -2193,3 +2193,162 @@ mod tests {
         panic!("Unix PTY did not round-trip input/output");
     }
 }
+
+/// Randomised robustness sweep over everything that parses bytes GridBash did
+/// not produce.
+///
+/// A pane's output is written by whatever the user ran, and the terminal
+/// escape, OSC, and URI parsing below all consume it before anything checks it.
+/// The control API takes JSON from any local process. This drives all of them
+/// with structured noise and asserts only that nothing panics, which is the
+/// property that actually matters: a panic in any of these paths takes the
+/// pane, and in the render path the whole frame, down with it.
+///
+/// The generator is deterministic, so a failure names the case that caused it.
+#[cfg(test)]
+mod parser_fuzz {
+    use super::*;
+    use crate::{
+        config::MIN_SCROLLBACK_ROWS,
+        control::PaneTarget,
+        layout::{GridSize, PaneId},
+    };
+
+    /// Bytes chosen to land on the boundaries these parsers actually branch on.
+    const SEEDS: &[&[u8]] = &[
+        b"\x1b",
+        b"\x1b]",
+        b"\x1b]7;file://",
+        b"\x1b]7;file:///c:/tmp\x07",
+        b"\x1b\\",
+        b"\x07",
+        b"\x1b[6n",
+        b"\x1b[5n",
+        b"\x1b[c",
+        b"\x1b[0c",
+        b"\x1b[200~",
+        b"\x1b[201~",
+        b"%",
+        b"%2",
+        b"%zz",
+        b"%2f",
+        b"\xff\xfe",
+        b"\xc3",
+        b"\xed\xa0\x80",
+        "\u{1f600}".as_bytes(),
+        "\u{65e5}".as_bytes(),
+        b"\r\n",
+        b"\x08",
+        b"\x7f",
+        b"\t",
+        b"pane-1-gen-",
+        b"pane--gen--",
+        b"999999999999999999999999",
+        b"0",
+        b"-1",
+        b"x",
+        b"1x1",
+        b"1000000x1000000",
+        b"",
+    ];
+
+    struct Noise(u64);
+
+    impl Noise {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 17
+        }
+
+        fn pick(&mut self, len: usize) -> usize {
+            if len == 0 {
+                0
+            } else {
+                self.next() as usize % len
+            }
+        }
+
+        fn bytes(&mut self, pieces: usize) -> Vec<u8> {
+            let mut out = Vec::new();
+            for _ in 0..pieces {
+                let seed = SEEDS[self.pick(SEEDS.len())];
+                out.extend_from_slice(seed);
+                if self.next().is_multiple_of(3) {
+                    out.push((self.next() % 256) as u8);
+                }
+            }
+            out
+        }
+    }
+
+    /// Everything that reads raw pane output.
+    #[test]
+    fn terminal_parsing_survives_arbitrary_pane_output() {
+        let mut noise = Noise(0x5EED_1234);
+        for case in 0..40_000 {
+            let pieces = 1 + noise.pick(6);
+            let bytes = noise.bytes(pieces);
+
+            // OSC and working-directory extraction.
+            for payload in osc_payloads(&bytes) {
+                let _ = cwd_from_osc7_payload(payload);
+            }
+            let _ = incomplete_osc_tail(&bytes);
+            let _ = terminal_query_scan_tail(&bytes);
+            let _ = percent_decode(&String::from_utf8_lossy(&bytes));
+
+            // Plain-text extraction and input history, which walk escapes by
+            // hand rather than through vt100.
+            let _ = plain_terminal_text_with_char_count(&bytes);
+            let mut pending = String::new();
+            let mut history = Vec::new();
+            record_input_bytes(&bytes, &mut pending, &mut history);
+
+            // A view at a size the layout could really hand it, fed the same
+            // bytes and then asked for its history.
+            let mut view = PtyView::new(PathBuf::from("."), MIN_SCROLLBACK_ROWS);
+            let rows = noise.pick(6) as u16;
+            let cols = noise.pick(10) as u16;
+            view.resize_view(rows, cols);
+            view.process_output(&bytes);
+            let _ = view.history_lines();
+            assert!(
+                view.output_tail().len() <= OUTPUT_TAIL_TRIM_AT_CHARS * 4,
+                "case {case}: the output tail grew past its trim point"
+            );
+        }
+    }
+
+    /// Text that arrives from a snapshot or another process and is then laid
+    /// out at whatever width the terminal happens to be.
+    #[test]
+    fn restoring_and_targeting_survive_arbitrary_input() {
+        let mut noise = Noise(0xC0FF_EE01);
+        for _ in 0..40_000 {
+            let pieces = 1 + noise.pick(4);
+            let bytes = noise.bytes(pieces);
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+
+            // Replaying a damaged snapshot into a pane of any size.
+            let mut view = PtyView::new(PathBuf::from("."), MIN_SCROLLBACK_ROWS);
+            let rows = noise.pick(5) as u16;
+            let cols = noise.pick(9) as u16;
+            view.resize_view(rows, cols);
+            view.restore_history_display(&text, std::slice::from_ref(&text));
+
+            // Targets and sizes parsed straight from a control request or the
+            // command line.
+            let _ = PaneTarget::parse(&text);
+            let _ = GridSize::parse(&text);
+            let rows = noise.pick(1_000);
+            let columns = noise.pick(1_000);
+            let _ = GridSize::new(rows, columns);
+            let pane = PaneId(noise.pick(64));
+            let generation = noise.next();
+            let _ = PaneTarget::stable_label(pane, generation);
+        }
+    }
+}
