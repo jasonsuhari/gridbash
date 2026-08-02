@@ -12,11 +12,11 @@ use vt100::Cell;
 use crate::{
     app::{
         App, AssistantMessageRole, BackgroundJobState, BackgroundJobView, BackgroundJobsView,
-        CloseGridConfirmationView, CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog,
-        GridPalette, PaneSelection, PaneSettingsTarget, PaneSettingsView, PortInspectorView,
-        PreviousPaneView, PreviousPanesView, QuitConfirmationView, RenamePaneView, RenameTabView,
-        SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, TabLabel,
-        WorkspaceAssistantView,
+        CloseGridConfirmationView, CommandPaletteView, ExitedPaneRecoveryView, FocusedPaneSummary,
+        FollowUpDialog, GridPalette, PaneSelection, PaneSettingsTarget, PaneSettingsView,
+        PortInspectorView, PreviousPaneView, PreviousPanesView, QuitConfirmationView,
+        RenamePaneView, RenameTabView, SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind,
+        TabLabel, WorkspaceAssistantView,
     },
     auth::{AgentKind, AuthProfile},
     copy_mode::{CopyCellKind, CopyModeView, TextPoint},
@@ -328,6 +328,32 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     }
 }
 
+/// The blank column between two tabs.
+///
+/// Without it the strip is one unbroken run of coloured cells: the eye reads a
+/// highlight bar with words in it rather than a row of separate things you can
+/// click. The gap is what makes them tabs.
+const TAB_GAP: u16 = 1;
+
+/// Half-block caps. Filling half of the end cell rounds a tab off instead of
+/// letting it stop dead on a column boundary, which is as close to a real tab
+/// shape as a single-row strip can get.
+const TAB_CAP_LEFT: &str = "▐";
+const TAB_CAP_RIGHT: &str = "▌";
+
+/// The longest grid name a tab will show before it is cut short.
+const TAB_TITLE_CHARS: usize = 18;
+
+/// `‹ ` and ` ›`: what the strip spends to admit there are tabs off-screen.
+const TAB_OVERFLOW_WIDTH: u16 = 2;
+
+/// One tab, styled and measured before the strip works out which ones fit.
+struct TabShape {
+    index: usize,
+    spans: Vec<Span<'static>>,
+    width: u16,
+}
+
 fn render_tabs(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -338,29 +364,54 @@ fn render_tabs(
         return Vec::new();
     }
 
-    let mut spans = vec![Span::styled(STATUS_BRAND, brand_style(palette))];
-    let mut tab_rects = Vec::with_capacity(tabs.len());
-    let mut tab_x = area
-        .x
-        .saturating_add(u16::try_from(Line::from(STATUS_BRAND).width()).unwrap_or(u16::MAX));
+    let shapes = tabs
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| tab_shape(index, tab, palette))
+        .collect::<Vec<_>>();
+    let widths = shapes.iter().map(|shape| shape.width).collect::<Vec<_>>();
+    let active = tabs.iter().position(|tab| tab.active).unwrap_or(0);
+
+    let mut spans = vec![
+        Span::styled(STATUS_BRAND, brand_style(palette)),
+        Span::raw(" "),
+    ];
+    let brand_width = u16::try_from(spans.iter().map(Span::width).sum::<usize>())
+        .unwrap_or(u16::MAX)
+        .min(area.width);
+    let mut tab_x = area.x.saturating_add(brand_width);
     let area_right = area.right();
 
-    for (index, tab) in tabs.iter().enumerate() {
-        let label = tab_label(index, tab);
-        let label_width = u16::try_from(Line::from(label.as_str()).width()).unwrap_or(u16::MAX);
+    let (first, last) = visible_tabs(&widths, active, area_right.saturating_sub(tab_x));
+    let mut tab_rects = Vec::with_capacity(last.saturating_sub(first));
+    let overflow = Style::default().fg(TEXT_FAINT).bg(SURFACE);
+
+    if first > 0 {
+        spans.push(Span::styled("‹ ", overflow));
+        tab_x = tab_x.saturating_add(TAB_OVERFLOW_WIDTH);
+    }
+    for (position, shape) in shapes.iter().enumerate().skip(first).take(last - first) {
+        if position > first {
+            spans.push(Span::raw(" "));
+            tab_x = tab_x.saturating_add(TAB_GAP);
+        }
         if tab_x < area_right {
             tab_rects.push((
-                index,
+                shape.index,
                 Rect::new(
                     tab_x,
                     area.y,
-                    label_width.min(area_right.saturating_sub(tab_x)),
+                    shape.width.min(area_right.saturating_sub(tab_x)),
                     1,
                 ),
             ));
         }
-        tab_x = tab_x.saturating_add(label_width);
-        spans.push(Span::styled(label, tab_style(tab, palette)));
+        tab_x = tab_x.saturating_add(shape.width);
+        spans.extend(shape.spans.iter().cloned());
+    }
+    if last < shapes.len() {
+        spans.push(Span::styled(" ›", overflow));
+        tab_x = tab_x.saturating_add(TAB_OVERFLOW_WIDTH);
     }
 
     frame.render_widget(
@@ -386,46 +437,140 @@ fn render_tabs(
     tab_rects
 }
 
-fn tab_label(index: usize, tab: &TabLabel) -> String {
-    // One glyph carries the state that used to need a `!`/`*`/`+` cipher; the
-    // rest is conveyed by colour, which needs no legend.
-    let marker = if tab.exited {
-        " !"
-    } else if tab.waiting || (tab.activity && !tab.active) {
-        " •"
+/// The run of tabs to draw, as a half-open range that always contains `active`.
+///
+/// A strip that simply ran off the right edge hid the one tab the user was
+/// looking at as soon as they opened a seventh grid — and hid it silently, since
+/// a clipped `Paragraph` leaves nothing behind to say there was more.
+fn visible_tabs(widths: &[u16], active: usize, budget: u16) -> (usize, usize) {
+    if widths.is_empty() {
+        return (0, 0);
+    }
+
+    let gaps = u16::try_from(widths.len().saturating_sub(1)).unwrap_or(u16::MAX);
+    let total = widths
+        .iter()
+        .fold(gaps.saturating_mul(TAB_GAP), |acc, width| {
+            acc.saturating_add(*width)
+        });
+    // The overflow markers only have to be paid for when there is overflow, and
+    // reserving them up front is what keeps the last tab from being pushed out
+    // by the very marker that says it was pushed out.
+    let budget = if total <= budget {
+        budget
     } else {
-        ""
+        budget.saturating_sub(2 * TAB_OVERFLOW_WIDTH)
     };
-    format!(" {} {}{marker} ", index + 1, truncate_text(&tab.title, 18))
+
+    let active = active.min(widths.len() - 1);
+    let (mut first, mut last) = (active, active + 1);
+    let mut used = widths[active];
+    loop {
+        let mut grew = false;
+        // Rightwards first, so the common case — an early tab selected out of
+        // many — reads in the order the user numbered them.
+        if last < widths.len() {
+            let next = used.saturating_add(TAB_GAP).saturating_add(widths[last]);
+            if next <= budget {
+                used = next;
+                last += 1;
+                grew = true;
+            }
+        }
+        if first > 0 {
+            let next = used
+                .saturating_add(TAB_GAP)
+                .saturating_add(widths[first - 1]);
+            if next <= budget {
+                used = next;
+                first -= 1;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    (first, last)
 }
 
-fn tab_style(tab: &TabLabel, palette: &GridPalette) -> Style {
+/// The background a tab's body is filled with.
+///
+/// Every tab gets a fill, not just the current one: a tab that is only text on
+/// the strip's own background is not a tab, it is a word. The current one is
+/// brighter, which is a difference in emphasis rather than in kind.
+fn tab_fill(tab: &TabLabel, palette: &GridPalette) -> Color {
     // A grid with an agent waiting on the user outranks every other state: it is
     // the only one that means "come here now".
-    let style = if tab.waiting {
-        Style::default()
-            .fg(INK)
-            .bg(TAB_WAITING_BG)
-            .add_modifier(Modifier::BOLD)
+    if tab.waiting {
+        TAB_WAITING_BG
     } else if tab.active {
-        Style::default()
-            .fg(INK)
-            .bg(palette.accent())
-            .add_modifier(Modifier::BOLD)
-    } else if tab.exited {
-        Style::default().fg(palette.exited()).bg(SURFACE)
-    } else if tab.activity {
-        Style::default().fg(palette.quiet()).bg(SURFACE)
+        palette.accent()
     } else {
-        Style::default().fg(TEXT_DIM).bg(SURFACE)
-    };
+        SURFACE_HI
+    }
+}
 
+fn tab_text_color(tab: &TabLabel, palette: &GridPalette) -> Color {
+    if tab.waiting || tab.active {
+        INK
+    } else if tab.exited {
+        palette.exited()
+    } else if tab.activity {
+        // A background grid that has produced output has something to say, so it
+        // is the one unselected tab allowed full-strength text.
+        TEXT
+    } else {
+        TEXT_DIM
+    }
+}
+
+fn tab_shape(index: usize, tab: &TabLabel, palette: &GridPalette) -> TabShape {
+    let fill = tab_fill(tab, palette);
+    let cap = Style::default().fg(fill).bg(SURFACE);
+    let mut body = Style::default().fg(tab_text_color(tab, palette)).bg(fill);
     // Selection is a mark the user put there by hand, so it has to survive
     // whatever the grid's own state is doing to the colours.
     if tab.selected {
-        style.add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
+        body = body.add_modifier(Modifier::UNDERLINED);
+    }
+
+    // One glyph carries the state that used to need a `!`/`*`/`+` cipher; the
+    // rest is conveyed by colour, which needs no legend.
+    let marker = if tab.exited {
+        " ! "
+    } else if tab.waiting || (tab.activity && !tab.active) {
+        " • "
     } else {
-        style
+        " "
+    };
+    // The number is how the user reaches the grid from the keyboard, so it is
+    // always there — just never louder than the name it belongs to.
+    let number = Style::default()
+        .fg(if tab.waiting || tab.active {
+            INK
+        } else {
+            TEXT_FAINT
+        })
+        .bg(fill);
+
+    let spans = vec![
+        Span::styled(TAB_CAP_LEFT, cap),
+        Span::styled(format!(" {} ", index + 1), number),
+        Span::styled(
+            truncate_text(&tab.title, TAB_TITLE_CHARS),
+            body.add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(marker, body),
+        Span::styled(TAB_CAP_RIGHT, cap),
+    ];
+    let width = u16::try_from(spans.iter().map(Span::width).sum::<usize>()).unwrap_or(u16::MAX);
+
+    TabShape {
+        index,
+        spans,
+        width,
     }
 }
 
@@ -945,6 +1090,7 @@ pub struct StatusBar {
     pub selected_panes: usize,
     pub selected_grids: usize,
     pub status: String,
+    pub pane: FocusedPaneSummary,
 }
 
 impl StatusBar {
@@ -963,16 +1109,30 @@ impl StatusBar {
             selected_panes: app.selected().len(),
             selected_grids: app.selected_grid_count(),
             status: app.status().to_string(),
+            pane: app.focused_pane_summary(),
         }
     }
 
-    fn mode(&self) -> &'static str {
+    /// The input mode, but only when it is not the ordinary one.
+    ///
+    /// A bar that printed `LIVE` on every frame of every session was spending
+    /// four columns and a colour to report that nothing unusual was happening.
+    fn mode(&self) -> Option<&'static str> {
         if self.voice_listening {
-            "MIC"
+            Some("MIC")
         } else if self.zoomed {
-            "ZOOM"
+            Some("ZOOM")
         } else {
-            "LIVE"
+            None
+        }
+    }
+
+    /// Where typing will land, for the same reason: silent when it is the pane
+    /// the user is already looking at.
+    fn scope(&self) -> Option<&'static str> {
+        match self.input_scope {
+            "" | "focused pane" => None,
+            scope => Some(scope),
         }
     }
 
@@ -1009,9 +1169,12 @@ fn render_status_bar(
 
     frame.render_widget(Paragraph::new("").style(Style::default().bg(SURFACE)), area);
 
+    // No brand chip down here. The tab strip already carries the name at the
+    // top of the screen, and ten columns of it repeated along the bottom bought
+    // nothing but a narrower middle for the line that is actually read.
     let mut buttons = StatusButtons::default();
-    let mut spans = vec![Span::styled(STATUS_BRAND, brand_style(palette))];
-    let mut cursor = area.x.saturating_add(STATUS_BRAND.chars().count() as u16);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut cursor = area.x;
 
     let chip = |spans: &mut Vec<Span<'static>>,
                 cursor: &mut u16,
@@ -1060,29 +1223,33 @@ fn render_status_bar(
     );
 
     // Everything past the chips is read, not clicked, so it is styled as a
-    // sentence rather than as more buttons: mode, then what typing will reach,
-    // then the last thing that happened.
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled(
-        view.mode(),
-        Style::default()
-            .fg(if view.voice_listening {
+    // sentence rather than as more buttons — and only when it has something to
+    // say. Both of these used to be printed on every frame in their default
+    // state, which is how the left of the bar came to be furniture.
+    if let Some(mode) = view.mode() {
+        spans.push(Span::styled(
+            format!("  {mode}"),
+            Style::default()
+                .fg(if view.voice_listening {
+                    palette.accent()
+                } else {
+                    palette.focus()
+                })
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(scope) = view.scope() {
+        spans.push(Span::styled(
+            format!("  {scope}"),
+            Style::default().fg(if view.command_center_open {
                 palette.accent()
+            } else if view.selected_panes > 1 {
+                palette.selected()
             } else {
-                palette.focus()
-            })
-            .add_modifier(Modifier::BOLD),
-    ));
-    spans.push(Span::styled(
-        format!("  {}", view.input_scope),
-        Style::default().fg(if view.command_center_open {
-            palette.accent()
-        } else if view.selected_panes > 1 {
-            palette.selected()
-        } else {
-            TEXT_DIM
-        }),
-    ));
+                TEXT_DIM
+            }),
+        ));
+    }
     if let Some(selection) = view.selection_summary() {
         spans.push(Span::styled(
             format!("  {selection}"),
@@ -1094,30 +1261,50 @@ fn render_status_bar(
     // over the full width let a long status message run underneath the chip and
     // get overwritten.
     buttons.ports = ports_button_rect(area, view.ports);
+    let left_width =
+        u16::try_from(spans.iter().map(Span::width).sum::<usize>()).unwrap_or(u16::MAX);
     let text_area = Rect {
         width: buttons
             .ports
             .map_or(area.width, |chip| chip.x.saturating_sub(area.x + 1)),
         ..area
     };
-
-    // Status messages are sentences and routinely outrun the bar. Trimming to
-    // what is left over ends them in an ellipsis rather than mid-word, so a cut
-    // message reads as cut rather than as a typo.
-    if !view.status.is_empty() {
-        let used = spans.iter().map(Span::width).sum::<usize>();
-        let room = (text_area.width as usize).saturating_sub(used + 2);
-        if room >= 4 {
-            spans.push(Span::styled(
-                format!("  {}", truncate_text(&view.status, room)),
-                Style::default().fg(TEXT_FAINT),
-            ));
-        }
-    }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(SURFACE)),
         text_area,
     );
+
+    // The middle of the bar belongs to whatever the focused pane is doing. It is
+    // drawn after the left-hand run and centred on the bar rather than on the
+    // gap, so it stays put as chips come and go instead of sliding around under
+    // the reader. A status message takes the slot while it lasts: it is the
+    // answer to something the user just did, and it goes away on its own.
+    if let Some((start, room)) = status_centre_gap(
+        area,
+        area.x.saturating_add(left_width),
+        buttons.ports.map_or(area.right(), |chip| chip.x),
+    ) {
+        let line = if !view.status.is_empty() {
+            // Status messages are sentences and routinely outrun the bar.
+            // Trimming ends them in an ellipsis rather than mid-word, so a cut
+            // message reads as cut rather than as a typo.
+            Line::from(Span::styled(
+                truncate_text(&view.status, room as usize),
+                Style::default().fg(TEXT),
+            ))
+        } else {
+            pane_summary_line(&view.pane, room as usize)
+        };
+        let width = u16::try_from(line.width()).unwrap_or(u16::MAX).min(room);
+        if width > 0 {
+            let centred = area.x + area.width.saturating_sub(width) / 2;
+            let x = centred.clamp(start, start + room - width);
+            frame.render_widget(
+                Paragraph::new(line).style(Style::default().bg(SURFACE)),
+                Rect::new(x, area.y, width, 1),
+            );
+        }
+    }
 
     if let Some(button) = buttons.ports {
         frame.render_widget(
@@ -1133,6 +1320,53 @@ fn render_status_bar(
     }
 
     buttons
+}
+
+/// Breathing room between the centre line and the chips on either side.
+const STATUS_CENTRE_MARGIN: u16 = 2;
+/// Below this the centre line is all ellipsis and no sentence, and the bar is
+/// better off leaving the space blank.
+const STATUS_CENTRE_MIN: u16 = 16;
+const SUMMARY_SEPARATOR: &str = " · ";
+
+/// The span of the bar the centre line may use: `(x, width)`, or nothing when
+/// the chips have eaten the middle.
+fn status_centre_gap(area: Rect, left_end: u16, right_start: u16) -> Option<(u16, u16)> {
+    let start = left_end.saturating_add(STATUS_CENTRE_MARGIN).max(area.x);
+    let end = right_start
+        .saturating_sub(STATUS_CENTRE_MARGIN)
+        .min(area.right());
+    let room = end.checked_sub(start)?;
+    (room >= STATUS_CENTRE_MIN).then_some((start, room))
+}
+
+/// `2 Fluent · running the failing test alone`, trimmed to fit.
+///
+/// The name is dimmer than the summary. Which pane has the keyboard is already
+/// obvious from the focus ring; the sentence is the part worth reading, and it
+/// is measured first so a long grid name cannot crowd it out.
+fn pane_summary_line(pane: &FocusedPaneSummary, room: usize) -> Line<'static> {
+    if pane.is_empty() || room == 0 {
+        return Line::default();
+    }
+
+    let title = pane.title.trim();
+    let overhead = title.chars().count() + SUMMARY_SEPARATOR.chars().count();
+    if title.is_empty() || room < overhead + STATUS_CENTRE_MIN as usize {
+        return Line::from(Span::styled(
+            truncate_text(&pane.detail, room),
+            Style::default().fg(TEXT_DIM),
+        ));
+    }
+
+    Line::from(vec![
+        Span::styled(title.to_string(), Style::default().fg(TEXT_FAINT)),
+        Span::styled(SUMMARY_SEPARATOR, Style::default().fg(TEXT_FAINT)),
+        Span::styled(
+            truncate_text(&pane.detail, room - overhead),
+            Style::default().fg(TEXT_DIM),
+        ),
+    ])
 }
 
 /// A chip the user can click. Filled when its panel is open, so the status bar
@@ -4849,7 +5083,10 @@ mod tests {
                         selected_panes: 1,
                         background_jobs: 2,
                         ports: 3,
-                        status: "agent pane tools ready | Drag copies within pane".into(),
+                        pane: FocusedPaneSummary {
+                            title: "1 Frontend".into(),
+                            detail: "wiring the checkout form to the new API".into(),
+                        },
                         ..StatusBar::default()
                     },
                     &palette,
@@ -4994,14 +5231,20 @@ mod tests {
         assert_eq!(targets.len(), 3);
         assert_eq!(targets[0].0, 0);
         assert_eq!(targets[1].0, 1);
-        assert_eq!(targets[0].1.right(), targets[1].1.x);
-        assert_eq!(targets[1].1.right(), targets[2].1.x);
+        // Tabs are separate shapes with a blank column between them, and the
+        // click target covers the whole shape including its caps.
+        assert_eq!(targets[0].1.right() + TAB_GAP, targets[1].1.x);
+        assert_eq!(targets[1].1.right() + TAB_GAP, targets[2].1.x);
 
         let rendered = buffer_text(&terminal);
         assert!(rendered.contains(" 1 Frontend "), "tabs: {rendered}");
         assert!(rendered.contains(" 2 Tests "), "tabs: {rendered}");
-        // A grid with an agent waiting on the user is the one thing in the strip
-        // allowed a filled background.
+        assert!(
+            rendered.contains(&format!("{TAB_CAP_LEFT} 1 Frontend {TAB_CAP_RIGHT}")),
+            "the current tab must be drawn as a capped shape: {rendered}"
+        );
+        // A grid with an agent waiting on the user gets the one colour in the
+        // strip that shouts.
         assert!(
             terminal
                 .backend()
@@ -5010,6 +5253,78 @@ mod tests {
                 .iter()
                 .any(|cell| cell.symbol() == "R" && cell.bg == TAB_WAITING_BG)
         );
+    }
+
+    /// Every tab is a filled shape, not just the current one — otherwise the
+    /// strip reads as one highlighted word among plain ones.
+    #[test]
+    fn background_tabs_are_drawn_as_tabs_too() {
+        let backend = TestBackend::new(80, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let tabs = vec![
+            TabLabel {
+                title: "Frontend".into(),
+                active: true,
+                selected: false,
+                waiting: false,
+                activity: false,
+                exited: false,
+            },
+            TabLabel {
+                title: "Tests".into(),
+                active: false,
+                selected: false,
+                waiting: false,
+                activity: false,
+                exited: false,
+            },
+        ];
+
+        let mut targets = Vec::new();
+        terminal
+            .draw(|frame| {
+                targets = render_tabs(frame, frame.area(), &tabs, &GridPalette::default());
+            })
+            .expect("render tabs");
+
+        let buffer = terminal.backend().buffer().clone();
+        let backdrop = targets[1].1;
+        assert!(
+            (backdrop.x + 1..backdrop.right() - 1)
+                .all(|x| buffer[(x, 0)].bg == SURFACE_HI && buffer[(x, 0)].bg != SURFACE),
+            "an unselected tab must still sit on a raised surface"
+        );
+        // The gap between two tabs belongs to the strip, not to either tab.
+        assert_eq!(buffer[(targets[0].1.right(), 0)].bg, SURFACE);
+    }
+
+    /// A strip that simply ran off the right edge hid the active tab as soon as
+    /// there were enough grids, and said nothing about it.
+    #[test]
+    fn the_tab_strip_scrolls_to_keep_the_active_tab_on_screen() {
+        let widths = [10u16; 8];
+
+        assert_eq!(visible_tabs(&widths, 0, 200), (0, 8), "everything fits");
+        assert_eq!(visible_tabs(&[], 0, 200), (0, 0));
+
+        for active in 0..widths.len() {
+            for budget in [12u16, 20, 33, 44, 60] {
+                let (first, last) = visible_tabs(&widths, active, budget);
+                assert!(
+                    first <= active && active < last,
+                    "the active tab fell out of the window at {budget} columns"
+                );
+                let used = (last - first) as u16 * (10 + TAB_GAP) - TAB_GAP;
+                assert!(
+                    used + 2 * TAB_OVERFLOW_WIDTH <= budget || last - first == 1,
+                    "the window outgrew its budget: {used} in {budget}"
+                );
+            }
+        }
+
+        // An active tab wider than the whole strip is still the one that is
+        // drawn; the paragraph clips it rather than the strip dropping it.
+        assert_eq!(visible_tabs(&[80, 10], 0, 20), (0, 1));
     }
 
     /// The chrome must be drawable from plain data.
@@ -5044,6 +5359,108 @@ mod tests {
         assert!(rendered.contains(" BG 4 "), "bar: {rendered}");
         assert!(rendered.contains(" Ports 2 "), "bar: {rendered}");
         assert!(rendered.contains("3 selected"), "bar: {rendered}");
+    }
+
+    /// The middle of the bar is the one place a pane summary is the point
+    /// rather than a garnish, so it is centred on the bar itself — not parked
+    /// wherever the run of chips happens to end.
+    #[test]
+    fn the_status_bar_centres_the_focused_panes_summary() {
+        let backend = TestBackend::new(120, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let view = StatusBar {
+            pane: FocusedPaneSummary {
+                title: "2 Fluent".into(),
+                detail: "running the failing test alone".into(),
+            },
+            ..StatusBar::default()
+        };
+
+        terminal
+            .draw(|frame| {
+                render_status_bar(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render status bar");
+
+        let rendered = buffer_text(&terminal);
+        let expected = "2 Fluent · running the failing test alone";
+        let start = rendered
+            .find(expected)
+            .map(|byte| rendered[..byte].chars().count())
+            .unwrap_or_else(|| panic!("summary missing from the bar: {rendered}"));
+        let middle = start + expected.chars().count() / 2;
+        assert!(
+            middle.abs_diff(60) <= 1,
+            "the summary's midpoint landed at {middle}, not the bar's: {rendered}"
+        );
+
+        // The furniture that used to fill this space said the same thing on
+        // every frame of every session.
+        assert!(!rendered.contains("LIVE"), "bar: {rendered}");
+        assert!(!rendered.contains("focused pane"), "bar: {rendered}");
+    }
+
+    /// A status message is the answer to something the user just did, so it
+    /// takes the centre for as long as it lasts.
+    #[test]
+    fn a_status_message_outranks_the_pane_summary() {
+        let backend = TestBackend::new(120, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let view = StatusBar {
+            status: "copied 3 lines".into(),
+            pane: FocusedPaneSummary {
+                title: "2 Fluent".into(),
+                detail: "running the failing test alone".into(),
+            },
+            ..StatusBar::default()
+        };
+
+        terminal
+            .draw(|frame| {
+                render_status_bar(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render status bar");
+
+        let rendered = buffer_text(&terminal);
+        assert!(rendered.contains("copied 3 lines"), "bar: {rendered}");
+        assert!(!rendered.contains("running the failing"), "bar: {rendered}");
+    }
+
+    /// The summary is the reason the line exists; the pane's name is context.
+    /// A narrow bar drops the context rather than the sentence.
+    #[test]
+    fn a_narrow_centre_keeps_the_sentence_and_drops_the_pane_name() {
+        let pane = FocusedPaneSummary {
+            title: "2 Fluent".into(),
+            detail: "running the failing test alone".into(),
+        };
+
+        let wide = pane_summary_line(&pane, 60);
+        assert!(wide.to_string().starts_with("2 Fluent · "));
+
+        let narrow = pane_summary_line(&pane, 20);
+        assert!(!narrow.to_string().contains("Fluent"), "{narrow}");
+        assert!(narrow.to_string().starts_with("running"), "{narrow}");
+
+        for room in [0usize, 1, 4, 17, 40, 200] {
+            assert!(pane_summary_line(&pane, room).width() <= room);
+        }
+        assert_eq!(
+            pane_summary_line(&FocusedPaneSummary::default(), 80).width(),
+            0
+        );
+    }
+
+    /// The centre has to give way rather than overprint the chips it sits
+    /// between, and the ports chip is anchored to the right edge.
+    #[test]
+    fn the_centre_line_never_overlaps_the_chips() {
+        assert_eq!(status_centre_gap(Rect::new(0, 0, 40, 1), 30, 40), None);
+        assert_eq!(status_centre_gap(Rect::new(0, 0, 20, 1), 18, 4), None);
+
+        let (start, room) = status_centre_gap(Rect::new(0, 0, 120, 1), 34, 110).expect("gap");
+        assert_eq!(start, 36);
+        assert_eq!(start + room, 108);
     }
 
     /// The hints exist to be discoverable, not to be load-bearing. A terminal

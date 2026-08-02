@@ -187,8 +187,8 @@ child panes receive `GRIDBASH_CONTROL_ADDR`, `GRIDBASH_CONTROL_TOKEN`,
 `GRIDBASH_CONTROL_SESSION`, the initial 1-based `GRIDBASH_PANE_INDEX`, a stable
 `GRIDBASH_PANE_ID`, and a concise `GRIDBASH_AGENT_TOOLS` discovery hint. The
 stable pane ID continues to identify the same live pane after reordering.
-`GRIDBASH_AGENT_TOOLS` is human-readable help containing the three primary
-command forms separated by ` | `. Its presence tells a coding agent that
+`GRIDBASH_AGENT_TOOLS` is human-readable help containing the primary command
+forms separated by ` | `. Its presence tells a coding agent that
 pane-local coordination is available, but it is not a versioned protocol and
 scripts should invoke `gridbash agent --help` instead of parsing its value.
 
@@ -196,6 +196,8 @@ scripts should invoke `gridbash agent --help` instead of parsing its value.
 gridbash agent panes
 gridbash agent prompt --pane pane-4-gen-2 "Review the current diff"
 "Report status and blockers" | gridbash agent prompt --others
+gridbash agent rename "Reviewer"
+gridbash agent rename --pane pane-4-gen-2 --clear
 ```
 
 `agent panes` uses the current pane's inherited session context and marks the
@@ -204,6 +206,12 @@ caller as `self`. `agent prompt` accepts repeated `--pane` targets or
 positional prompt to read stdin; one trailing shell line ending is removed
 before submission. Sleeping, exited, missing, and stale pane targets fail
 without silently retargeting. `--no-submit` writes the text without Enter.
+
+`agent rename` sets the pane title shown in the grid, so a manager pane can label
+what each pane is working on. It targets the calling pane unless `--pane` names
+another one, takes either a positional title or `--clear`, and trims titles to 32
+characters. Renaming only edits pane metadata, so sleeping and exited panes stay
+renameable, and the new title persists with the saved session.
 
 Use `--no-agent-api` on the GridBash launch command to disable these tools.
 `--agent-api-port PORT` still selects a fixed localhost port when required.
@@ -223,6 +231,7 @@ The MCP server exposes:
 | `gridbash_read_pane_output` | Return bounded recent output for explicitly requested stable pane IDs. |
 | `gridbash_send_command` | Send text to one or more 1-based pane numbers; submitting with Enter is optional. |
 | `gridbash_prompt_panes` | Prompt explicit stable pane targets, or every available pane except the caller. |
+| `gridbash_rename_pane` | Set or clear a pane's title, defaulting to the calling pane. |
 | `gridbash_set_status` | Replace the current session's status-bar message. |
 | `gridbash_capture_output` | Save each target pane's bounded recent plain-text output. |
 | `gridbash_start_logging` | Start a separate continuous plain-text output log for each target pane. |
@@ -257,6 +266,8 @@ gridbash ctl send --session <id> --pane pane-4-gen-2 --no-submit "review this"
 gridbash ctl capture --session <id> --pane 2 --directory C:\captures
 gridbash ctl status --session <id> "integration running"
 gridbash ctl focus --session <id> pane-4-gen-2
+gridbash ctl rename --session <id> --pane pane-4-gen-2 "Integration"
+gridbash ctl rename --session <id> --pane 2 --clear
 ```
 
 `ctl list` and `ctl panes` do not require a token. Mutating commands require
@@ -391,6 +402,10 @@ customize `command-line` instead.
 The resize picker starts from the current dimensions and shows each existing pane's latest activity summary when one is available. Shrinking a grid deactivates live panes outside the retained upper-left rectangle; changing `3x3` to `3x2`, for example, removes the rightmost column.
 
 A pane's top border carries its number and name on the left and its state on the right. Opt-in AI activity summaries add a concise work headline after the name once output settles; GridBash never uses raw typing or terminal UI fragments as the displayed summary. A configured manager goal replaces pane summaries across the grid until removed. Saving a blank pane name restores its default number.
+
+The tab strip draws each grid as a separate capped shape rather than one continuous highlight: the current grid is filled with the accent colour, a grid whose agent is waiting on you is filled amber and marked `•`, an exited grid is marked `!`, and grids selected by hand are underlined. When the grids outrun the terminal width the strip scrolls to keep the current one visible and marks the hidden ends with `‹` and `›`. Remaining width goes to the keyboard hints, which drop from the end as it runs out.
+
+The status bar centres the focused pane's number, name, and AI activity summary. When summaries are off or unconfigured, that line says so instead of guessing from the shape of the output; a transient status message takes the centre for as long as it lasts, and a narrow terminal drops the pane name before the summary. Left of centre are the clickable Panes, Summary, and background-jobs chips, plus the input mode and scope only when they are not the ordinary ones; the ports chip stays anchored to the right edge.
 
 The state on the right is whichever one matters most: `exited`, `asleep`, `needs you`, or `idle`. `needs you` marks an agent pane that has stopped producing output for roughly three seconds, which is how an agent asks for input — it indicates output followed by inactivity, not completion or process exit. A non-agent pane that goes quiet reads `idle` instead. As a pane narrows, its header drops its usage figure first, then its activity summary; the number, name, and state are kept. Focused and selected panes are marked by a filled number chip and a coloured border, which outrank a pane's own state.
 

@@ -18,10 +18,11 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use crate::{
     auth::AgentKind,
     cli::ResumeArgs,
+    config::Config,
     layout::{GridSize, MAX_PANES},
     pane_host::{PtyHostRef, PtyPane, terminate_saved_host},
     ports::roots_with_descendant_named,
-    profiles::Profile,
+    profiles::{Profile, all_profiles},
     setup::{LaunchPlan, PaneLaunchSpec, folder_display_name},
 };
 
@@ -356,8 +357,8 @@ impl SavedTab {
         }
     }
 
-    pub fn launch_plan(&self) -> Result<LaunchPlan> {
-        launch_plan_from_saved(&self.title, self.grid, &self.panes)
+    pub fn launch_plan(&self, config: &Config) -> Result<LaunchPlan> {
+        launch_plan_from_saved(&self.title, self.grid, &self.panes, config)
     }
 
     pub fn pane_histories(&self) -> Vec<SavedPaneHistory> {
@@ -416,6 +417,7 @@ fn launch_plan_from_saved(
     id: &str,
     saved_grid: SavedGrid,
     panes: &[SavedPane],
+    config: &Config,
 ) -> Result<LaunchPlan> {
     let mut grid = GridSize::new(saved_grid.rows, saved_grid.columns).ok_or_else(|| {
         anyhow!(
@@ -428,7 +430,7 @@ fn launch_plan_from_saved(
     let panes = claimed_claude_sessions(&ordered)
         .into_iter()
         .zip(&ordered)
-        .map(|(claude_session_id, pane)| pane.launch_spec_resuming(claude_session_id))
+        .map(|(claude_session_id, pane)| pane.launch_spec_resuming(claude_session_id, config))
         .collect::<Vec<_>>();
     if panes.is_empty() {
         bail!("saved session {id} has no panes");
@@ -607,14 +609,18 @@ fn resolve_claude_sessions(claims: &[ClaudeSessionClaim]) -> Vec<Option<String>>
 }
 
 impl SavedPane {
-    pub fn launch_spec(&self) -> PaneLaunchSpec {
-        self.launch_spec_resuming(self.claude_session_id.as_deref())
+    pub fn launch_spec(&self, config: &Config) -> PaneLaunchSpec {
+        self.launch_spec_resuming(self.claude_session_id.as_deref(), config)
     }
 
     /// Launch spec for a pane put back into a named conversation, or into none
     /// when another pane is already resuming the one it recorded.
-    fn launch_spec_resuming(&self, claude_session_id: Option<&str>) -> PaneLaunchSpec {
-        let (profile_name, command) = self.resume_command(claude_session_id);
+    fn launch_spec_resuming(
+        &self,
+        claude_session_id: Option<&str>,
+        config: &Config,
+    ) -> PaneLaunchSpec {
+        let (profile_name, command) = self.resume_command(claude_session_id, config);
         self.spec_for(profile_name, command)
     }
 
@@ -650,9 +656,13 @@ impl SavedPane {
     /// A Claude transcript that is no longer on disk falls back to a plain
     /// launch, because `claude --resume` on a missing session fails outright and
     /// would leave the pane with no agent at all.
-    fn resume_command(&self, claude_session_id: Option<&str>) -> (String, Profile) {
+    fn resume_command(
+        &self,
+        claude_session_id: Option<&str>,
+        config: &Config,
+    ) -> (String, Profile) {
         if let Some(thread_id) = self.codex_thread_id.as_deref() {
-            return codex_resume_profile(&self.profile_name, &self.command, thread_id);
+            return codex_resume_profile(&self.profile_name, &self.command, thread_id, config);
         }
         if let Some(session_id) = claude_session_id
             && claude_session_exists(&self.cwd, session_id)
@@ -717,41 +727,102 @@ fn codex_resume_profile(
     profile_name: &str,
     command: &Profile,
     thread_id: &str,
+    config: &Config,
 ) -> (String, Profile) {
-    if command.agent_kind == Some(AgentKind::Codex) && is_direct_codex_command(&command.command) {
-        let mut command = command.clone();
-        if let Some(resume_index) = command
-            .args
-            .iter()
-            .position(|argument| argument == "resume")
-        {
-            if command
-                .args
-                .get(resume_index + 1)
-                .is_some_and(|argument| looks_like_thread_id(argument))
-            {
-                command.args[resume_index + 1] = thread_id.to_string();
-            } else {
-                command.args.insert(resume_index + 1, thread_id.to_string());
-            }
-        } else {
-            command.args.extend(["resume".into(), thread_id.into()]);
-        }
-        return (profile_name.to_string(), command);
+    if command.agent_kind == Some(AgentKind::Codex)
+        && is_direct_codex_command(&command.command)
+        && !only_selects_a_codex_thread(&command.args)
+    {
+        return (
+            profile_name.to_string(),
+            with_codex_resume(command.clone(), thread_id),
+        );
     }
-    if codex_resume_id(command, &[]).as_deref() == Some(thread_id) {
+    if codex_resume_id(command, &[]).as_deref() == Some(thread_id)
+        && !only_selects_a_codex_thread(&command.args)
+    {
         return (profile_name.to_string(), command.clone());
     }
 
-    (
-        "codex".into(),
-        Profile {
-            command: "codex".into(),
-            args: vec!["resume".into(), thread_id.into()],
-            title: Some("Codex".into()),
-            agent_kind: Some(AgentKind::Codex),
-        },
-    )
+    let (profile_name, profile) = configured_codex_profile(config, profile_name);
+    (profile_name, with_codex_resume(profile, thread_id))
+}
+
+/// Whether a command says nothing beyond which conversation to open.
+///
+/// GridBash writes exactly that command when it turns a recovered thread back
+/// into a Codex pane, so a pane carrying it is one GridBash rebuilt rather than
+/// one the user configured. There is nothing in it worth keeping over the
+/// profile, and treating it as the user's own choice is what let an earlier
+/// resume's stripped-down command outlive the flags it was launched with.
+fn only_selects_a_codex_thread(args: &[String]) -> bool {
+    match args {
+        [] => true,
+        [first] => first == "resume",
+        [first, second] => first == "resume" && looks_like_thread_id(second),
+        _ => false,
+    }
+}
+
+/// Point a Codex command at `thread_id`, leaving the flags it already carries in
+/// place. Those flags decide how much access the agent comes back with, so a
+/// resume that dropped them would hand the conversation to a weaker agent than
+/// the one that left it.
+fn with_codex_resume(mut command: Profile, thread_id: &str) -> Profile {
+    let Some(resume_index) = command
+        .args
+        .iter()
+        .position(|argument| argument == "resume")
+    else {
+        command.args.extend(["resume".into(), thread_id.into()]);
+        return command;
+    };
+
+    if command
+        .args
+        .get(resume_index + 1)
+        .is_some_and(|argument| looks_like_thread_id(argument))
+    {
+        command.args[resume_index + 1] = thread_id.to_string();
+    } else {
+        command.args.insert(resume_index + 1, thread_id.to_string());
+    }
+    command
+}
+
+/// How Codex starts for a pane that carries no command of its own: a shell the
+/// user ran Codex in, or a pane an earlier resume rebuilt.
+///
+/// The profile is the only record of the sandbox and approval flags the user
+/// launches Codex with, so the resume is built on it rather than on a bare
+/// `codex`, which would silently bring the conversation back sandboxed. The
+/// pane's own profile is preferred, so a pane launched from a deliberately
+/// restricted Codex profile keeps those limits instead of inheriting `codex`.
+fn configured_codex_profile(config: &Config, profile_name: &str) -> (String, Profile) {
+    let profiles = all_profiles(config);
+    let codex_profile = |name: &str| {
+        profiles
+            .get(name)
+            .filter(|profile| profile.agent_kind == Some(AgentKind::Codex))
+            .cloned()
+            .map(|profile| (name.to_string(), profile))
+    };
+
+    let (name, mut profile) = codex_profile(profile_name)
+        .or_else(|| codex_profile("codex"))
+        .unwrap_or_else(|| {
+            (
+                "codex".into(),
+                Profile {
+                    command: "codex".into(),
+                    args: Vec::new(),
+                    title: None,
+                    agent_kind: Some(AgentKind::Codex),
+                },
+            )
+        });
+    profile.title.get_or_insert_with(|| "Codex".into());
+    (name, profile)
 }
 
 fn codex_resume_id(command: &Profile, input_history: &[String]) -> Option<String> {
@@ -1947,7 +2018,10 @@ mod tests {
         plan.panes[0].auth_kind = Some(AgentKind::Codex);
 
         let session = SavedSession::new("test".into(), "Grid 1", &plan);
-        let restored = session.active_grid().launch_plan().expect("launch plan");
+        let restored = session
+            .active_grid()
+            .launch_plan(&Config::default())
+            .expect("launch plan");
 
         assert_eq!(restored.grid, grid);
         assert_eq!(restored.panes.len(), 2);
@@ -1964,7 +2038,7 @@ mod tests {
         pane.command.args = vec!["--dangerously-bypass-approvals-and-sandbox".into()];
         pane.codex_thread_id = Some("019f7b81-de49-7782-8186-a3dc2c644c61".into());
 
-        let launch = pane.launch_spec();
+        let launch = pane.launch_spec(&Config::default());
 
         assert_eq!(launch.profile_name, "codex");
         assert_eq!(
@@ -1982,7 +2056,7 @@ mod tests {
         let mut pane = pane("fluent", "git-bash");
         pane.codex_thread_id = Some("019f7b81-e026-7d12-a013-25f4763f4bce".into());
 
-        let launch = pane.launch_spec();
+        let launch = pane.launch_spec(&Config::default());
 
         assert_eq!(launch.profile_name, "codex");
         assert_eq!(launch.command.command, "codex");
@@ -1991,6 +2065,147 @@ mod tests {
             ["resume", "019f7b81-e026-7d12-a013-25f4763f4bce"]
         );
         assert_eq!(launch.command.agent_kind, Some(AgentKind::Codex));
+    }
+
+    /// A shell the user ran Codex in comes back as a Codex pane launched the way
+    /// their `codex` profile launches one. Rebuilding it as a bare `codex resume`
+    /// would drop the sandbox and approval flags they configured, so the
+    /// conversation would return with less access than it had.
+    #[test]
+    fn a_recovered_codex_pane_keeps_the_configured_launch_flags() {
+        let mut config = Config::default();
+        config.profiles.insert(
+            "codex".into(),
+            Profile {
+                command: "/opt/codex/bin/codex".into(),
+                args: vec!["--dangerously-bypass-approvals-and-sandbox".into()],
+                title: Some("Codex".into()),
+                agent_kind: Some(AgentKind::Codex),
+            },
+        );
+        let mut pane = pane("fluent", "git-bash");
+        pane.codex_thread_id = Some("019f7b81-e026-7d12-a013-25f4763f4bce".into());
+
+        let launch = pane.launch_spec(&config);
+
+        assert_eq!(launch.profile_name, "codex");
+        assert_eq!(launch.command.command, "/opt/codex/bin/codex");
+        assert_eq!(
+            launch.command.args,
+            [
+                "--dangerously-bypass-approvals-and-sandbox",
+                "resume",
+                "019f7b81-e026-7d12-a013-25f4763f4bce",
+            ]
+        );
+    }
+
+    /// Snapshots written before the launch flags were kept store a bare
+    /// `codex resume <id>`. Resuming one has to rebuild it from the profile, or
+    /// the pane would come back sandboxed forever, once per resume.
+    #[test]
+    fn a_stripped_codex_command_is_rebuilt_from_the_profile() {
+        let thread_id = "019f7b81-e026-7d12-a013-25f4763f4bce";
+        let mut config = Config::default();
+        config.profiles.insert(
+            "codex".into(),
+            Profile {
+                command: "/opt/codex/bin/codex".into(),
+                args: vec!["--dangerously-bypass-approvals-and-sandbox".into()],
+                title: Some("Codex".into()),
+                agent_kind: Some(AgentKind::Codex),
+            },
+        );
+        let mut pane = pane("fluent", "codex");
+        pane.command.command = "codex".into();
+        pane.command.agent_kind = Some(AgentKind::Codex);
+        pane.command.args = vec!["resume".into(), thread_id.into()];
+        pane.codex_thread_id = Some(thread_id.into());
+
+        let launch = pane.launch_spec(&config);
+
+        assert_eq!(launch.command.command, "/opt/codex/bin/codex");
+        assert_eq!(
+            launch.command.args,
+            [
+                "--dangerously-bypass-approvals-and-sandbox",
+                "resume",
+                thread_id,
+            ]
+        );
+    }
+
+    /// A pane launched from a deliberately restricted Codex profile keeps that
+    /// profile's limits rather than inheriting whatever `codex` grants.
+    #[test]
+    fn a_stripped_codex_command_keeps_its_own_profile() {
+        let thread_id = "019f7b81-e026-7d12-a013-25f4763f4bce";
+        let mut config = Config::default();
+        config.profiles.insert(
+            "codex".into(),
+            Profile {
+                command: "codex".into(),
+                args: vec!["--dangerously-bypass-approvals-and-sandbox".into()],
+                title: Some("Codex".into()),
+                agent_kind: Some(AgentKind::Codex),
+            },
+        );
+        config.profiles.insert(
+            "codex-safe".into(),
+            Profile {
+                command: "codex".into(),
+                args: vec!["--sandbox".into(), "read-only".into()],
+                title: Some("Codex (read only)".into()),
+                agent_kind: Some(AgentKind::Codex),
+            },
+        );
+        let mut pane = pane("fluent", "codex-safe");
+        pane.command.command = "codex".into();
+        pane.command.agent_kind = Some(AgentKind::Codex);
+        pane.command.args = vec!["resume".into(), thread_id.into()];
+        pane.codex_thread_id = Some(thread_id.into());
+
+        let launch = pane.launch_spec(&config);
+
+        assert_eq!(launch.profile_name, "codex-safe");
+        assert_eq!(
+            launch.command.args,
+            ["--sandbox", "read-only", "resume", thread_id]
+        );
+    }
+
+    /// Resuming the same pane again must not stack a second `resume` onto the
+    /// command, or the thread id would stop being the one Codex opens.
+    #[test]
+    fn resuming_a_recovered_codex_pane_twice_keeps_one_resume() {
+        let thread_id = "019f7b81-e026-7d12-a013-25f4763f4bce";
+        let mut config = Config::default();
+        config.profiles.insert(
+            "codex".into(),
+            Profile {
+                command: "codex".into(),
+                args: vec!["--dangerously-bypass-approvals-and-sandbox".into()],
+                title: Some("Codex".into()),
+                agent_kind: Some(AgentKind::Codex),
+            },
+        );
+        let mut pane = pane("fluent", "git-bash");
+        pane.codex_thread_id = Some(thread_id.into());
+
+        let once = pane.launch_spec(&config);
+        pane.profile_name = once.profile_name.clone();
+        pane.command = once.command.clone();
+        let twice = pane.launch_spec(&config);
+
+        assert_eq!(twice.command.args, once.command.args);
+        assert_eq!(
+            twice.command.args,
+            [
+                "--dangerously-bypass-approvals-and-sandbox",
+                "resume",
+                thread_id
+            ]
+        );
     }
 
     #[test]
@@ -2025,7 +2240,8 @@ mod tests {
             agent_kind: Some(AgentKind::Codex),
         };
 
-        let (profile_name, restored) = codex_resume_profile("codex", &command, thread_id);
+        let (profile_name, restored) =
+            codex_resume_profile("codex", &command, thread_id, &Config::default());
         assert_eq!(profile_name, "codex");
         assert_eq!(restored.command, command.command);
         assert_eq!(restored.args, command.args);
@@ -2113,7 +2329,7 @@ mod tests {
         assert!(session.tabs[0].panes[0].host.is_some());
         assert_eq!(
             session.tabs[0]
-                .launch_plan()
+                .launch_plan(&Config::default())
                 .expect("tab launch plan")
                 .panes
                 .len(),
@@ -2407,7 +2623,8 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let plan = launch_plan_from_saved("test", grid(2, 3), &panes).expect("launch plan");
+        let plan = launch_plan_from_saved("test", grid(2, 3), &panes, &Config::default())
+            .expect("launch plan");
 
         assert_eq!(
             plan.grid,
@@ -2430,8 +2647,13 @@ mod tests {
         let mut second = pane("second", "git-bash");
         second.index = 1;
 
-        let plan = launch_plan_from_saved("test", grid(1, 3), &[third, first, second])
-            .expect("launch plan");
+        let plan = launch_plan_from_saved(
+            "test",
+            grid(1, 3),
+            &[third, first, second],
+            &Config::default(),
+        )
+        .expect("launch plan");
 
         assert_eq!(
             plan.panes
@@ -2703,7 +2925,7 @@ mod tests {
         pane.command.command = "claude".into();
         pane.claude_session_id = Some("019f7b81-0000-4000-8000-000000000000".into());
 
-        let launch = pane.launch_spec();
+        let launch = pane.launch_spec(&Config::default());
 
         assert_eq!(launch.command.command, "claude");
         assert!(launch.command.args.is_empty(), "{:?}", launch.command.args);
@@ -2836,7 +3058,10 @@ command = "codex"
         assert_eq!(session.active_tab, 0);
         assert_eq!(session.view, SavedView::default());
         assert!(session.panes[0].name.is_none());
-        let plan = session.active_grid().launch_plan().expect("launch plan");
+        let plan = session
+            .active_grid()
+            .launch_plan(&Config::default())
+            .expect("launch plan");
         assert_eq!(
             plan.grid,
             GridSize {
