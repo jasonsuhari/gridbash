@@ -11,7 +11,9 @@
 //! and the original window is left alone, running, for the user to close when
 //! they are ready.
 
-use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::path::Path;
+use std::path::PathBuf;
 
 /// A terminal window running outside this GridBash.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +43,12 @@ impl ExternalTerminal {
 }
 
 /// Window titles that mark a shell we know how to read a path out of.
+///
+/// Everything from here down reads MSYS window titles, which only exist on
+/// Windows. Off it there is nothing to enumerate and nothing to parse, so the
+/// module narrows to the type the interface still has to name and a `discover`
+/// that finds nothing.
+#[cfg(windows)]
 const SHELL_TITLE_PREFIXES: [&str; 5] = ["MINGW64:", "MINGW32:", "MSYS:", "MSYS2:", "CYGWIN:"];
 
 /// The working directory a shell window's title is reporting.
@@ -50,6 +58,7 @@ const SHELL_TITLE_PREFIXES: [&str; 5] = ["MINGW64:", "MINGW32:", "MSYS:", "MSYS2
 /// letter has to be put back. Titles that carry no path at all — a shell that
 /// has been retitled by a running program, say — resolve to nothing rather than
 /// to a guess.
+#[cfg(windows)]
 pub fn cwd_from_title(title: &str, home: Option<&Path>) -> Option<PathBuf> {
     let trimmed = title.trim();
     let body = SHELL_TITLE_PREFIXES
@@ -76,6 +85,7 @@ pub fn cwd_from_title(title: &str, home: Option<&Path>) -> Option<PathBuf> {
 }
 
 /// Turns the shell's idea of a path into one the OS can open.
+#[cfg(windows)]
 fn posix_to_windows(value: &str, home: Option<&Path>) -> Option<PathBuf> {
     // Already a Windows path, from a shell that reports them that way.
     if value.len() >= 2 && value.as_bytes()[1] == b':' {
@@ -118,11 +128,13 @@ fn posix_to_windows(value: &str, home: Option<&Path>) -> Option<PathBuf> {
 
 /// Keeps only windows whose folder still exists, so the picker never offers a
 /// path that would fail the moment it was chosen.
+#[cfg(windows)]
 fn resolve(pid: u32, title: String) -> ExternalTerminal {
     let cwd = cwd_from_title(&title, home_dir().as_deref()).filter(|path| path.is_dir());
     ExternalTerminal { pid, title, cwd }
 }
 
+#[cfg(windows)]
 fn home_dir() -> Option<PathBuf> {
     directories::BaseDirs::new().map(|dirs| dirs.home_dir().to_path_buf())
 }
@@ -203,6 +215,7 @@ pub fn discover() -> Vec<ExternalTerminal> {
 /// Deliberately narrow. Listing every console window on the desktop would put
 /// the user's editor and chat client in a picker that promises to open a shell
 /// where they are.
+#[cfg(windows)]
 fn looks_like_a_shell(title: &str) -> bool {
     let trimmed = title.trim();
     // `get` rather than a slice: window titles are arbitrary user text, and
@@ -219,6 +232,7 @@ fn looks_like_a_shell(title: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn reads_the_folder_out_of_a_git_bash_title() {
         let home = PathBuf::from("C:\\Users\\Jason");
@@ -251,6 +265,7 @@ mod tests {
 
     /// A window retitled by whatever is running in it must resolve to nothing
     /// rather than to a plausible-looking wrong folder.
+    #[cfg(windows)]
     #[test]
     fn a_title_without_a_path_resolves_to_nothing() {
         let home = PathBuf::from("C:\\Users\\Jason");
@@ -266,6 +281,7 @@ mod tests {
         assert_eq!(cwd("MINGW64:/usr/local"), None);
     }
 
+    #[cfg(windows)]
     #[test]
     fn only_shell_windows_are_offered() {
         assert!(looks_like_a_shell("MINGW64:/c/src"));
@@ -307,6 +323,14 @@ mod tests {
     #[test]
     fn discovery_never_panics() {
         let _ = discover();
+    }
+
+    /// Off Windows there is no window list to read, and the picker has to be
+    /// told that rather than shown an empty list it cannot explain.
+    #[cfg(not(windows))]
+    #[test]
+    fn discovery_finds_nothing_off_windows() {
+        assert!(discover().is_empty());
     }
 
     /// Prints what is actually on this desktop. Run with:
