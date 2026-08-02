@@ -76,6 +76,11 @@ pub struct Cli {
     /// Initial layout strategy.
     #[arg(long, value_enum, default_value_t = GridMode::Grid)]
     pub layout: GridMode,
+
+    /// Reopen the workspaces an interrupted GridBash left behind instead of
+    /// starting an empty one.
+    #[arg(long)]
+    pub recover: bool,
 }
 
 impl Cli {
@@ -83,7 +88,23 @@ impl Cli {
         !self.no_agent_api
     }
 
-    pub fn allows_automatic_recovery(&self) -> bool {
+    /// Whether this launch should adopt the workspaces of a GridBash that died
+    /// without cleaning up after itself.
+    ///
+    /// This used to happen on every bare `gridbash`, which meant one crash made
+    /// every later launch reopen the same workspace — the command for "give me a
+    /// fresh grid" quietly stopped meaning that. Recovery is worth keeping, but
+    /// it has to be asked for; the crashed sessions are still listed by
+    /// `gridbash resume` either way, and a plain launch says so when there are
+    /// any.
+    pub fn wants_interrupted_recovery(&self) -> bool {
+        self.recover && self.is_plain_launch()
+    }
+
+    /// A launch that named nothing: no grid, no profile, no directory, no mode.
+    /// Anything else is a deliberate description of the workspace to build, and
+    /// must not be answered with somebody else's.
+    pub fn is_plain_launch(&self) -> bool {
         self.command.is_none()
             && self.grid.is_none()
             && self.count.is_none()
@@ -327,24 +348,36 @@ mod tests {
         assert!(cli.command.is_none());
         assert_eq!(cli.grid.as_deref(), Some("2x3"));
         assert_eq!(cli.profile.as_deref(), Some("git-bash"));
-        assert!(!cli.allows_automatic_recovery());
+        assert!(!cli.is_plain_launch());
     }
 
+    /// A bare `gridbash` means "give me a new workspace". It stopped meaning
+    /// that once a single crash left a session behind, because every launch
+    /// afterwards silently reopened it.
     #[test]
-    fn automatic_recovery_only_applies_to_plain_launches() {
+    fn a_plain_launch_starts_fresh_unless_recovery_is_asked_for() {
         let plain = Cli::parse_from(["gridbash"]);
         assert!(plain.agent_control_enabled());
-        assert!(plain.allows_automatic_recovery());
+        assert!(plain.is_plain_launch());
+        assert!(!plain.wants_interrupted_recovery());
+
+        let recover = Cli::parse_from(["gridbash", "--recover"]);
+        assert!(recover.wants_interrupted_recovery());
+
+        // Recovery answers "reopen what was there", so it cannot be combined
+        // with a launch that describes a different workspace.
+        let described = Cli::parse_from(["gridbash", "--recover", "--worktrees"]);
+        assert!(!described.wants_interrupted_recovery());
 
         let worktrees = Cli::parse_from(["gridbash", "--worktrees"]);
-        assert!(!worktrees.allows_automatic_recovery());
+        assert!(!worktrees.is_plain_launch());
 
         let agent_api = Cli::parse_from(["gridbash", "--agent-api"]);
-        assert!(!agent_api.allows_automatic_recovery());
+        assert!(!agent_api.is_plain_launch());
 
         let no_agent_api = Cli::parse_from(["gridbash", "--no-agent-api"]);
         assert!(!no_agent_api.agent_control_enabled());
-        assert!(!no_agent_api.allows_automatic_recovery());
+        assert!(!no_agent_api.is_plain_launch());
 
         assert!(
             Cli::try_parse_from(["gridbash", "--no-agent-api", "--agent-api-port", "4321"])

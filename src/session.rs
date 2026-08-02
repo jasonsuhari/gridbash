@@ -1325,6 +1325,31 @@ pub fn claim_interrupted_recovery() -> Result<Option<InterruptedRecovery>> {
     with_session_state_lock(claim_interrupted_recovery_locked)
 }
 
+/// How long an interrupted session stays worth mentioning on a plain launch.
+///
+/// Nothing clears these records any more now that a plain launch leaves them
+/// alone, so without a window the notice would only ever count upwards — one
+/// crash a month ago would still be reported today, next to a fresh one.
+const RECOVERY_NOTICE_WINDOW_SECS: u64 = 24 * 60 * 60;
+
+/// How many saved sessions were recently left running by a GridBash that is
+/// gone.
+///
+/// Unlike `claim_interrupted_recovery` this takes nothing: it exists so a plain
+/// launch can mention that the workspaces are still there without adopting them.
+/// Older ones are still reachable through `gridbash resume`.
+pub fn interrupted_session_count() -> Result<usize> {
+    with_session_state_lock(|| {
+        let cutoff = now_seconds().saturating_sub(RECOVERY_NOTICE_WINDOW_SECS);
+        Ok(load_recent_sessions()?
+            .iter()
+            .filter(|record| {
+                is_interrupted_agent_session(record) && record.session.updated_at >= cutoff
+            })
+            .count())
+    })
+}
+
 pub fn complete_interrupted_recovery(claim: &InterruptedRecoveryClaim) -> Result<()> {
     with_session_state_lock(|| {
         for source in &claim.sources {

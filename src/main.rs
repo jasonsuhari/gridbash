@@ -1,4 +1,5 @@
 mod actions;
+mod adopt;
 mod app;
 mod auth;
 mod cli;
@@ -37,7 +38,7 @@ use crate::{
     cli::{Cli, Command},
     config::Config,
     profiles::{find_profile, profile_diagnostics},
-    session::{claim_interrupted_recovery, select_resume_session},
+    session::{claim_interrupted_recovery, interrupted_session_count, select_resume_session},
 };
 
 fn main() -> Result<()> {
@@ -145,7 +146,7 @@ fn run(cli: Cli) -> Result<()> {
         return app.run();
     }
 
-    if cli.allows_automatic_recovery()
+    if cli.wants_interrupted_recovery()
         && let Some(recovery) = claim_interrupted_recovery()?
     {
         let mut app = App::recover_interrupted(
@@ -158,7 +159,27 @@ fn run(cli: Cli) -> Result<()> {
         return app.run();
     }
 
+    // A fresh grid that silently strands a crashed workspace is worse than
+    // either outcome on its own, so the new session says what is still there and
+    // how to get it back. Failing to read the session directory is not a reason
+    // to refuse to start.
+    let notice = cli
+        .is_plain_launch()
+        .then(|| interrupted_session_count().unwrap_or(0))
+        .filter(|count| *count > 0)
+        .map(|count| {
+            format!(
+                "{count} interrupted workspace{} can be reopened with `gridbash --recover`",
+                if count == 1 { "" } else { "s" }
+            )
+        });
+
     let mut app = App::new(cli, config)?;
+    // Nothing else in the interface would explain why every shortcut appears to
+    // do nothing, so the leader is said out loud on the platforms that need it.
+    if let Some(notice) = notice.or_else(|| app.leader_hint()) {
+        app.set_status(notice);
+    }
     app.run()
 }
 

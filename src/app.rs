@@ -32,6 +32,7 @@ use vt100::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 
 use crate::{
     actions::{fuzzy_match_score, palette_actions, palette_label},
+    adopt::{self, ExternalTerminal},
     auth::{self, AgentKind, AuthProfile},
     cli::{Cli, GridMode},
     composer::{Composer, GridPicker, GridPickerAction},
@@ -46,7 +47,7 @@ use crate::{
     copy_mode::{CopyMode, CopyModeView},
     diagnostics,
     image_preview::{self, ImagePreview},
-    keybindings::{Action, KeyBindings, is_help_recovery, is_quit_recovery},
+    keybindings::{Action, KeyBindings, is_help_recovery, is_quit_recovery, with_leader_alt},
     layout::{GridLayout, GridSize, PaneId, pane_at},
     manager::{self, ActivitySummary, AssistantReply, ManagerCommand, ManagerDecision, PaneUpdate},
     output_capture::{self, OutputLogs, PaneLogKey},
@@ -61,7 +62,7 @@ use crate::{
         SessionRecorder, claude_session_in_command, complete_interrupted_recovery,
         latest_claude_session, pin_claude_session,
     },
-    setup::{LaunchPlan, PaneLaunchSpec, folder_display_name},
+    setup::{LaunchPlan, PaneLaunchSpec, folder_display_name, git_worktree_name},
     ui,
     usage::{self, UsageEvent, UsageTarget},
     voice::{VoiceInput, VoiceOutcome, VoiceStart},
@@ -99,7 +100,19 @@ const PANE_GOAL_RETRY_DELAY: Duration = Duration::from_secs(30);
 const PANE_GOAL_MAX_FAILURES: u8 = 5;
 const ACTIVITY_SUMMARY_OUTPUT_MAX_BYTES: usize = 12_000;
 const ACTIVITY_SUMMARY_QUIET_AFTER: Duration = Duration::from_secs(3);
-const ACTIVITY_SUMMARY_COOLDOWN: Duration = Duration::from_secs(30);
+/// How long a pane keeps its cached summary before the summariser is allowed to
+/// spend another request on it.
+///
+/// Every pane in the active grid batches into one call, so this is very nearly
+/// the whole cost of the feature: at three minutes a nine-pane grid asks the API
+/// twenty times an hour. The refresh control exists for the moments that is too
+/// slow, which is what lets the automatic interval be this relaxed.
+const ACTIVITY_SUMMARY_COOLDOWN: Duration = Duration::from_secs(3 * 60);
+/// Backoff after a failed request, doubling per consecutive failure.
+///
+/// Kept separate from the cooldown so that slowing the automatic interval does
+/// not also blunt the backoff into a single flat step at the ceiling.
+const ACTIVITY_SUMMARY_RETRY_BASE: Duration = Duration::from_secs(30);
 const ACTIVITY_SUMMARY_MAX_RETRY_DELAY: Duration = Duration::from_secs(5 * 60);
 const ASSISTANT_CONTEXT_MAX_BYTES: usize = 24_000;
 const ASSISTANT_HISTORY_MAX_BYTES: usize = 8_000;
@@ -183,12 +196,15 @@ pub struct App {
     image_overlay: Option<ImagePreview>,
     grid_resizer: Option<GridPicker>,
     help_open: bool,
+    /// The leader key was pressed and the next key is a shortcut, not input.
+    leader_pending: bool,
     quit_confirmation_pending: bool,
     close_grid_confirmation_pending: bool,
     settings: SettingsState,
     rename: RenamePaneState,
     tab_rename: RenameTabState,
     previous_panes: PreviousPanesState,
+    adopt_picker: AdoptPickerState,
     background_jobs: Vec<BackgroundJob>,
     background_picker: BackgroundPickerState,
     port_inspector: PortInspectorState,
@@ -209,6 +225,7 @@ pub struct App {
     tab_rects: Vec<(usize, Rect)>,
     previous_panes_button: Option<Rect>,
     previous_pane_rows: Vec<(usize, Rect)>,
+    summary_refresh_button: Option<Rect>,
     pane_settings_button: Option<Rect>,
     pane_settings_rename_button: Option<Rect>,
     pane_settings_reload_button: Option<Rect>,
@@ -451,12 +468,69 @@ pub struct TabLabel {
     pub exited: bool,
 }
 
-/// What the status bar prints in the middle: the focused pane, and the
-/// summariser's one-line account of what it is doing.
+/// The picker that re-roots a pane at an outside terminal's folder.
+///
+/// The target pane is captured when the picker opens rather than read at the
+/// moment of confirmation: the list is the thing with the keyboard, and a pane
+/// should never be replaced because focus drifted while the user was reading.
+#[derive(Debug, Clone, Default)]
+struct AdoptPickerState {
+    open: bool,
+    cursor: usize,
+    target: usize,
+    terminals: Vec<ExternalTerminal>,
+    /// The second half of "ask first": the row is chosen, and the picker is
+    /// waiting for the user to agree to close what is in the pane now.
+    confirming: bool,
+}
+
+impl AdoptPickerState {
+    fn selected(&self) -> Option<&ExternalTerminal> {
+        self.terminals.get(self.cursor)
+    }
+
+    fn close(&mut self) {
+        self.open = false;
+        self.confirming = false;
+        self.terminals.clear();
+    }
+}
+
+/// One outside terminal, as the picker draws it.
+#[derive(Debug, Clone)]
+pub struct AdoptTerminalRow {
+    /// The folder, or the raw window title when its folder could not be read.
+    pub label: String,
+    pub pid: u32,
+    pub adoptable: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AdoptTerminalView {
+    pub cursor: usize,
+    pub target_label: String,
+    pub rows: Vec<AdoptTerminalRow>,
+    pub confirming: bool,
+}
+
+/// What the status bar prints in the middle: the focused pane, the summariser's
+/// one-line account of what it is doing, and how long that account is cached
+/// for.
+///
+/// The countdown is carried as a `Duration` rather than a formatted string so
+/// the bar can decide how much of it fits, and as a plain value rather than an
+/// `Instant` so the bar stays renderable without a live `App`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FocusedPaneSummary {
     pub title: String,
     pub detail: String,
+    /// Time left on the cached summary. `None` once it is due for a refresh.
+    pub refresh_in: Option<Duration>,
+    /// A request for this pane is in flight right now.
+    pub refreshing: bool,
+    /// Whether refreshing is possible at all — false when summaries are off,
+    /// unconfigured, or suspended by a running goal.
+    pub refreshable: bool,
 }
 
 impl FocusedPaneSummary {
@@ -471,6 +545,15 @@ enum KeyOutcome {
     Render,
     AuthLogin(AuthProfile),
     Quit,
+}
+
+/// What reading the leader key left for the rest of key handling to do.
+enum LeaderOutcome {
+    /// The leader consumed the press; nothing else looks at it.
+    Handled(KeyOutcome),
+    /// The key to carry on with, which is the shortcut the leader resolved to
+    /// when one was pending.
+    Key(KeyEvent),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2942,12 +3025,14 @@ impl App {
             image_overlay: None,
             grid_resizer: None,
             help_open: false,
+            leader_pending: false,
             quit_confirmation_pending: false,
             close_grid_confirmation_pending: false,
             settings: init.settings,
             rename: RenamePaneState::default(),
             tab_rename: RenameTabState::default(),
             previous_panes: PreviousPanesState::default(),
+            adopt_picker: AdoptPickerState::default(),
             background_jobs,
             background_picker: BackgroundPickerState::default(),
             port_inspector: PortInspectorState::default(),
@@ -2968,6 +3053,7 @@ impl App {
             tab_rects: Vec::new(),
             previous_panes_button: None,
             previous_pane_rows: Vec::new(),
+            summary_refresh_button: None,
             pane_settings_button: None,
             pane_settings_rename_button: None,
             pane_settings_reload_button: None,
@@ -3718,6 +3804,7 @@ impl App {
                 self.tab_rects = draw_state.tab_rects;
                 self.previous_panes_button = draw_state.previous_panes_button;
                 self.previous_pane_rows = draw_state.previous_pane_rows;
+                self.summary_refresh_button = draw_state.summary_refresh_button;
                 self.pane_settings_button = draw_state.pane_settings_button;
                 self.pane_settings_rename_button = draw_state.pane_settings_rename_button;
                 self.pane_settings_reload_button = draw_state.pane_settings_reload_button;
@@ -6086,7 +6173,65 @@ impl App {
         changed
     }
 
+    /// Reads the leader key, which stands in for Alt.
+    ///
+    /// A terminal that will not send Alt — every default macOS one, where
+    /// Option composes characters instead — leaves the whole shortcut table
+    /// unreachable. Pressing the leader first and the shortcut key second gets
+    /// there without holding a modifier the terminal refuses to pass on.
+    fn resolve_leader(&mut self, key: KeyEvent) -> LeaderOutcome {
+        if !self.leader_pending {
+            if !self.keybindings.is_leader(&key) {
+                return LeaderOutcome::Key(key);
+            }
+            self.leader_pending = true;
+            if let Some(leader) = self.keybindings.leader_label() {
+                self.status = format!("{leader} pressed — now press a shortcut key, or Esc");
+            }
+            return LeaderOutcome::Handled(KeyOutcome::Render);
+        }
+
+        self.leader_pending = false;
+        // Pressing it twice sends it on, so the leader never permanently costs
+        // the panes a key they might need.
+        if self.keybindings.is_leader(&key) {
+            self.status.clear();
+            return LeaderOutcome::Key(key);
+        }
+        if key.code == KeyCode::Esc {
+            self.status.clear();
+            return LeaderOutcome::Handled(KeyOutcome::Render);
+        }
+
+        let shortcut = with_leader_alt(&key);
+        if self.keybindings.action_for(&shortcut).is_some() || is_quit_recovery(&shortcut) {
+            self.status.clear();
+            return LeaderOutcome::Key(shortcut);
+        }
+
+        // Passing an unrecognized key through would type it into the pane a beat
+        // after the user meant it as a shortcut.
+        self.status = "that key is not a shortcut — F1 lists them".into();
+        LeaderOutcome::Handled(KeyOutcome::Render)
+    }
+
+    /// What to tell a first-time user whose terminal will not send Alt.
+    pub fn leader_hint(&self) -> Option<String> {
+        cfg!(target_os = "macos")
+            .then(|| self.keybindings.leader_label())
+            .flatten()
+            .map(|leader| {
+                format!(
+                    "macOS terminals send Option as a character, not Alt: press {leader} then the shortcut key, or turn on Option as Meta"
+                )
+            })
+    }
+
     fn handle_key(&mut self, terminal: &mut Tui, key: KeyEvent) -> Result<KeyOutcome> {
+        let key = match self.resolve_leader(key) {
+            LeaderOutcome::Handled(outcome) => return Ok(outcome),
+            LeaderOutcome::Key(key) => key,
+        };
         let action = self.keybindings.action_for(&key);
         if self.close_grid_confirmation_pending {
             return self.handle_close_grid_confirmation_key(key);
@@ -6180,6 +6325,11 @@ impl App {
 
         if self.background_picker.open {
             let outcome = self.handle_background_jobs_key(key)?;
+            return Ok(render_if_selection_cleared(outcome, selection_cleared));
+        }
+
+        if self.adopt_picker.open {
+            let outcome = self.handle_adopt_terminal_key(key)?;
             return Ok(render_if_selection_cleared(outcome, selection_cleared));
         }
 
@@ -6798,6 +6948,9 @@ impl App {
             Action::RenamePane => {
                 self.begin_rename();
             }
+            Action::AdoptTerminal => {
+                self.open_adopt_terminal();
+            }
         }
         Ok(())
     }
@@ -7142,6 +7295,171 @@ impl App {
                 self.status = "tab name cannot be empty".into();
             }
         }
+    }
+
+    /// Offers the outside shell windows this desktop has open.
+    ///
+    /// The window itself stays where it is — a running console cannot be moved
+    /// into a pane — so what this adopts is the folder it is sitting in.
+    fn open_adopt_terminal(&mut self) {
+        let Some(target) = self.focused_pane() else {
+            self.status = "focus a pane to adopt a terminal into".into();
+            return;
+        };
+
+        let terminals = adopt::discover();
+        if terminals.is_empty() {
+            // Off Windows there is nothing to enumerate rather than nothing
+            // open, and a user hunting for a window they can see deserves to be
+            // told which of the two it is.
+            self.status = if cfg!(windows) {
+                "no outside Git Bash windows found".into()
+            } else {
+                "adopting an outside terminal is Windows-only".to_string()
+            };
+            return;
+        }
+
+        self.pane_settings.close();
+        self.previous_panes.close();
+        self.adopt_picker = AdoptPickerState {
+            open: true,
+            cursor: terminals
+                .iter()
+                .position(ExternalTerminal::is_adoptable)
+                .unwrap_or(0),
+            target,
+            terminals,
+            confirming: false,
+        };
+        self.status = format!("adopt a terminal into pane {}", target + 1);
+    }
+
+    fn close_adopt_terminal(&mut self) {
+        self.adopt_picker.close();
+        self.status = "adopt cancelled".into();
+    }
+
+    fn handle_adopt_terminal_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return Ok(KeyOutcome::Quit);
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                // Backing out of the confirmation returns to the list rather
+                // than throwing away the whole choice.
+                if self.adopt_picker.confirming {
+                    self.adopt_picker.confirming = false;
+                } else {
+                    self.close_adopt_terminal();
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') if !self.adopt_picker.confirming => {
+                self.adopt_picker.cursor = self.adopt_picker.cursor.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if !self.adopt_picker.confirming => {
+                let last = self.adopt_picker.terminals.len().saturating_sub(1);
+                self.adopt_picker.cursor = (self.adopt_picker.cursor + 1).min(last);
+            }
+            KeyCode::Enter => {
+                let Some(selected) = self.adopt_picker.selected().cloned() else {
+                    return Ok(KeyOutcome::Render);
+                };
+                if !selected.is_adoptable() {
+                    self.status = "that window's title does not say where it is".into();
+                    return Ok(KeyOutcome::Render);
+                }
+                if !self.adopt_picker.confirming {
+                    self.adopt_picker.confirming = true;
+                    return Ok(KeyOutcome::Render);
+                }
+
+                let target = self.adopt_picker.target;
+                let cwd = selected.cwd.clone().unwrap_or_default();
+                self.adopt_picker.close();
+                if let Err(error) = self.adopt_terminal_into_pane(target, cwd) {
+                    self.status = format!("adopt failed: {error:#}");
+                }
+            }
+            _ => return Ok(KeyOutcome::Continue),
+        }
+        Ok(KeyOutcome::Render)
+    }
+
+    /// Replaces a pane with a shell rooted where the chosen window is.
+    ///
+    /// The outside window keeps its process and is left running; nothing is done
+    /// to it. Only the pane changes.
+    fn adopt_terminal_into_pane(&mut self, pane_index: usize, cwd: PathBuf) -> Result<()> {
+        if pane_index >= self.panes.len() {
+            return Err(anyhow!("pane {} is no longer available", pane_index + 1));
+        }
+        if !cwd.is_dir() {
+            return Err(anyhow!("{} is not a folder any more", cwd.display()));
+        }
+
+        let mut spec = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(pane_index))
+            .cloned()
+            .ok_or_else(|| anyhow!("pane {} has no launch settings", pane_index + 1))?;
+        // The pane moves house, so everything that described the old address
+        // moves with it — including the managed worktree, which belonged to the
+        // folder being left behind.
+        spec.folder_name = folder_display_name(&cwd);
+        spec.worktree_name = git_worktree_name(&cwd);
+        spec.cwd = cwd.clone();
+
+        let mut pane = self.spawn_pane_instance(&spec, pane_index)?;
+        if let Err(error) = retire_pane(&mut self.panes[pane_index]) {
+            let cleanup_error = retire_pane(&mut pane).err();
+            return Err(match cleanup_error {
+                Some(cleanup_error) => error.context(format!(
+                    "replacement pane cleanup also failed: {cleanup_error:#}"
+                )),
+                None => error,
+            });
+        }
+
+        self.panes[pane_index] = pane;
+        if let Some(plan) = &mut self.launch_plan {
+            plan.panes[pane_index] = spec;
+        }
+        if let Some(idle) = self.pane_idle.get_mut(pane_index) {
+            *idle = PaneIdleState::new(Instant::now());
+        }
+        self.sleeping.remove(&pane_index);
+        self.start_usage_for_active_tab();
+        self.save_session_snapshot()?;
+        self.status = format!("pane {} now sits in {}", pane_index + 1, cwd.display());
+        Ok(())
+    }
+
+    pub fn adopt_terminal_view(&self) -> Option<AdoptTerminalView> {
+        self.adopt_picker.open.then(|| AdoptTerminalView {
+            cursor: self
+                .adopt_picker
+                .cursor
+                .min(self.adopt_picker.terminals.len().saturating_sub(1)),
+            target_label: format!(
+                "{} {}",
+                self.adopt_picker.target + 1,
+                self.pane_label(self.adopt_picker.target)
+            ),
+            rows: self
+                .adopt_picker
+                .terminals
+                .iter()
+                .map(|terminal| AdoptTerminalRow {
+                    label: terminal.label(),
+                    pid: terminal.pid,
+                    adoptable: terminal.is_adoptable(),
+                })
+                .collect(),
+            confirming: self.adopt_picker.confirming,
+        })
     }
 
     fn open_previous_panes(&mut self) {
@@ -8060,6 +8378,27 @@ impl App {
             self.status = format!("pane {} is no longer available", index + 1);
             return;
         }
+        self.refresh_activity_summary(index);
+    }
+
+    /// Forces the focused pane's summary to refresh now, skipping the cache.
+    ///
+    /// The automatic interval is deliberately slow, so the one thing the user
+    /// must always be able to do is ask for an answer about the pane in front of
+    /// them without waiting for it.
+    pub fn refresh_focused_pane_summary(&mut self) {
+        let Some(index) = self.focused_pane() else {
+            self.status = "focus a pane to refresh its AI summary".into();
+            return;
+        };
+        self.refresh_activity_summary(index);
+    }
+
+    fn refresh_activity_summary(&mut self, index: usize) {
+        if index >= self.panes.len() {
+            self.status = format!("pane {} is no longer available", index + 1);
+            return;
+        }
         if !self.config.manager.activity_summaries {
             self.status = "enable AI activity summaries in Settings > Manager".into();
             return;
@@ -8095,8 +8434,13 @@ impl App {
         state.force_refresh = true;
         state.dirty = true;
         state.dirty_since = Some(Instant::now());
-        let history_summary = self.pane_history_summary(index);
-        self.pane_settings.refresh_history(history_summary);
+        // The overlay only wants the new history when it is the thing on screen
+        // showing that pane; the status bar's refresh control reaches this same
+        // path with the overlay closed.
+        if self.pane_settings.open && self.pane_settings.pane_index == index {
+            let history_summary = self.pane_history_summary(index);
+            self.pane_settings.refresh_history(history_summary);
+        }
         self.status = if pending_input {
             format!(
                 "queued AI summary for pane {}; waiting for pending input",
@@ -8651,6 +8995,14 @@ impl App {
 
         if self.mouse_enabled
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+            && self.summary_refresh_button_at(mouse.column, mouse.row)
+        {
+            self.refresh_focused_pane_summary();
+            return Ok(true);
+        }
+
+        if self.mouse_enabled
+            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && self.previous_panes_button_at(mouse.column, mouse.row)
         {
             if self.previous_panes.open {
@@ -8907,6 +9259,11 @@ impl App {
 
     fn previous_panes_button_at(&self, x: u16, y: u16) -> bool {
         self.previous_panes_button
+            .is_some_and(|rect| rect_contains(rect, x, y))
+    }
+
+    fn summary_refresh_button_at(&self, x: u16, y: u16) -> bool {
+        self.summary_refresh_button
             .is_some_and(|rect| rect_contains(rect, x, y))
     }
 
@@ -10236,6 +10593,12 @@ impl App {
         &self.status
     }
 
+    /// Seeds the status bar before the first frame, for things the launcher
+    /// knows and the app does not.
+    pub fn set_status(&mut self, status: impl Into<String>) {
+        self.status = status.into();
+    }
+
     pub fn quit_confirmation_view(&self) -> Option<QuitConfirmationView> {
         self.quit_confirmation_pending.then_some(())?;
         Some(QuitConfirmationView {
@@ -10789,6 +11152,7 @@ impl App {
             .get(&pane.id())
             .filter(|state| state.generation == pane.generation());
 
+        let suspended = self.manager_goal.is_some();
         let detail = if let Some(goal) = self.manager_goal.as_ref() {
             // A running goal owns the summariser, and its objective is the better
             // answer to "what is this pane doing" anyway.
@@ -10809,9 +11173,22 @@ impl App {
             "summarizing…".into()
         };
 
+        let refreshable = !suspended
+            && self.config.manager.activity_summaries
+            && self.config.manager.is_configured()
+            && !pane.exited
+            && !self.sleeping.contains(&index);
+
         FocusedPaneSummary {
             title: format!("{} {}", index + 1, self.pane_label(index)),
             detail,
+            // The countdown only means anything while the cache it belongs to is
+            // the thing on screen.
+            refresh_in: refreshable
+                .then(|| activity_summary_refresh_in(state, Instant::now()))
+                .flatten(),
+            refreshing: state.is_some_and(|state| state.in_flight),
+            refreshable,
         }
     }
 
@@ -12037,11 +12414,21 @@ fn format_activity_summary_context(panes: &[ActivitySummaryContextPane]) -> Stri
 
 fn activity_summary_retry_delay(failure_count: u8) -> Duration {
     let exponent = failure_count.saturating_sub(1).min(8) as u32;
-    let seconds = ACTIVITY_SUMMARY_COOLDOWN
+    let seconds = ACTIVITY_SUMMARY_RETRY_BASE
         .as_secs()
         .saturating_mul(1_u64 << exponent)
         .min(ACTIVITY_SUMMARY_MAX_RETRY_DELAY.as_secs());
     Duration::from_secs(seconds)
+}
+
+/// How long the pane's cached summary has left before the summariser may spend
+/// another request on it. `None` means the cache is already stale.
+fn activity_summary_refresh_in(
+    state: Option<&ActivitySummaryState>,
+    now: Instant,
+) -> Option<Duration> {
+    let last_request = state?.last_request_at?;
+    ACTIVITY_SUMMARY_COOLDOWN.checked_sub(now.saturating_duration_since(last_request))
 }
 
 fn activity_summary_request_eligible(
@@ -13845,6 +14232,62 @@ mod tests {
         assert_eq!(app.active_grid_id, 42);
         assert!(app.assistant.open);
         assert_eq!(app.command_line.cwd, PathBuf::from("C:\\grid-one"));
+    }
+
+    /// On a terminal that never sends Alt — every stock macOS one — the leader
+    /// is the only way in to the shortcut table.
+    #[test]
+    fn the_leader_key_reaches_shortcuts_without_alt() {
+        let cli = Cli::parse_from(["gridbash"]);
+        let mut app = App::new(cli, Config::default()).expect("app");
+        app.keybindings = KeyBindings::from_overrides(&BTreeMap::from([(
+            "leader".to_string(),
+            "ctrl+g".to_string(),
+        )]))
+        .expect("leader");
+
+        let leader = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        let press =
+            |app: &mut App, key| matches!(app.resolve_leader(key), LeaderOutcome::Handled(_));
+
+        // The leader itself is swallowed, and arms the key after it.
+        assert!(press(&mut app, leader));
+        assert!(app.leader_pending);
+
+        // That key then resolves as though Alt had been held.
+        let resolved =
+            match app.resolve_leader(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)) {
+                LeaderOutcome::Key(key) => key,
+                LeaderOutcome::Handled(_) => panic!("the leader swallowed a bound shortcut"),
+            };
+        assert_eq!(
+            app.keybindings.action_for(&resolved),
+            Some(Action::CommandLine)
+        );
+        assert!(!app.leader_pending);
+
+        // Pressed twice it goes to the pane, so the leader costs it nothing.
+        assert!(press(&mut app, leader));
+        assert!(matches!(
+            app.resolve_leader(leader),
+            LeaderOutcome::Key(key) if key == leader
+        ));
+
+        // Esc backs out.
+        assert!(press(&mut app, leader));
+        assert!(press(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
+        ));
+        assert!(!app.leader_pending);
+
+        // An unbound key is reported, never typed into the pane a beat late.
+        assert!(press(&mut app, leader));
+        assert!(press(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE)
+        ));
+        assert!(app.status.contains("not a shortcut"), "{}", app.status);
     }
 
     #[test]

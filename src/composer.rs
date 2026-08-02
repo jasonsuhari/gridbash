@@ -96,7 +96,7 @@ pub struct Composer {
     default_name: String,
     rows: usize,
     columns: usize,
-    active: Field,
+    step: Step,
     suggestions: Suggestions,
     profile_name: String,
     profile_title: String,
@@ -112,20 +112,52 @@ pub struct Composer {
     shape_changed: Instant,
 }
 
+/// One question at a time.
+///
+/// The four inputs used to sit on screen together, reached by walking a cursor
+/// up and down through them. That asks the user to read the whole form before
+/// answering any of it, and it spends the arrow keys — the obvious way to size a
+/// grid — on moving between fields instead. Each step now owns the arrows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Field {
-    Rows,
-    Columns,
+pub enum Step {
+    Shape,
     Name,
     Project,
 }
 
-impl Field {
-    pub const ALL: [Self; 4] = [Self::Rows, Self::Columns, Self::Name, Self::Project];
+impl Step {
+    pub const ALL: [Self; 3] = [Self::Shape, Self::Name, Self::Project];
 
-    fn is_text(self) -> bool {
-        matches!(self, Self::Name | Self::Project)
+    fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|step| *step == self)
+            .unwrap_or_default()
     }
+
+    fn offset(self, delta: isize) -> Option<Self> {
+        let next = self.index() as isize + delta;
+        (next >= 0).then(|| Self::ALL.get(next as usize).copied())?
+    }
+
+    fn is_last(self) -> bool {
+        self.index() + 1 == Self::ALL.len()
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Shape => "SHAPE",
+            Self::Name => "NAME",
+            Self::Project => "PROJECT",
+        }
+    }
+}
+
+/// Which side of the grid a key is sizing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    Rows,
+    Columns,
 }
 
 #[derive(Debug, Clone)]
@@ -203,7 +235,7 @@ impl Composer {
             base_dir,
             rows: DEFAULT_ROWS,
             columns: DEFAULT_COLUMNS,
-            active: Field::Rows,
+            step: Step::Shape,
             suggestions: Suggestions::default(),
             profile_title: profile.display_name(&profile_name),
             profile_name,
@@ -256,8 +288,23 @@ impl Composer {
 
     // ----------------------------------------------------------------- input
 
+    fn toggle_worktrees(&mut self) -> ComposerEvent {
+        self.worktrees_enabled = !self.worktrees_enabled;
+        self.notice = None;
+        ComposerEvent::Continue
+    }
+
     fn handle_key(&mut self, key: KeyEvent, config: &Config) -> ComposerEvent {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+        // Enter answers the question in front of the user: it moves on, and only
+        // launches once there is nothing left to ask.
         if is_enter_key(key) {
+            if !self.step.is_last() {
+                self.move_step(1);
+                return ComposerEvent::Continue;
+            }
             return match self.build_outcome(config) {
                 Ok(outcome) => ComposerEvent::Launch(Box::new(outcome)),
                 Err(error) => {
@@ -270,50 +317,62 @@ impl Composer {
             };
         }
 
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-
         match key.code {
             KeyCode::Esc => return ComposerEvent::Quit,
             KeyCode::Char('c') if ctrl => return ComposerEvent::Quit,
-            KeyCode::Char('w') if alt => {
-                self.worktrees_enabled = !self.worktrees_enabled;
-                self.notice = None;
-                return ComposerEvent::Continue;
-            }
-            KeyCode::Tab if self.active == Field::Project => {
+            KeyCode::Char('w') if alt => return self.toggle_worktrees(),
+            // The wizard runs before the grid does, so it has no leader key to
+            // fall back on. A stock macOS terminal never sends Alt, and F2 is
+            // the one key that reaches this toggle on every platform.
+            KeyCode::F(2) => return self.toggle_worktrees(),
+            // Tab still completes a folder, because that is what it does in every
+            // shell. It only walks the wizard where there is nothing to complete.
+            KeyCode::Tab if self.step == Step::Project => {
                 self.complete_project();
                 return ComposerEvent::Continue;
             }
-            KeyCode::Tab | KeyCode::Down => {
-                self.move_field(1);
+            KeyCode::Tab => {
+                self.move_step(1);
                 return ComposerEvent::Continue;
             }
-            KeyCode::BackTab | KeyCode::Up => {
-                self.move_field(-1);
+            KeyCode::BackTab => {
+                self.move_step(-1);
                 return ComposerEvent::Continue;
             }
             _ => {}
         }
 
-        match self.active {
-            Field::Rows | Field::Columns => self.handle_shape_key(key),
-            Field::Name => self.handle_text_key(key, ctrl, TextTarget::Name),
-            Field::Project => self.handle_text_key(key, ctrl, TextTarget::Project),
+        match self.step {
+            Step::Shape => self.handle_shape_key(key),
+            Step::Name => self.handle_text_key(key, ctrl, TextTarget::Name),
+            Step::Project => self.handle_text_key(key, ctrl, TextTarget::Project),
         }
         ComposerEvent::Continue
     }
 
+    /// The shape step owns all four arrows, mapped to the thing they point at:
+    /// up and down make the grid taller and shorter, left and right make it
+    /// wider and narrower. Nothing has to be selected first.
     fn handle_shape_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Left | KeyCode::Char('-') | KeyCode::Char('_') => self.adjust_shape(-1),
-            KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => self.adjust_shape(1),
-            KeyCode::Home => self.set_shape(1),
-            KeyCode::End => self.set_shape(MAX_DIMENSION),
+            KeyCode::Up => self.adjust_shape(Axis::Rows, 1),
+            KeyCode::Down => self.adjust_shape(Axis::Rows, -1),
+            KeyCode::Right => self.adjust_shape(Axis::Columns, 1),
+            KeyCode::Left => self.adjust_shape(Axis::Columns, -1),
+            KeyCode::Char('+') | KeyCode::Char('=') => {
+                self.adjust_shape(Axis::Rows, 1);
+                self.adjust_shape(Axis::Columns, 1);
+            }
+            KeyCode::Char('-') | KeyCode::Char('_') => {
+                self.adjust_shape(Axis::Rows, -1);
+                self.adjust_shape(Axis::Columns, -1);
+            }
+            KeyCode::Home => self.set_square(1),
+            KeyCode::End => self.set_square(MAX_DIMENSION),
             KeyCode::Char(ch) if ch.is_ascii_digit() => {
                 let digit = ch.to_digit(10).unwrap_or(1) as usize;
                 // 0 reads as "all the way up", the way the resize picker works.
-                self.set_shape(if digit == 0 { MAX_DIMENSION } else { digit });
+                self.set_square(if digit == 0 { MAX_DIMENSION } else { digit });
             }
             _ => {}
         }
@@ -380,46 +439,58 @@ impl Composer {
             return;
         }
 
-        match self.active {
-            Field::Name => {
+        match self.step {
+            Step::Name => {
                 self.name.insert_str(&clean);
             }
-            Field::Project => {
+            Step::Project => {
                 self.project.insert_str(&clean);
                 self.project_touched = true;
                 self.refresh_suggestions();
                 self.refresh_project();
             }
-            Field::Rows | Field::Columns => return,
+            Step::Shape => return,
         }
         self.notice = None;
     }
 
-    fn move_field(&mut self, delta: isize) {
-        let current = Field::ALL
-            .iter()
-            .position(|field| *field == self.active)
-            .unwrap_or(0);
-        let next = (current as isize + delta).rem_euclid(Field::ALL.len() as isize) as usize;
-        self.active = Field::ALL[next];
-        if self.active == Field::Project {
+    /// Walks the wizard. Unlike the old field cursor this does not wrap: the
+    /// first step has nothing before it and the last is answered with Enter, so
+    /// wrapping would only ever be a way to lose your place.
+    fn move_step(&mut self, delta: isize) {
+        let Some(next) = self.step.offset(delta) else {
+            return;
+        };
+        self.step = next;
+        self.notice = None;
+        if next == Step::Project {
             self.refresh_suggestions();
         }
     }
 
-    fn adjust_shape(&mut self, delta: isize) {
-        let value = match self.active {
-            Field::Columns => self.columns,
-            _ => self.rows,
+    fn adjust_shape(&mut self, axis: Axis, delta: isize) {
+        let value = match axis {
+            Axis::Rows => self.rows,
+            Axis::Columns => self.columns,
         };
-        self.set_shape((value as isize + delta).clamp(1, MAX_DIMENSION as isize) as usize);
+        self.set_shape(
+            axis,
+            (value as isize + delta).clamp(1, MAX_DIMENSION as isize) as usize,
+        );
     }
 
-    fn set_shape(&mut self, value: usize) {
+    /// Typing a digit asks for the square grid most people mean by "three".
+    /// The arrows are there to take it out of square afterwards.
+    fn set_square(&mut self, value: usize) {
+        self.set_shape(Axis::Rows, value);
+        self.set_shape(Axis::Columns, value);
+    }
+
+    fn set_shape(&mut self, axis: Axis, value: usize) {
         let value = value.clamp(1, MAX_DIMENSION);
-        let slot = match self.active {
-            Field::Columns => &mut self.columns,
-            _ => &mut self.rows,
+        let slot = match axis {
+            Axis::Rows => &mut self.rows,
+            Axis::Columns => &mut self.columns,
         };
         if *slot == value {
             return;
@@ -792,24 +863,77 @@ impl Composer {
             return;
         }
 
+        // One step at a time, sized to what it actually asks. The two short
+        // steps keep their box tight and let the rail sit under them instead of
+        // floating at the bottom of a mostly empty panel; the project step wants
+        // everything left over for its folder browser.
+        let rail = 2u16.min(area.height.saturating_sub(4));
+        let body = area.height.saturating_sub(rail);
+        let step_height = match self.step {
+            Step::Shape => 5.min(body),
+            Step::Name => 4.min(body),
+            Step::Project => body,
+        };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Min(4)])
+            .constraints([
+                Constraint::Length(step_height),
+                Constraint::Length(rail),
+                Constraint::Min(0),
+            ])
             .split(area);
 
-        self.draw_shape(frame, chunks[0], tick);
-        self.draw_identity(frame, chunks[1], tick);
+        match self.step {
+            Step::Shape => self.draw_shape(frame, chunks[0], tick),
+            Step::Name => self.draw_name(frame, chunks[0], tick),
+            Step::Project => self.draw_project(frame, chunks[0], tick),
+        }
+        if rail > 0 {
+            self.draw_step_rail(frame, chunks[1]);
+        }
+    }
+
+    /// The step numbers, so the wizard says how far along it is without the user
+    /// having to remember how many questions there were.
+    fn draw_step_rail(&self, frame: &mut Frame<'_>, area: Rect) {
+        let current = self.step;
+        let mut spans = Vec::new();
+        for (index, step) in Step::ALL.iter().enumerate() {
+            if index > 0 {
+                spans.push(Span::styled("  ", Style::default().fg(MUTED)));
+            }
+            let done = index < current.index();
+            let style = if *step == current {
+                Style::default()
+                    .fg(TERMINAL_GREEN)
+                    .add_modifier(Modifier::BOLD)
+            } else if done {
+                Style::default().fg(DIM_GREEN)
+            } else {
+                Style::default().fg(MUTED)
+            };
+            spans.push(Span::styled(
+                format!(
+                    "{}{} {}",
+                    if done { "✓" } else { " " },
+                    index + 1,
+                    step.label()
+                ),
+                style,
+            ));
+        }
+
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(RAISED_BG)),
+            area,
+        );
     }
 
     fn draw_shape(&self, frame: &mut Frame<'_>, area: Rect, tick: u64) {
         if area.height < 4 {
             return;
         }
-        let block = section_block(
-            "01",
-            "SHAPE",
-            self.active_in(&[Field::Rows, Field::Columns]),
-        );
+        let block = section_block("01", "HOW BIG?", true);
         let inner = inset(block.inner(area), 1, 0);
         frame.render_widget(block, area);
         if inner.width == 0 || inner.height == 0 {
@@ -817,31 +941,28 @@ impl Composer {
         }
 
         let width = inner.width as usize;
-        let lines = vec![
-            shape_row("ROWS", self.rows, self.active == Field::Rows, tick, width),
-            shape_row(
-                "COLUMNS",
-                self.columns,
-                self.active == Field::Columns,
-                tick,
-                width,
-            ),
+        // Both numbers are live at once now, so neither is drawn as the one the
+        // cursor happens to be parked on.
+        let mut lines = vec![
+            shape_row("ROWS", self.rows, true, tick, width),
+            shape_row("COLUMNS", self.columns, true, tick, width),
+            hint_row(Span::styled(
+                truncate("↑↓ rows · ←→ columns · 1-9 for a square", width),
+                Style::default().fg(MUTED),
+            )),
         ];
+        lines.truncate(inner.height as usize);
         frame.render_widget(
             Paragraph::new(lines).style(Style::default().bg(RAISED_BG)),
             inner,
         );
     }
 
-    fn draw_identity(&self, frame: &mut Frame<'_>, area: Rect, tick: u64) {
+    fn draw_name(&self, frame: &mut Frame<'_>, area: Rect, tick: u64) {
         if area.height < 4 {
             return;
         }
-        let block = section_block(
-            "02",
-            "IDENTITY",
-            self.active_in(&[Field::Name, Field::Project]),
-        );
+        let block = section_block("02", "CALL IT WHAT?", true);
         let inner = inset(block.inner(area), 1, 0);
         frame.render_widget(block, area);
         if inner.width == 0 || inner.height == 0 {
@@ -851,15 +972,7 @@ impl Composer {
         let value_width = (inner.width as usize).saturating_sub(13).max(6);
         let hint_width = (inner.width as usize).saturating_sub(11).max(6);
         let mut lines = vec![
-            text_row(
-                "NAME",
-                &self.name,
-                self.active == Field::Name,
-                tick,
-                value_width,
-                None,
-                DIM_GREEN,
-            ),
+            text_row("NAME", &self.name, true, tick, value_width, None, DIM_GREEN),
             hint_row(Span::styled(
                 truncate(
                     &if self.name.value.trim().is_empty() {
@@ -871,10 +984,32 @@ impl Composer {
                 ),
                 Style::default().fg(MUTED),
             )),
+        ];
+        lines.truncate(inner.height as usize);
+        frame.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(RAISED_BG)),
+            inner,
+        );
+    }
+
+    fn draw_project(&self, frame: &mut Frame<'_>, area: Rect, tick: u64) {
+        if area.height < 4 {
+            return;
+        }
+        let block = section_block("03", "WHERE?", true);
+        let inner = inset(block.inner(area), 1, 0);
+        frame.render_widget(block, area);
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        let value_width = (inner.width as usize).saturating_sub(13).max(6);
+        let hint_width = (inner.width as usize).saturating_sub(11).max(6);
+        let mut lines = vec![
             text_row(
                 "PROJECT",
                 &self.project,
-                self.active == Field::Project,
+                true,
                 tick,
                 value_width,
                 self.project_ghost().as_deref(),
@@ -893,6 +1028,8 @@ impl Composer {
             },
         );
 
+        // The folder browser gets everything the step does not need, which on
+        // its own step is most of the panel.
         let remaining = inner.height.saturating_sub(used);
         if remaining >= 2 {
             self.draw_suggestions(
@@ -910,7 +1047,7 @@ impl Composer {
     /// the field is not focused, so the panel always shows where else the grid
     /// could land instead of a block of dead space.
     fn draw_suggestions(&self, frame: &mut Frame<'_>, area: Rect) {
-        let focused = self.active == Field::Project;
+        let focused = self.step == Step::Project;
         let folders = &self.suggestions.siblings;
         let matches = &self.suggestions.matches;
         let selected = self
@@ -998,7 +1135,7 @@ impl Composer {
 
     /// Dim text after the cursor showing what Tab would fill in.
     fn project_ghost(&self) -> Option<String> {
-        if self.active != Field::Project || self.project.cursor != self.project.len() {
+        if self.step != Step::Project || self.project.cursor != self.project.len() {
             return None;
         }
         if self.suggestions.index.is_some() {
@@ -1029,17 +1166,15 @@ impl Composer {
         }
     }
 
-    fn active_in(&self, fields: &[Field]) -> bool {
-        fields.contains(&self.active)
-    }
-
     // --------------------------------------------------------------- preview
 
     fn draw_preview(&self, frame: &mut Frame<'_>, area: Rect, tick: u64) {
         if area.width < 20 || area.height < 6 {
             return;
         }
-        let block = section_block("03", "LIVE GRID", false);
+        // No step number: the preview is not a question, it is the answer to
+        // the one being asked.
+        let block = section_block("◆", "LIVE GRID", false);
         let inner = inset(block.inner(area), 1, 0);
         frame.render_widget(block, area);
         if inner.width == 0 || inner.height == 0 {
@@ -1203,10 +1338,10 @@ impl Composer {
     }
 
     fn hint_notice(&self) -> Notice {
-        let text = match self.active {
-            Field::Rows | Field::Columns => "type a digit, or ←/→ to resize the grid",
-            Field::Name => "name this grid so its tab is easy to find",
-            Field::Project => "Tab completes folders · Tab again cycles matches",
+        let text = match self.step {
+            Step::Shape => "how many panes? arrows size the grid, Enter moves on",
+            Step::Name => "name this grid so its tab is easy to find, or leave it",
+            Step::Project => "Tab completes folders · Enter launches",
         };
         Notice {
             text: text.into(),
@@ -1215,22 +1350,27 @@ impl Composer {
     }
 
     fn controls_line(&self, width: u16) -> Line<'static> {
-        let mut spans = vec![
-            keycap("↑↓"),
-            label("FIELD"),
-            keycap("←→"),
-            label(if self.active.is_text() {
-                "CURSOR"
-            } else {
-                "SIZE"
-            }),
-            keycap("TAB"),
-            label(if self.active == Field::Project {
-                "COMPLETE"
-            } else {
-                "NEXT"
-            }),
-        ];
+        // Each step advertises only the keys that do something on it. The old
+        // line promised UP/DOWN FIELD everywhere, which was the whole habit this
+        // screen is trying to drop.
+        let mut spans = match self.step {
+            Step::Shape => vec![keycap("↑↓←→"), label("SIZE")],
+            Step::Name | Step::Project => vec![keycap("←→"), label("CURSOR")],
+        };
+        if self.step == Step::Project {
+            spans.push(keycap("TAB"));
+            spans.push(label("COMPLETE"));
+        }
+        spans.push(keycap("ENTER"));
+        spans.push(label(if self.step.is_last() {
+            "LAUNCH"
+        } else {
+            "NEXT"
+        }));
+        if self.step != Step::Shape {
+            spans.push(keycap("SHIFT+TAB"));
+            spans.push(label("BACK"));
+        }
         if width >= 78 {
             spans.push(keycap("ALT+W"));
             spans.push(label("WORKTREES"));
@@ -2686,69 +2826,93 @@ mod tests {
         assert_eq!(name, TEST_PROFILE);
     }
 
+    /// The screen asks one question at a time, and Enter answers it. Launching
+    /// is what happens when there is nothing left to ask, not something Enter
+    /// could do from anywhere.
     #[test]
-    fn only_four_fields_are_reachable_and_enter_launches_from_each() {
+    fn the_wizard_walks_one_step_at_a_time() {
         let config = shell_config();
         let mut composer = composer();
 
-        assert_eq!(
-            Field::ALL,
-            [Field::Rows, Field::Columns, Field::Name, Field::Project]
-        );
-        for field in Field::ALL {
-            composer.active = field;
+        assert_eq!(Step::ALL, [Step::Shape, Step::Name, Step::Project]);
+        assert_eq!(composer.step, Step::Shape);
+
+        for expected in [Step::Name, Step::Project] {
             let event =
                 composer.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &config);
             assert!(
-                matches!(event, ComposerEvent::Launch(_)),
-                "Enter did not launch from {field:?}"
+                matches!(event, ComposerEvent::Continue),
+                "Enter launched before the last step"
             );
+            assert_eq!(composer.step, expected);
+        }
+        assert!(matches!(
+            composer.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &config),
+            ComposerEvent::Launch(_)
+        ));
+
+        // Shift+Tab walks back, and stops rather than wrapping round the end.
+        for expected in [Step::Name, Step::Shape, Step::Shape] {
+            press(&mut composer, KeyCode::BackTab, &config);
+            assert_eq!(composer.step, expected);
         }
 
-        // Down wraps through exactly the four fields.
-        composer.active = Field::Rows;
-        for expected in [Field::Columns, Field::Name, Field::Project, Field::Rows] {
-            press(&mut composer, KeyCode::Down, &config);
-            assert_eq!(composer.active, expected);
+        // The arrows belong to the step now, so they no longer move between
+        // steps — which is the whole point of splitting the form up.
+        for code in [KeyCode::Down, KeyCode::Up] {
+            press(&mut composer, code, &config);
+            assert_eq!(composer.step, Step::Shape);
         }
 
         // Tab advances everywhere except Project, where it completes instead.
-        for expected in [Field::Columns, Field::Name, Field::Project] {
+        for expected in [Step::Name, Step::Project] {
             press(&mut composer, KeyCode::Tab, &config);
-            assert_eq!(composer.active, expected);
+            assert_eq!(composer.step, expected);
         }
         press(&mut composer, KeyCode::Tab, &config);
-        assert_eq!(composer.active, Field::Project);
+        assert_eq!(composer.step, Step::Project);
         press(&mut composer, KeyCode::BackTab, &config);
-        assert_eq!(composer.active, Field::Name);
+        assert_eq!(composer.step, Step::Name);
     }
 
+    /// On the shape step the arrows point at what they change: down and up size
+    /// the grid vertically, left and right size it horizontally. Nothing has to
+    /// be selected first, because there is nothing else on the step.
     #[test]
-    fn digits_and_arrows_shape_the_grid() {
+    fn arrows_size_the_grid_along_the_axis_they_point_at() {
         let config = shell_config();
         let mut composer = composer();
+        assert_eq!(composer.step, Step::Shape);
 
-        composer.active = Field::Rows;
-        press(&mut composer, KeyCode::Char('4'), &config);
-        composer.active = Field::Columns;
+        // A digit asks for the square most people mean by that number.
+        press(&mut composer, KeyCode::Char('3'), &config);
+        assert_eq!(composer.grid().rows, 3);
+        assert_eq!(composer.grid().columns, 3);
+
+        press(&mut composer, KeyCode::Up, &config);
+        assert_eq!(composer.grid().rows, 4);
+        assert_eq!(composer.grid().columns, 3, "up must not touch columns");
+        press(&mut composer, KeyCode::Right, &config);
+        assert_eq!(composer.grid().columns, 4);
+        assert_eq!(composer.grid().rows, 4, "right must not touch rows");
+
+        // 0 still reads as "all the way up", and both axes clamp at 1.
         press(&mut composer, KeyCode::Char('0'), &config);
-        assert_eq!(composer.grid().rows, 4);
+        assert_eq!(composer.grid().rows, MAX_DIMENSION);
         assert_eq!(composer.grid().columns, MAX_DIMENSION);
-
-        press(&mut composer, KeyCode::Left, &config);
-        assert_eq!(composer.grid().columns, MAX_DIMENSION - 1);
-        for _ in 0..20 {
+        for _ in 0..MAX_DIMENSION + 5 {
             press(&mut composer, KeyCode::Left, &config);
+            press(&mut composer, KeyCode::Down, &config);
         }
+        assert_eq!(composer.grid().rows, 1);
         assert_eq!(composer.grid().columns, 1);
-        assert_eq!(composer.grid().rows, 4);
     }
 
     #[test]
     fn typing_a_name_titles_the_grid_and_empty_names_fall_back() {
         let config = shell_config();
         let mut composer = composer();
-        composer.active = Field::Name;
+        composer.step = Step::Name;
         for _ in 0..MAX_NAME_CHARS {
             press(&mut composer, KeyCode::Backspace, &config);
         }
@@ -2770,7 +2934,7 @@ mod tests {
         fs::create_dir_all(root.join("alpha-one").join("nested")).expect("nested dir");
 
         let mut composer = composer_in(root.clone());
-        composer.active = Field::Project;
+        composer.step = Step::Project;
 
         let base = display_path(&root.canonicalize().expect("canonical root"));
         composer
@@ -2810,7 +2974,7 @@ mod tests {
     fn unresolvable_projects_block_launch_with_a_visible_reason() {
         let config = shell_config();
         let mut composer = composer();
-        composer.active = Field::Project;
+        composer.step = Step::Project;
         composer
             .project
             .set("definitely-not-a-gridbash-project".into());
@@ -2853,6 +3017,10 @@ mod tests {
             &config,
         );
         assert!(!composer.worktrees_active());
+
+        // F2 is the same toggle for a terminal that will not send Alt.
+        composer.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE), &config);
+        assert!(composer.worktrees_active());
     }
 
     #[test]
@@ -2863,18 +3031,38 @@ mod tests {
 
         assert!(text.contains("NEW GRID"));
         assert!(text.contains(WORDMARK[1]), "wordmark row missing");
-        assert!(text.contains("SHAPE"));
-        assert!(text.contains("IDENTITY"));
+        assert!(text.contains("HOW BIG?"));
         assert!(text.contains("LIVE GRID"));
         assert!(text.contains("ROWS"));
         assert!(text.contains("COLUMNS"));
-        assert!(text.contains("NAME"));
-        assert!(text.contains("PROJECT"));
-        assert!(text.contains("LAUNCH"));
         assert!(text.contains("PANES"));
+        // The step rail names every question, including the ones not being
+        // asked yet, so the wizard says how long it is up front.
+        for step in Step::ALL {
+            assert!(
+                text.contains(step.label()),
+                "{} missing from the rail",
+                step.label()
+            );
+        }
+        // Only the current step's input is on screen; the later ones are just
+        // names on the rail.
+        assert!(
+            !text.contains("WHERE?"),
+            "a later step leaked onto the shape step"
+        );
         // The knobs this revamp removed must not come back.
         assert!(!text.contains("Auth"));
         assert!(!text.contains("START WORKSPACE"));
+
+        // Walking to the last step swaps the panel over and offers the launch.
+        let mut composer = composer;
+        composer.step = Step::Project;
+        let text = rendered(140, 40, &composer, &config);
+        assert!(text.contains("WHERE?"));
+        assert!(text.contains("PROJECT"));
+        assert!(text.contains("LAUNCH"));
+        assert!(!text.contains("HOW BIG?"));
     }
 
     #[test]
@@ -2972,8 +3160,11 @@ mod tests {
         let composer = composer();
         let text = rendered(72, 18, &composer, &config);
 
-        assert!(text.contains("SHAPE"));
-        assert!(text.contains("IDENTITY"));
+        assert!(text.contains("HOW BIG?"));
+        assert!(
+            text.contains("SHAPE"),
+            "the step rail survives a small screen"
+        );
         assert!(text.contains("LAUNCH"));
         assert!(text.contains("ENTER"));
     }
@@ -2982,7 +3173,7 @@ mod tests {
     fn draws_at_every_size_without_panicking() {
         let config = shell_config();
         let mut composer = composer();
-        composer.active = Field::Project;
+        composer.step = Step::Project;
         composer.refresh_suggestions();
 
         for width in [8u16, 20, 40, 72, 96, 140, 200] {
@@ -3025,12 +3216,12 @@ mod tests {
         // Let the reveal animation finish so the dump shows the settled screen.
         composer.shape_changed = Instant::now() - Duration::from_secs(2);
         for (width, height, field) in [
-            (140u16, 40u16, Field::Rows),
-            (140, 40, Field::Project),
-            (96, 30, Field::Name),
-            (80, 24, Field::Rows),
+            (140u16, 40u16, Step::Shape),
+            (140, 40, Step::Project),
+            (96, 30, Step::Name),
+            (80, 24, Step::Shape),
         ] {
-            composer.active = field;
+            composer.step = field;
             composer.refresh_suggestions();
             let mut terminal =
                 Terminal::new(TestBackend::new(width, height)).expect("test terminal");

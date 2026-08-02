@@ -111,6 +111,12 @@ agents and shells.
 | `Alt+h` or `F1` | Open the full in-app shortcut guide |
 | `Alt+q` | Show the quit confirmation and exact resume command |
 
+On macOS, Option is a character composer rather than Alt in Apple Terminal,
+iTerm2, and Ghostty, so GridBash adds a leader key: press `Ctrl+G`, release it,
+then press the shortcut key without Alt — `Ctrl+G` then `c` for the command
+center, `Ctrl+G` then an arrow to move focus. Turning on the terminal's Option
+as Meta setting makes the Alt shortcuts work directly instead.
+
 See the [full controls reference](docs/REFERENCE.md#controls) for resizing,
 renaming, sleeping, restarting, scrolling, settings, and recovery actions.
 
@@ -130,12 +136,12 @@ to close GridBash, or any other key to cancel. The same command is printed after
 GridBash returns to the launching shell. Quit confirmation is enabled by default
 and can be disabled in Settings.
 
-If the terminal or GridBash process closes unexpectedly, the next plain
-`gridbash` launch automatically recovers unfinished agent sessions. Saved panes
-are grouped into tabs by working directory, each tab is named after that
-directory, and `Alt+t` moves to the next tab. Explicit launch arguments still
-start the workspace you requested, and older snapshots remain available through
-`gridbash resume`.
+A plain `gridbash` always gives you a new, empty workspace. If the terminal or
+GridBash process closes unexpectedly, run `gridbash --recover` to reopen the
+unfinished agent sessions it left behind — each interrupted workspace comes back
+with its grids intact, and `Alt+t` moves between tabs. A plain launch says in the
+status bar when there is something to recover, and older snapshots remain
+available through `gridbash resume`.
 
 ## Profiles and configuration
 

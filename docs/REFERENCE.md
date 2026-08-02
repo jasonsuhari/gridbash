@@ -7,21 +7,28 @@ README](../README.md) for installation and a shorter introduction.
 ## Create a grid
 
 Run `gridbash` with no arguments, or press `Alt+n` inside a running workspace,
-to open the new-grid screen. It asks for four things and decides the rest:
+to open the new-grid screen. It asks three questions, one at a time, and decides
+the rest:
 
-| Field | Meaning |
-| --- | --- |
-| Rows | 1-10 rows of panes. |
-| Columns | 1-10 columns of panes. |
-| Name | Tab title for this grid. Blank falls back to `Grid N`. |
-| Project | Folder the panes start in, with Tab completion. |
+| Step | Question | Keys |
+| --- | --- | --- |
+| 01 | How big? 1-10 rows by 1-10 columns. | `↑↓` rows, `←→` columns, `1`-`9` for a square (`0` for the maximum) |
+| 02 | Call it what? Tab title for this grid; blank falls back to `Grid N`. | typing, `←→` to move the cursor |
+| 03 | Where? Folder the panes start in. | typing, `Tab` completes folders and cycles matches |
+
+`Enter` answers the current question and moves to the next; on the last step it
+launches. `Shift+Tab` goes back a step, `Esc` cancels, and a rail under the panel
+shows which steps are done. Nothing moves between steps on its own, so the arrow
+keys belong to whichever question is being asked — on the size step they point at
+the axis they change rather than at another field.
 
 Everything else is assumed so there is nothing else to answer:
 
 - **Worktrees are on** whenever the project is a git repository with a commit
   and no tracked modifications. The screen names the exact branches it will
   create and falls back to the shared project folder — saying why — when the
-  repository cannot host them. `Alt+w` overrides the choice.
+  repository cannot host them. `Alt+w`, or `F2` where the terminal will not send
+  Alt, overrides the choice.
 - **Panes run the platform shell**: Git Bash on Windows, otherwise the first
   available of zsh, bash, fish, sh, or PowerShell. `GRIDBASH_PROFILE`, a
   non-agent `--set-default` profile, and `--profile` still win. Pick agents per
@@ -82,7 +89,7 @@ gridbash --set-default codex
 | Tab | Complete the project path, or move to the next field. |
 | Tab again | Cycle the remaining folder matches. |
 | Ctrl+w / Ctrl+u | Delete the previous path segment / clear the field. |
-| Alt+w | Override managed worktrees for this grid. |
+| Alt+w or F2 | Override managed worktrees for this grid. |
 | Enter | Launch, from any field. |
 | Esc / Ctrl+c | Cancel. |
 
@@ -150,10 +157,14 @@ hosts; a session owned by a live GridBash process cannot be deleted. The
 `--delete` form provides the same behavior for scripts and requires a full
 session ID or unique prefix.
 
-Automatic recovery only applies to a plain launch. Grid, profile, count, cwd,
-worktree, layout, and agent-API launch options take precedence, while every
-saved snapshot remains available through the explicit `gridbash resume`
-commands above.
+A plain `gridbash` always starts an empty workspace. When a GridBash process
+dies without cleaning up, its sessions are left marked as running; pass
+`gridbash --recover` to adopt those workspaces instead of starting a new one, and
+a plain launch reports in the status bar how many are waiting. Recovery only
+applies to an otherwise plain launch: grid, profile, count, cwd, worktree,
+layout, and agent-API options describe a specific workspace and suppress it.
+Every saved snapshot also remains available through the explicit `gridbash
+resume` commands above.
 
 ## Managed git worktrees
 
@@ -296,6 +307,7 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Alt+l | Resize the current grid. |
 | Alt+x | Swap two selected grids when any grids are selected; otherwise swap the two selected panes. |
 | Alt+n | Open the new-grid screen and launch another tab. |
+| Ctrl+Alt+t | Re-root the focused pane at an outside Git Bash window's folder. |
 | Alt+t | Switch to the next tab. |
 | Alt+w | Open the current-grid close confirmation. |
 | Alt+s | Toggle selection of the focused pane. |
@@ -372,6 +384,31 @@ Alt+Ctrl+B opens Background Agents. Rows show whether each job is working, quiet
 
 When an agent launched by GridBash exits normally, including through `/exit`, GridBash replaces it with the preferred interactive terminal in the pane's current directory. If another focused pane exits, Enter, `r`, or `t` restarts it, while `z` sleeps it. Alt+Shift+T performs the same restart directly for exited target panes.
 
+### The leader key
+
+Terminals differ on whether they send Alt at all. Apple Terminal, iTerm2, and
+Ghostty map Option to character composition by default, so Option+C produces
+`ç` and none of the Alt shortcuts ever reach GridBash. The leader key replaces
+the modifier with a first keystroke: press it, release it, then press the
+shortcut key on its own.
+
+`Ctrl+G` then `c` opens the command center, `Ctrl+G` then an arrow moves focus,
+`Ctrl+G` then `Shift+C` captures output, and `Ctrl+G` then `Ctrl+P` opens Ports.
+`Ctrl+G` then `q` quits. Esc backs out, and pressing the leader twice sends it
+to the focused pane, so no pane loses the key. The status bar names the leader
+while it is waiting.
+
+GridBash enables the leader on macOS and leaves it off elsewhere, where Alt
+arrives intact. Set it explicitly, or turn it off, in the `[keys]` table:
+
+```toml
+[keys]
+leader = "ctrl+g"   # "off" disables it
+```
+
+Enabling the terminal's own Option-as-Meta setting is the alternative and makes
+the Alt shortcuts work directly; the two can be used together.
+
 ### Configurable shortcuts
 
 Override application controls in the top-level `[keys]` table. Action names
@@ -389,7 +426,8 @@ Supported actions are `quit`, `help`, `focus-left`, `focus-right`, `focus-up`,
 `next-tab`, `new-tab`, `close-grid`, `resize-grid`, `swap-panes`, `zoom-pane`, `command-line`,
 `command-palette`, `bashbot`, `voice-input`, `edit-goal`, `stop-goal`, `settings`, `previous-panes`, `ports`,
 `pane-activity`, `copy-mode`, `auth-profiles`, `capture-output`,
-`toggle-output-logging`, `rename-tab`, and `rename-pane`. Unlisted actions retain their
+`toggle-output-logging`, `rename-tab`, `rename-pane`, and `adopt-terminal`, plus
+`leader` for the [leader key](#the-leader-key). Unlisted actions retain their
 defaults. Duplicate chords and unmodified terminal keys are rejected. F1 and
 `Alt+q` remain reserved help and quit recovery paths; in-app help displays the
 effective bindings.
@@ -403,9 +441,17 @@ The resize picker starts from the current dimensions and shows each existing pan
 
 A pane's top border carries its number and name on the left and its state on the right. Opt-in AI activity summaries add a concise work headline after the name once output settles; GridBash never uses raw typing or terminal UI fragments as the displayed summary. A configured manager goal replaces pane summaries across the grid until removed. Saving a blank pane name restores its default number.
 
+## Adopting an outside terminal
+
+`Ctrl+Alt+T` lists the Git Bash windows running outside GridBash and re-roots the focused pane at the folder one of them is sitting in. Pick a row, then confirm; the pane's current shell is closed and replaced by one starting in that folder, and its managed worktree name is recomputed for the new location.
+
+The outside window is never touched. It keeps its process and stays open, because Windows binds a process to the console it was created with and offers no way to hand a live process to another pseudoconsole — so what moves is the location, not the session. A window whose title does not reveal a folder is still listed, greyed out and unselectable, rather than being silently dropped.
+
+Folders are read from the window title, which is where MSYS shells publish them: `MINGW64:/c/Users/you/project`, `MSYS:~`, and Cygwin's `/cygdrive/c/...` all resolve, and a title a running program has overwritten resolves to nothing rather than to a guess. This is Windows-only; elsewhere the picker reports that nothing was found.
+
 The tab strip draws each grid as a separate capped shape rather than one continuous highlight: the current grid is filled with the accent colour, a grid whose agent is waiting on you is filled amber and marked `•`, an exited grid is marked `!`, and grids selected by hand are underlined. When the grids outrun the terminal width the strip scrolls to keep the current one visible and marks the hidden ends with `‹` and `›`. Remaining width goes to the keyboard hints, which drop from the end as it runs out.
 
-The status bar centres the focused pane's number, name, and AI activity summary. When summaries are off or unconfigured, that line says so instead of guessing from the shape of the output; a transient status message takes the centre for as long as it lasts, and a narrow terminal drops the pane name before the summary. Left of centre are the clickable Panes, Summary, and background-jobs chips, plus the input mode and scope only when they are not the ordinary ones; the ports chip stays anchored to the right edge.
+The status bar centres the focused pane's number, name, and AI activity summary, followed by how long that summary stays cached and a `⟳` control that refreshes it now. The countdown reads `due` once the cache is stale and `···` while a request is in flight, and the whole clock is the click target. It is shown only for panes that can actually be summarized — never for a sleeping or exited pane, one with summaries switched off, or while a manager goal has suspended them. When summaries are off or unconfigured, the centre says so instead of guessing from the shape of the output; a transient status message takes the centre for as long as it lasts, and a narrow terminal drops the pane name before the summary. Left of centre are the clickable Panes, Summary, and background-jobs chips, plus the input mode and scope only when they are not the ordinary ones; the ports chip stays anchored to the right edge.
 
 The state on the right is whichever one matters most: `exited`, `asleep`, `needs you`, or `idle`. `needs you` marks an agent pane that has stopped producing output for roughly three seconds, which is how an agent asks for input — it indicates output followed by inactivity, not completion or process exit. A non-agent pane that goes quiet reads `idle` instead. As a pane narrows, its header drops its usage figure first, then its activity summary; the number, name, and state are kept. Focused and selected panes are marked by a filled number chip and a coloured border, which outrank a pane's own state.
 
@@ -431,7 +477,7 @@ Set `GRIDBASH_VOICE_MODEL` to use another local Whisper model or `GRIDBASH_SPEEC
 
 GridBash targets modern UTF-8, ANSI/xterm-compatible terminals, including Windows Terminal, Apple Terminal, iTerm2, GNOME Terminal, Konsole, Kitty, WezTerm, and Alacritty.
 
-SSH and tmux work when the remote session advertises a color-capable `TERM`. `TERM=dumb` and Linux kernel consoles are unsupported. In Apple Terminal and iTerm2, configure Option as Meta/Alt so GridBash receives its shortcuts.
+SSH and tmux work when the remote session advertises a color-capable `TERM`. `TERM=dumb` and Linux kernel consoles are unsupported. On macOS the shortcuts are reachable out of the box through the [leader key](#the-leader-key); configuring Option as Meta/Alt in Apple Terminal, iTerm2, or Ghostty makes the Alt chords work directly as well.
 
 ## Launch profiles
 
@@ -540,7 +586,7 @@ Settings persist compact titles, activity badges, quit confirmation, background-
 
 The BashBot Director and AI activity summaries use the OpenAI-compatible chat-completions endpoint, model, and API key under `[manager]`. These values can also be edited in Settings > Manager. The UI masks the API key, but the key is stored in the local TOML file.
 
-AI activity summaries are disabled by default. Enable them separately in Settings > Manager only when you want bounded recent output from eligible panes in the active tab sent to the configured endpoint. GridBash batches panes after roughly three seconds of quiet output, rate-limits automatic refreshes, pauses them while a manager goal is present, and preserves the last successful headline across temporary API failures. The Pane Activity refresh control requests an immediate update; pending input is never used as a displayed summary.
+AI activity summaries are disabled by default. Enable them separately in Settings > Manager only when you want bounded recent output from eligible panes in the active tab sent to the configured endpoint. GridBash batches panes after roughly three seconds of quiet output, pauses them while a manager goal is present, and preserves the last successful headline across temporary API failures. Each pane then caches its summary for three minutes before another request may be spent on it, so a nine-pane grid costs at most twenty batched calls an hour; failures back off separately, doubling from thirty seconds up to five minutes. The status bar's `⟳` control and the Pane Activity refresh control both skip the cache and request an immediate update for one pane; pending input is never used as a displayed summary.
 
 `/goal` in Alt+C Chat creates a goal for the current grid. Each review sends pane role and folder metadata plus bounded recent output from that grid to the configured API. Sleeping and exited panes are never command targets. Reviews label output by pane, report changed statuses in the transcript, and keep validated follow-ups bound to their intended PTYs if panes are reordered. Goals keep running when another grid is active; `/stop` ends only the current grid's goal.
 

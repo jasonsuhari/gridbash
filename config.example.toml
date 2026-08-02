@@ -27,6 +27,9 @@ exited = "red"
 [keys]
 zoom-pane = "alt+f"
 settings = "alt+o"
+# Press the leader, then the shortcut key without Alt, for terminals that do not
+# send Alt at all. On by default on macOS; "off" disables it.
+leader = "ctrl+g"
 
 [manager]
 activity_summaries = false # opt in: sends bounded active-tab output to this API
