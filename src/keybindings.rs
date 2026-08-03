@@ -37,6 +37,7 @@ pub enum Action {
     AuthProfiles,
     RenameTab,
     RenamePane,
+    AdoptTerminal,
 }
 
 const ACTIONS: &[Action] = &[
@@ -65,6 +66,7 @@ const ACTIONS: &[Action] = &[
     Action::ZoomPane,
     Action::ResizeGrid,
     Action::RenamePane,
+    Action::AdoptTerminal,
     Action::RestartPanes,
     Action::SwapPanes,
     Action::SleepPanes,
@@ -113,6 +115,7 @@ impl Action {
             Self::AuthProfiles => "auth-profiles",
             Self::RenameTab => "rename-tab",
             Self::RenamePane => "rename-pane",
+            Self::AdoptTerminal => "adopt-terminal",
         }
     }
 
@@ -150,6 +153,7 @@ impl Action {
             Self::AuthProfiles => "manage and assign auth profiles",
             Self::RenameTab => "rename current tab",
             Self::RenamePane => "rename focused pane",
+            Self::AdoptTerminal => "open a pane where an outside Git Bash window is",
         }
     }
 
@@ -191,6 +195,7 @@ impl Action {
             Self::AuthProfiles => "alt+shift+a",
             Self::RenameTab => "alt+shift+r",
             Self::RenamePane => "alt+r",
+            Self::AdoptTerminal => "ctrl+alt+t",
         }
     }
 }
@@ -327,9 +332,29 @@ fn parse_key(value: &str) -> Result<ShortcutKey> {
     }
 }
 
+/// The name the `[keys]` table uses for the leader key.
+const LEADER_KEY: &str = "leader";
+
+/// The leader shortcut a platform starts with.
+///
+/// macOS terminals spend the Option key on character composition — Option+C is
+/// `ç`, not Alt+C — so out of the box a Mac cannot press a single GridBash
+/// shortcut. A leader key gives every one of them back without asking the user
+/// to reconfigure their terminal before the app is usable. Everywhere else Alt
+/// arrives intact, and taking a Ctrl key away from the panes would cost more
+/// than it returns, so there is no leader unless one is configured.
+#[cfg(target_os = "macos")]
+const DEFAULT_LEADER: Option<&str> = Some("ctrl+g");
+#[cfg(not(target_os = "macos"))]
+const DEFAULT_LEADER: Option<&str> = None;
+
+/// Values that turn the leader off in config.
+const LEADER_DISABLED: [&str; 4] = ["", "off", "none", "false"];
+
 #[derive(Debug, Clone)]
 pub struct KeyBindings {
     bindings: BTreeMap<Action, Shortcut>,
+    leader: Option<Shortcut>,
 }
 
 impl KeyBindings {
@@ -341,6 +366,7 @@ impl KeyBindings {
                 Shortcut::parse(action.default_chord()).map(|shortcut| (action, shortcut))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
+        let mut leader = DEFAULT_LEADER.map(Shortcut::parse).transpose()?;
 
         for (name, chord) in overrides {
             let normalized = name.trim().to_ascii_lowercase();
@@ -349,9 +375,20 @@ impl KeyBindings {
                     "[keys] action '{name}' was removed; use 'command-line' and the Alt+C BashBot Director command center"
                 );
             }
+            if normalized == LEADER_KEY {
+                let requested = chord.trim().to_ascii_lowercase();
+                leader = if LEADER_DISABLED.contains(&requested.as_str()) {
+                    None
+                } else {
+                    Some(Shortcut::parse(chord).map_err(|error| {
+                        anyhow!("invalid [keys].leader shortcut '{chord}': {error}")
+                    })?)
+                };
+                continue;
+            }
             let action = Action::from_name(&normalized).ok_or_else(|| {
                 anyhow!(
-                    "unknown [keys] action '{name}'; supported actions: {}",
+                    "unknown [keys] action '{name}'; supported actions: {LEADER_KEY}, {}",
                     ACTIONS
                         .iter()
                         .map(|action| action.name())
@@ -379,7 +416,29 @@ impl KeyBindings {
             }
         }
 
-        Ok(Self { bindings })
+        // A leader that is also a shortcut would swallow that shortcut, since
+        // the leader is read before anything else.
+        if let Some(leader) = leader
+            && let Some(action) = seen.get(&leader)
+        {
+            bail!(
+                "shortcut {} is the leader key and is also assigned to '{}'",
+                leader.label(),
+                action.name()
+            );
+        }
+
+        Ok(Self { bindings, leader })
+    }
+
+    /// Whether this event is the leader key itself.
+    pub fn is_leader(&self, event: &KeyEvent) -> bool {
+        self.leader.is_some_and(|shortcut| shortcut.matches(event))
+    }
+
+    /// How the leader key is written for the user, when there is one.
+    pub fn leader_label(&self) -> Option<String> {
+        self.leader.map(Shortcut::label)
     }
 
     pub fn action_for(&self, event: &KeyEvent) -> Option<Action> {
@@ -391,10 +450,10 @@ impl KeyBindings {
     }
 
     pub fn help_entries(&self) -> Vec<(String, &'static str)> {
-        ACTIONS
-            .iter()
-            .copied()
-            .map(|action| {
+        self.leader_label()
+            .map(|label| (label, "leader: press it, then a shortcut key without Alt"))
+            .into_iter()
+            .chain(ACTIONS.iter().copied().map(|action| {
                 // `from_overrides` seeds every action, but indexing a map that
                 // is one action short would panic instead of degrading.
                 let label = match self.shortcut_for(action) {
@@ -408,7 +467,7 @@ impl KeyBindings {
                     },
                 };
                 (label, action.description())
-            })
+            }))
             .collect()
     }
 
@@ -440,6 +499,22 @@ fn fallback_quit_shortcut() -> Shortcut {
         shift: false,
         key: ShortcutKey::Char('q'),
     }
+}
+
+/// The same key press with Alt held.
+///
+/// The leader stands in for Alt, so the key after it is matched as though Alt
+/// had been held: leader then `C` runs Alt+C, and leader then `Ctrl+P` runs
+/// Ctrl+Alt+P.
+pub fn with_leader_alt(event: &KeyEvent) -> KeyEvent {
+    let mut event = *event;
+    event.modifiers |= KeyModifiers::ALT;
+    // A terminal that reports a capital letter without also reporting Shift
+    // would otherwise reach none of the Alt+Shift bindings through the leader.
+    if matches!(event.code, KeyCode::Char(ch) if ch.is_ascii_uppercase()) {
+        event.modifiers |= KeyModifiers::SHIFT;
+    }
+    event
 }
 
 fn fallback_help_shortcut() -> Shortcut {
@@ -477,7 +552,8 @@ mod tests {
                 .label(),
             "a missing binding falls back to the action's default chord"
         );
-        assert_eq!(bindings.help_entries().len(), ACTIONS.len());
+        let leader_rows = usize::from(bindings.leader_label().is_some());
+        assert_eq!(bindings.help_entries().len(), ACTIONS.len() + leader_rows);
         assert!(
             bindings
                 .action_for(&KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT))
@@ -548,6 +624,106 @@ mod tests {
             KeyBindings::from_overrides(&overrides(&[("quit", "ctrl+q"), ("zoom-pane", "alt+q")]))
                 .expect_err("quit recovery key");
         assert!(alt_q.to_string().contains("Alt+Q is reserved"));
+    }
+
+    /// The whole point of the leader: a Mac that never sends Alt can still
+    /// reach every shortcut.
+    #[test]
+    fn the_leader_stands_in_for_alt() {
+        let bindings =
+            KeyBindings::from_overrides(&overrides(&[("leader", "ctrl+g")])).expect("leader");
+
+        assert!(bindings.is_leader(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)));
+        assert_eq!(bindings.leader_label().as_deref(), Some("Ctrl+G"));
+
+        // Plain letters reach the Alt bindings.
+        assert_eq!(
+            bindings.action_for(&with_leader_alt(&KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::NONE
+            ))),
+            Some(Action::CommandLine)
+        );
+        // Arrows too, which are the shortcuts most likely to be reached for.
+        assert_eq!(
+            bindings.action_for(&with_leader_alt(&KeyEvent::new(
+                KeyCode::Left,
+                KeyModifiers::NONE
+            ))),
+            Some(Action::FocusLeft)
+        );
+        // Ctrl+Alt chords need only their Ctrl half after the leader.
+        assert_eq!(
+            bindings.action_for(&with_leader_alt(&KeyEvent::new(
+                KeyCode::Char('p'),
+                KeyModifiers::CONTROL
+            ))),
+            Some(Action::Ports)
+        );
+        // An unbound key resolves to nothing rather than to a near miss.
+        assert_eq!(
+            bindings.action_for(&with_leader_alt(&KeyEvent::new(
+                KeyCode::Char('9'),
+                KeyModifiers::NONE
+            ))),
+            None
+        );
+    }
+
+    /// Alt+Shift bindings are reachable through the leader whether or not the
+    /// terminal reports Shift alongside the capital letter.
+    #[test]
+    fn the_leader_reaches_shifted_shortcuts_either_way() {
+        let bindings =
+            KeyBindings::from_overrides(&overrides(&[("leader", "ctrl+g")])).expect("leader");
+
+        for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+            assert_eq!(
+                bindings.action_for(&with_leader_alt(&KeyEvent::new(
+                    KeyCode::Char('C'),
+                    modifiers
+                ))),
+                Some(Action::CaptureOutput),
+                "{modifiers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_leader_can_be_turned_off_and_cannot_shadow_a_shortcut() {
+        for value in ["off", "none", "false", ""] {
+            let bindings = KeyBindings::from_overrides(&overrides(&[("leader", value)]))
+                .expect("leader override");
+            assert_eq!(bindings.leader_label(), None, "{value}");
+            assert!(!bindings.is_leader(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)));
+        }
+
+        let clash = KeyBindings::from_overrides(&overrides(&[
+            ("leader", "ctrl+g"),
+            ("zoom-pane", "ctrl+g"),
+        ]))
+        .expect_err("leader that shadows a shortcut");
+        assert!(clash.to_string().contains("leader key"));
+
+        let invalid = KeyBindings::from_overrides(&overrides(&[("leader", "ctrl+shift+nope")]))
+            .expect_err("invalid leader");
+        assert!(invalid.to_string().contains("[keys].leader"));
+    }
+
+    /// Whatever the platform default is, it must parse and must not collide
+    /// with a shipped binding.
+    #[test]
+    fn the_platform_default_leader_is_usable() {
+        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
+        assert_eq!(
+            bindings.leader_label(),
+            DEFAULT_LEADER.map(|chord| {
+                Shortcut::parse(chord)
+                    .expect("default leader parses")
+                    .label()
+            })
+        );
+        assert_eq!(bindings.leader_label().is_some(), cfg!(target_os = "macos"));
     }
 
     #[test]

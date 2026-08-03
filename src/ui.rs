@@ -11,12 +11,12 @@ use vt100::Cell;
 
 use crate::{
     app::{
-        App, AssistantMessageRole, BackgroundJobState, BackgroundJobView, BackgroundJobsView,
-        CloseGridConfirmationView, CommandPaletteView, ExitedPaneRecoveryView, FocusedPaneSummary,
-        FollowUpDialog, GridPalette, PaneSelection, PaneSettingsTarget, PaneSettingsView,
-        PortInspectorView, PreviousPaneView, PreviousPanesView, QuitConfirmationView,
-        RenamePaneView, RenameTabView, SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind,
-        TabLabel, WorkspaceAssistantView,
+        AdoptTerminalView, App, AssistantMessageRole, BackgroundJobState, BackgroundJobView,
+        BackgroundJobsView, CloseGridConfirmationView, CommandPaletteView, ExitedPaneRecoveryView,
+        FocusedPaneSummary, FollowUpDialog, GridPalette, PaneSelection, PaneSettingsTarget,
+        PaneSettingsView, PortInspectorView, PreviousPaneView, PreviousPanesView,
+        QuitConfirmationView, RenamePaneView, RenameTabView, SettingsGroup, SettingsRow,
+        SettingsTab, SettingsValueKind, TabLabel, WorkspaceAssistantView,
     },
     auth::{AgentKind, AuthProfile},
     copy_mode::{CopyCellKind, CopyModeView, TextPoint},
@@ -80,6 +80,7 @@ pub struct DrawState {
     pub tab_rects: Vec<(usize, Rect)>,
     pub previous_panes_button: Option<Rect>,
     pub previous_pane_rows: Vec<(usize, Rect)>,
+    pub summary_refresh_button: Option<Rect>,
     pub pane_settings_button: Option<Rect>,
     pub pane_settings_rename_button: Option<Rect>,
     pub pane_settings_reload_button: Option<Rect>,
@@ -141,6 +142,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let grid_resizer = app.grid_resizer();
     let image_overlay = app.image_overlay_view();
     let assistant_view = app.workspace_assistant_view();
+    let adopt_terminal_view = app.adopt_terminal_view();
     let quit_confirmation = app.quit_confirmation_view();
     let close_grid_confirmation = app.close_grid_confirmation_view();
     let help_open = app.help_open();
@@ -248,6 +250,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
 
     let status_buttons = render_status_bar(frame, status_area, &StatusBar::from_app(app), palette);
     let previous_panes_button = status_buttons.previous_panes;
+    let summary_refresh_button = status_buttons.summary_refresh;
     let pane_settings_button = status_buttons.pane_settings;
     let background_jobs_button = status_buttons.background_jobs;
     let ports_button = status_buttons.ports;
@@ -286,6 +289,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     if let Some(rename) = tab_rename_view.as_ref() {
         render_rename_tab(frame, area, rename);
     }
+    if let Some(adopt) = adopt_terminal_view.as_ref() {
+        render_adopt_terminal(frame, area, adopt, palette);
+    }
     if let Some(image) = image_overlay {
         render_image_overlay(frame, area, image);
     }
@@ -314,6 +320,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         tab_rects,
         previous_panes_button,
         previous_pane_rows,
+        summary_refresh_button,
         pane_settings_button,
         pane_settings_rename_button,
         pane_settings_reload_button,
@@ -1067,6 +1074,7 @@ struct StatusButtons {
     pane_settings: Option<Rect>,
     background_jobs: Option<Rect>,
     ports: Option<Rect>,
+    summary_refresh: Option<Rect>,
 }
 
 /// Everything the status bar draws, with nothing left to look up.
@@ -1284,25 +1292,51 @@ fn render_status_bar(
         area.x.saturating_add(left_width),
         buttons.ports.map_or(area.right(), |chip| chip.x),
     ) {
-        let line = if !view.status.is_empty() {
+        // The refresh control is only offered alongside the summary it refreshes,
+        // never over a status message that is about to disappear.
+        let clock = if view.status.is_empty() && view.pane.refreshable {
+            summary_clock_spans(&view.pane)
+        } else {
+            Vec::new()
+        };
+        let clock_width = u16::try_from(clock.iter().map(Span::width).sum::<usize>())
+            .unwrap_or(u16::MAX)
+            .min(room);
+        let text_room = room.saturating_sub(clock_width) as usize;
+
+        let mut spans = if !view.status.is_empty() {
             // Status messages are sentences and routinely outrun the bar.
             // Trimming ends them in an ellipsis rather than mid-word, so a cut
             // message reads as cut rather than as a typo.
-            Line::from(Span::styled(
-                truncate_text(&view.status, room as usize),
+            vec![Span::styled(
+                truncate_text(&view.status, text_room),
                 Style::default().fg(TEXT),
-            ))
+            )]
         } else {
-            pane_summary_line(&view.pane, room as usize)
+            pane_summary_line(&view.pane, text_room).spans
         };
-        let width = u16::try_from(line.width()).unwrap_or(u16::MAX).min(room);
+        let text_width = u16::try_from(spans.iter().map(Span::width).sum::<usize>())
+            .unwrap_or(u16::MAX)
+            .min(room);
+        // A clock with nothing in front of it is a countdown to nothing.
+        let clock_width = if text_width > 0 { clock_width } else { 0 };
+        if clock_width > 0 {
+            spans.extend(clock);
+        }
+
+        let width = text_width.saturating_add(clock_width).min(room);
         if width > 0 {
             let centred = area.x + area.width.saturating_sub(width) / 2;
             let x = centred.clamp(start, start + room - width);
             frame.render_widget(
-                Paragraph::new(line).style(Style::default().bg(SURFACE)),
+                Paragraph::new(Line::from(spans)).style(Style::default().bg(SURFACE)),
                 Rect::new(x, area.y, width, 1),
             );
+            // The whole clock is the click target, not just the glyph on the end
+            // of it: one cell is a hard thing to hit, and a font that renders the
+            // glyph badly would otherwise leave nothing to aim at.
+            buttons.summary_refresh =
+                (clock_width > 0).then(|| Rect::new(x + text_width, area.y, clock_width, 1));
         }
     }
 
@@ -1328,6 +1362,9 @@ const STATUS_CENTRE_MARGIN: u16 = 2;
 /// better off leaving the space blank.
 const STATUS_CENTRE_MIN: u16 = 16;
 const SUMMARY_SEPARATOR: &str = " · ";
+/// The refresh control on the end of the countdown. Padded so it reads as a
+/// button rather than as punctuation.
+const SUMMARY_REFRESH_GLYPH: &str = " ⟳ ";
 
 /// The span of the bar the centre line may use: `(x, width)`, or nothing when
 /// the chips have eaten the middle.
@@ -1338,6 +1375,43 @@ fn status_centre_gap(area: Rect, left_end: u16, right_start: u16) -> Option<(u16
         .min(area.right());
     let room = end.checked_sub(start)?;
     (room >= STATUS_CENTRE_MIN).then_some((start, room))
+}
+
+/// The countdown on the focused pane's cached summary, and the control that
+/// skips it.
+///
+/// Summaries are cached for minutes at a time to keep the API bill down, which
+/// makes "how old is this" a fair question — so the bar answers it, and puts the
+/// way to get a fresh one right next to the answer.
+fn summary_clock_spans(pane: &FocusedPaneSummary) -> Vec<Span<'static>> {
+    let clock = if pane.refreshing {
+        "···".to_string()
+    } else {
+        match pane.refresh_in {
+            Some(left) => {
+                let seconds = left.as_secs();
+                format!("{}:{:02}", seconds / 60, seconds % 60)
+            }
+            None => "due".to_string(),
+        }
+    };
+
+    vec![
+        Span::styled(
+            format!("{SUMMARY_SEPARATOR}{clock}"),
+            Style::default().fg(TEXT_FAINT),
+        ),
+        Span::styled(
+            SUMMARY_REFRESH_GLYPH,
+            Style::default()
+                .fg(if pane.refreshing {
+                    TEXT_FAINT
+                } else {
+                    TEXT_DIM
+                })
+                .bg(SURFACE_HI),
+        ),
+    ]
 }
 
 /// `2 Fluent · running the failing test alone`, trimmed to fit.
@@ -2781,6 +2855,141 @@ fn background_jobs_command_bar(width: u16) -> Line<'static> {
         command_key("Esc"),
         Span::styled(" close", Style::default().fg(Color::Gray)),
     ])
+}
+
+/// The picker that re-roots a pane at an outside terminal's folder.
+///
+/// It is careful to promise only what it does. "Adopting" a window moves the
+/// pane to that window's folder; the window itself keeps its process and is left
+/// running, because a live console cannot be handed to another pseudoconsole.
+fn render_adopt_terminal(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &AdoptTerminalView,
+    palette: &GridPalette,
+) {
+    let modal = previous_panes_modal_rect(area, view.rows.len().saturating_add(2));
+    let shadow = settings_shadow_rect(area, modal);
+    if shadow != modal {
+        frame.render_widget(Clear, shadow);
+        frame.render_widget(
+            Paragraph::new("").style(Style::default().bg(SETTINGS_SHADOW)),
+            shadow,
+        );
+    }
+    frame.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(palette.focus())
+                .add_modifier(Modifier::BOLD),
+        )
+        .style(settings_panel_style())
+        .title(" Adopt A Terminal ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let budget = inner.width.saturating_sub(4) as usize;
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!("into pane {}", view.target_label),
+                    Style::default()
+                        .fg(palette.focus())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    truncate_text(
+                        "opens a shell where the window is; the window keeps running",
+                        budget,
+                    ),
+                    Style::default().fg(SETTINGS_MUTED),
+                ),
+            ]),
+        ])
+        .style(settings_panel_style()),
+        chunks[0],
+    );
+
+    let rows = chunks[1];
+    let visible = rows.height as usize;
+    let first = view.cursor.saturating_sub(visible.saturating_sub(1));
+    let lines = view
+        .rows
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(visible)
+        .map(|(index, row)| {
+            let selected = index == view.cursor;
+            // A window whose title hides its folder is still listed, so the user
+            // is not left wondering why it is missing — it just cannot be picked.
+            let style = if !row.adoptable {
+                Style::default().fg(TEXT_FAINT)
+            } else if selected {
+                Style::default()
+                    .fg(INK)
+                    .bg(palette.focus())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(SETTINGS_TEXT)
+            };
+            Line::from(vec![
+                Span::styled(if selected { " ▸ " } else { "   " }, style),
+                Span::styled(truncate_text(&row.label, budget.saturating_sub(10)), style),
+                Span::styled(
+                    format!("  pid {}", row.pid),
+                    if selected {
+                        style
+                    } else {
+                        Style::default().fg(SETTINGS_MUTED)
+                    },
+                ),
+            ])
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).style(settings_panel_style()), rows);
+
+    let footer = if view.confirming {
+        Line::from(vec![
+            Span::styled(
+                "  replace this pane? ",
+                Style::default().fg(WAITING).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "its shell closes · Enter confirms · Esc goes back",
+                Style::default().fg(SETTINGS_MUTED),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(
+            "  ↑↓ choose · Enter adopts · Esc cancels",
+            Style::default().fg(SETTINGS_MUTED),
+        ))
+    };
+    frame.render_widget(
+        Paragraph::new(footer).style(settings_panel_style()),
+        chunks[2],
+    );
 }
 
 fn previous_panes_modal_rect(area: Rect, pane_count: usize) -> Rect {
@@ -4947,6 +5156,7 @@ fn set_terminal_cursor(frame: &mut Frame<'_>, area: Rect, screen: &vt100::Screen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::AdoptTerminalRow;
     use crate::{
         cli::Cli,
         config::Config,
@@ -4954,6 +5164,7 @@ mod tests {
     };
     use clap::Parser;
     use ratatui::{Terminal, backend::TestBackend};
+    use std::time::Duration;
 
     /// One pane in a rendered preview of the shell.
     struct PreviewPane {
@@ -5086,6 +5297,9 @@ mod tests {
                         pane: FocusedPaneSummary {
                             title: "1 Frontend".into(),
                             detail: "wiring the checkout form to the new API".into(),
+                            refresh_in: Some(Duration::from_secs(134)),
+                            refreshable: true,
+                            ..FocusedPaneSummary::default()
                         },
                         ..StatusBar::default()
                     },
@@ -5372,6 +5586,9 @@ mod tests {
             pane: FocusedPaneSummary {
                 title: "2 Fluent".into(),
                 detail: "running the failing test alone".into(),
+                refresh_in: Some(Duration::from_secs(134)),
+                refreshable: true,
+                ..FocusedPaneSummary::default()
             },
             ..StatusBar::default()
         };
@@ -5383,11 +5600,13 @@ mod tests {
             .expect("render status bar");
 
         let rendered = buffer_text(&terminal);
-        let expected = "2 Fluent · running the failing test alone";
+        let expected = "2 Fluent · running the failing test alone · 2:14 ⟳";
         let start = rendered
             .find(expected)
             .map(|byte| rendered[..byte].chars().count())
             .unwrap_or_else(|| panic!("summary missing from the bar: {rendered}"));
+        // The clock is part of the centred block, so the whole run is what has
+        // to sit in the middle — not the sentence with the clock hanging off it.
         let middle = start + expected.chars().count() / 2;
         assert!(
             middle.abs_diff(60) <= 1,
@@ -5398,6 +5617,112 @@ mod tests {
         // every frame of every session.
         assert!(!rendered.contains("LIVE"), "bar: {rendered}");
         assert!(!rendered.contains("focused pane"), "bar: {rendered}");
+    }
+
+    /// The countdown says how stale the cached summary is, and the control next
+    /// to it is what skips the wait. Both have to be hittable with a mouse.
+    #[test]
+    fn the_refresh_control_is_clickable_and_reports_the_cache_age() {
+        let backend = TestBackend::new(120, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let view = StatusBar {
+            pane: FocusedPaneSummary {
+                title: "2 Fluent".into(),
+                detail: "running the failing test alone".into(),
+                refresh_in: Some(Duration::from_secs(134)),
+                refreshable: true,
+                ..FocusedPaneSummary::default()
+            },
+            ..StatusBar::default()
+        };
+
+        let mut buttons = StatusButtons::default();
+        terminal
+            .draw(|frame| {
+                buttons = render_status_bar(frame, frame.area(), &view, &GridPalette::default());
+            })
+            .expect("render status bar");
+
+        let buffer = terminal.backend().buffer().clone();
+        let button = buttons.summary_refresh.expect("refresh control");
+        let hit = (button.x..button.right())
+            .map(|x| buffer[(x, 0)].symbol())
+            .collect::<String>();
+        assert_eq!(
+            hit, " · 2:14 ⟳ ",
+            "the whole clock must be the click target"
+        );
+
+        // Clock formats, including the two states that are not a countdown.
+        let spans = |pane: &FocusedPaneSummary| {
+            summary_clock_spans(pane)
+                .iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        };
+        let base = FocusedPaneSummary {
+            refreshable: true,
+            ..FocusedPaneSummary::default()
+        };
+        assert_eq!(
+            spans(&FocusedPaneSummary {
+                refresh_in: Some(Duration::from_secs(7)),
+                ..base.clone()
+            }),
+            " · 0:07 ⟳ "
+        );
+        assert_eq!(spans(&base), " · due ⟳ ");
+        assert_eq!(
+            spans(&FocusedPaneSummary {
+                refreshing: true,
+                ..base.clone()
+            }),
+            " · ··· ⟳ "
+        );
+    }
+
+    /// Nothing to refresh, nothing to offer: a pane that cannot be summarized
+    /// must not grow a control that would only report an error when pressed.
+    #[test]
+    fn an_unrefreshable_pane_gets_no_clock() {
+        let backend = TestBackend::new(120, 1);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let off = StatusBar {
+            pane: FocusedPaneSummary {
+                title: "2 Fluent".into(),
+                detail: "turn on AI activity summaries in Settings > Manager".into(),
+                ..FocusedPaneSummary::default()
+            },
+            ..StatusBar::default()
+        };
+
+        let mut buttons = StatusButtons::default();
+        terminal
+            .draw(|frame| {
+                buttons = render_status_bar(frame, frame.area(), &off, &GridPalette::default());
+            })
+            .expect("render status bar");
+        assert_eq!(buttons.summary_refresh, None);
+        assert!(!buffer_text(&terminal).contains('⟳'));
+
+        // Nor while a status message has taken the centre away from it.
+        let busy = StatusBar {
+            status: "copied 3 lines".into(),
+            pane: FocusedPaneSummary {
+                title: "2 Fluent".into(),
+                detail: "running the failing test alone".into(),
+                refresh_in: Some(Duration::from_secs(134)),
+                refreshable: true,
+                ..FocusedPaneSummary::default()
+            },
+            ..StatusBar::default()
+        };
+        terminal
+            .draw(|frame| {
+                buttons = render_status_bar(frame, frame.area(), &busy, &GridPalette::default());
+            })
+            .expect("render status bar");
+        assert_eq!(buttons.summary_refresh, None);
     }
 
     /// A status message is the answer to something the user just did, so it
@@ -5411,6 +5736,9 @@ mod tests {
             pane: FocusedPaneSummary {
                 title: "2 Fluent".into(),
                 detail: "running the failing test alone".into(),
+                refresh_in: Some(Duration::from_secs(134)),
+                refreshable: true,
+                ..FocusedPaneSummary::default()
             },
             ..StatusBar::default()
         };
@@ -5433,6 +5761,7 @@ mod tests {
         let pane = FocusedPaneSummary {
             title: "2 Fluent".into(),
             detail: "running the failing test alone".into(),
+            ..FocusedPaneSummary::default()
         };
 
         let wide = pane_summary_line(&pane, 60);
@@ -5461,6 +5790,58 @@ mod tests {
         let (start, room) = status_centre_gap(Rect::new(0, 0, 120, 1), 34, 110).expect("gap");
         assert_eq!(start, 36);
         assert_eq!(start + room, 108);
+    }
+
+    /// The picker must say what it actually does. Adopting a window moves the
+    /// pane to that window's folder; the window keeps its process, because a
+    /// live console cannot be handed to another pseudoconsole.
+    #[test]
+    fn the_adopt_picker_names_the_target_and_asks_before_replacing() {
+        let view = AdoptTerminalView {
+            cursor: 1,
+            target_label: "2 Fluent".into(),
+            rows: vec![
+                AdoptTerminalRow {
+                    label: "MINGW64:~ - npm run dev".into(),
+                    pid: 41,
+                    adoptable: false,
+                },
+                AdoptTerminalRow {
+                    label: "C:\\repos\\api".into(),
+                    pid: 42,
+                    adoptable: true,
+                },
+            ],
+            confirming: false,
+        };
+
+        let render = |view: &AdoptTerminalView| {
+            let mut terminal = Terminal::new(TestBackend::new(90, 20)).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    render_adopt_terminal(frame, frame.area(), view, &GridPalette::default());
+                })
+                .expect("render adopt picker");
+            buffer_text(&terminal)
+        };
+
+        let listing = render(&view);
+        assert!(listing.contains("into pane 2 Fluent"), "{listing}");
+        assert!(listing.contains("C:\\repos\\api"), "{listing}");
+        assert!(listing.contains("pid 42"), "{listing}");
+        // A window whose folder could not be read is still listed rather than
+        // silently dropped, so its absence is never a mystery.
+        assert!(listing.contains("npm run dev"), "{listing}");
+        assert!(listing.contains("the window keeps running"), "{listing}");
+        assert!(!listing.contains("its shell closes"), "{listing}");
+
+        // Confirming is the second half of "ask first": it says what is lost.
+        let confirming = render(&AdoptTerminalView {
+            confirming: true,
+            ..view
+        });
+        assert!(confirming.contains("replace this pane?"), "{confirming}");
+        assert!(confirming.contains("its shell closes"), "{confirming}");
     }
 
     /// The hints exist to be discoverable, not to be load-bearing. A terminal
