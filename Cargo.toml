@@ -46,3 +46,8 @@ lto = "thin"
 # Crash reports capture a backtrace. Keep the symbol table so its frames are
 # named instead of bare addresses; the heavier debug info is still stripped.
 strip = "debuginfo"
+
+# crossterm 0.29 spins at 100% CPU once its terminal closes:
+# https://github.com/crossterm-rs/crossterm/issues/793
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }
