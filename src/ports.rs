@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io::{self, Read},
+    path::PathBuf,
     process::{Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
@@ -57,26 +58,82 @@ pub fn terminate_process(pid: u32) -> io::Result<()> {
     terminate_process_platform(pid)
 }
 
-pub fn roots_with_descendant_named(roots: &[u32], expected_name: &str) -> io::Result<HashSet<u32>> {
-    if roots.is_empty() {
-        return Ok(HashSet::new());
-    }
-    let processes = process_snapshot()?;
-    let roots = roots.iter().copied().collect::<HashSet<_>>();
-    let expected_name = expected_name.trim_end_matches(".exe").to_ascii_lowercase();
-    Ok(processes
-        .iter()
-        .filter(|(_, process)| {
-            let name = process
-                .name
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(&process.name)
-                .to_ascii_lowercase();
-            name.trim_end_matches(".exe") == expected_name
+/// Every process running at one moment, so several questions about the process
+/// tree can be answered from a single listing.
+pub struct ProcessTable {
+    processes: HashMap<u32, ProcessInfo>,
+}
+
+impl ProcessTable {
+    pub fn capture() -> io::Result<Self> {
+        Ok(Self {
+            processes: process_snapshot()?,
         })
-        .filter_map(|(pid, _)| descendant_root(*pid, &processes, &roots))
-        .collect())
+    }
+
+    pub fn children_of(&self, parent: u32) -> impl Iterator<Item = u32> + '_ {
+        self.processes
+            .iter()
+            .filter(move |(_, process)| process.parent_pid == parent)
+            .map(|(pid, _)| *pid)
+    }
+
+    pub fn roots_with_descendant_named(&self, roots: &[u32], expected_name: &str) -> HashSet<u32> {
+        let roots = roots.iter().copied().collect::<HashSet<_>>();
+        let expected_name = expected_name.trim_end_matches(".exe").to_ascii_lowercase();
+        self.processes
+            .iter()
+            .filter(|(_, process)| {
+                let name = process
+                    .name
+                    .rsplit(['/', '\\'])
+                    .next()
+                    .unwrap_or(&process.name)
+                    .to_ascii_lowercase();
+                name.trim_end_matches(".exe") == expected_name
+            })
+            .filter_map(|(pid, _)| descendant_root(*pid, &self.processes, &roots))
+            .collect()
+    }
+
+    pub fn descendants_of(&self, roots: &[u32]) -> ProcessTree {
+        let roots = roots.iter().copied().collect::<HashSet<_>>();
+        let running_roots = roots
+            .iter()
+            .copied()
+            .filter(|root| self.processes.contains_key(root))
+            .collect();
+        let descendants = self
+            .processes
+            .keys()
+            .filter_map(|pid| {
+                let mut current = *pid;
+                for depth in 1..=64 {
+                    let parent = self.processes.get(&current)?.parent_pid;
+                    if roots.contains(&parent) {
+                        return Some((*pid, parent, depth));
+                    }
+                    if parent == 0 || parent == current {
+                        return None;
+                    }
+                    current = parent;
+                }
+                None
+            })
+            .collect();
+        ProcessTree {
+            descendants,
+            running_roots,
+        }
+    }
+}
+
+pub struct ProcessTree {
+    /// Every running process under a root, as `(pid, root, depth)` where a
+    /// direct child of its root has depth 1.
+    pub descendants: Vec<(u32, u32, usize)>,
+    /// The roots that were running.
+    pub running_roots: HashSet<u32>,
 }
 
 fn descendant_root(
@@ -403,7 +460,194 @@ fn process_snapshot() -> io::Result<HashMap<u32, ProcessInfo>> {
     Ok(processes)
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn process_snapshot() -> io::Result<HashMap<u32, ProcessInfo>> {
+    use std::{ffi::CStr, mem};
+
+    let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if needed < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut pids = vec![0 as libc::pid_t; usize::try_from(needed).unwrap_or(0) + 256];
+    let capacity = libc::c_int::try_from(pids.len() * mem::size_of::<libc::pid_t>())
+        .map_err(io::Error::other)?;
+    let listed = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), capacity) };
+    if listed < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    pids.truncate(usize::try_from(listed).unwrap_or(0));
+
+    let uid = unsafe { libc::getuid() };
+    let info_size = mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let mut arguments = vec![0_u8; argument_buffer_size()];
+    let mut processes = HashMap::with_capacity(pids.len());
+    for pid in pids {
+        let mut info = unsafe { mem::zeroed::<libc::proc_bsdinfo>() };
+        let filled = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                (&raw mut info).cast(),
+                info_size,
+            )
+        };
+        if filled != info_size {
+            continue;
+        }
+        // `ps` names a process by its argv[0], which for Claude is the
+        // `claude` link it was started through; the kernel's own name is the
+        // versioned file behind it. Arguments are only readable for our own
+        // processes, and `ps` falls back to the kernel name for the rest too.
+        let name = (info.pbi_uid == uid)
+            .then(|| first_argument(pid, &mut arguments))
+            .flatten()
+            .unwrap_or_else(|| {
+                let name = unsafe { CStr::from_ptr(info.pbi_name.as_ptr()) };
+                let name = if name.is_empty() {
+                    unsafe { CStr::from_ptr(info.pbi_comm.as_ptr()) }
+                } else {
+                    name
+                };
+                name.to_string_lossy().into_owned()
+            });
+        processes.insert(
+            pid as u32,
+            ProcessInfo {
+                parent_pid: info.pbi_ppid,
+                name: name.rsplit('/').next().unwrap_or(&name).to_string(),
+            },
+        );
+    }
+    Ok(processes)
+}
+
+/// The folder of the program in front on `leader`'s terminal, which is where
+/// the person last moved to in that pane; `leader`'s own folder otherwise.
+pub fn foreground_cwd(leader: u32) -> Option<PathBuf> {
+    foreground_cwd_platform(leader)
+}
+
+#[cfg(target_os = "macos")]
+fn foreground_cwd_platform(leader: u32) -> Option<PathBuf> {
+    let leader = libc::pid_t::try_from(leader).ok()?;
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_bsdinfo>() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            leader,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            (&raw mut info).cast(),
+            size,
+        )
+    };
+    let foreground = (filled == size)
+        .then(|| libc::pid_t::try_from(info.e_tpgid).ok())
+        .flatten()
+        .filter(|pid| *pid > 0);
+    foreground
+        .and_then(process_cwd)
+        .or_else(|| process_cwd(leader))
+}
+
+#[cfg(target_os = "macos")]
+fn process_cwd(pid: libc::pid_t) -> Option<PathBuf> {
+    use std::{ffi::CStr, os::unix::ffi::OsStrExt};
+
+    let mut info = unsafe { std::mem::zeroed::<libc::proc_vnodepathinfo>() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    let filled = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&raw mut info).cast(),
+            size,
+        )
+    };
+    if filled != size {
+        return None;
+    }
+    let path = unsafe { CStr::from_ptr(info.pvi_cdir.vip_path.as_ptr().cast()) };
+    let path = std::ffi::OsStr::from_bytes(path.to_bytes());
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+#[cfg(target_os = "linux")]
+fn foreground_cwd_platform(leader: u32) -> Option<PathBuf> {
+    let foreground = std::fs::read_to_string(format!("/proc/{leader}/stat"))
+        .ok()
+        .and_then(|stat| {
+            let fields = stat.get(stat.rfind(')')? + 1..)?;
+            fields.split_whitespace().nth(5)?.parse::<i32>().ok()
+        })
+        .filter(|pid| *pid > 0);
+    foreground
+        .and_then(|pid| std::fs::read_link(format!("/proc/{pid}/cwd")).ok())
+        .or_else(|| std::fs::read_link(format!("/proc/{leader}/cwd")).ok())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn foreground_cwd_platform(_leader: u32) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn argument_buffer_size() -> usize {
+    let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    let mut value: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            (&raw mut value).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status == 0 && value > 0 {
+        value as usize
+    } else {
+        1 << 18
+    }
+}
+
+/// argv[0] of `pid`, read from the kernel's copy of its arguments: the argument
+/// count, the executable path, padding, then the arguments themselves.
+#[cfg(target_os = "macos")]
+fn first_argument(pid: libc::pid_t, buffer: &mut [u8]) -> Option<String> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size = buffer.len();
+    let status = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let data = buffer.get(std::mem::size_of::<libc::c_int>()..size)?;
+    let path_end = data.iter().position(|byte| *byte == 0)?;
+    let rest = &data[path_end..];
+    let start = rest.iter().position(|byte| *byte != 0)?;
+    let rest = &rest[start..];
+    let end = rest
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(rest.len());
+    let first = String::from_utf8_lossy(&rest[..end]).into_owned();
+    (!first.is_empty()).then_some(first)
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn process_snapshot() -> io::Result<HashMap<u32, ProcessInfo>> {
     let mut command = Command::new("ps");
     command.args(["-axo", "pid=,ppid=,comm="]);
@@ -465,7 +709,7 @@ fn join_reader(reader: thread::JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Ve
         .map_err(|_| io::Error::other("port inspection output reader panicked"))?
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn parse_ps(output: &str) -> HashMap<u32, ProcessInfo> {
     output
         .lines()
@@ -515,6 +759,25 @@ fn terminate_process_platform(_pid: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn process_table_names_a_process_by_the_link_it_was_started_through() {
+        let dir = std::env::temp_dir().join(format!("gridbash-ports-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("claude");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("/bin/sleep", &link).unwrap();
+        let mut child = Command::new(&link).arg("30").spawn().unwrap();
+
+        let table = ProcessTable::capture().unwrap();
+        let roots = table.roots_with_descendant_named(&[std::process::id()], "claude");
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(roots, HashSet::from([std::process::id()]));
+    }
 
     #[test]
     fn associates_only_descendants_of_agent_roots() {

@@ -136,6 +136,19 @@ pub enum Command {
     Resume(ResumeArgs),
     /// Inspect or control a running GridBash session.
     Ctl(CtlArgs),
+    /// Check that this terminal can deliver the Alt shortcuts.
+    Doctor(DoctorArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DoctorArgs {
+    /// Apply the terminal setting that makes Option send Alt, without asking.
+    #[arg(long)]
+    pub fix: bool,
+
+    /// Report what this terminal actually sends for each key you press.
+    #[arg(long)]
+    pub keys: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -191,6 +204,12 @@ pub enum AgentAction {
         /// Clear the pane title instead of setting one.
         #[arg(long)]
         clear: bool,
+    },
+    /// From a parked pane: say its condition holds. A reviewer checks the claim
+    /// against the repository and answers in the pane.
+    Done {
+        /// What you did and how you checked it. Omit to read it from stdin.
+        claim: Option<String>,
     },
 }
 

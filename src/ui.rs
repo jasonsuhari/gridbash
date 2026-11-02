@@ -11,16 +11,18 @@ use vt100::Cell;
 
 use crate::{
     app::{
-        AdoptTerminalView, App, AssistantMessageRole, BackgroundJobState, BackgroundJobView,
-        BackgroundJobsView, CloseGridConfirmationView, CommandPaletteView, ExitedPaneRecoveryView,
-        FocusedPaneSummary, FollowUpDialog, GridPalette, PaneSelection, PaneSettingsTarget,
-        PaneSettingsView, PortInspectorView, PreviousPaneView, PreviousPanesView,
-        QuitConfirmationView, RenamePaneView, RenameTabView, SettingsGroup, SettingsRow,
-        SettingsTab, SettingsValueKind, TabLabel, WorkspaceAssistantView,
+        AccountMeterView, AccountSheetView, AdoptTerminalView, App, AssistantMessageRole,
+        BackgroundJobState, BackgroundJobView, BackgroundJobsView, CloseGridConfirmationView,
+        CommandPaletteView, ExitedPaneRecoveryView, FollowUpDialog, GridPalette, PaneSelection,
+        PaneSettingsTarget, PaneSettingsView, ParkSheetView, ParkToastView, PortInspectorView,
+        PreviousPaneView, PreviousPanesView, QuitConfirmationView, RenamePaneView, RenameTabView,
+        SettingsGroup, SettingsRow, SettingsTab, SettingsValueKind, ShelfState, ShelfView,
+        TabLabel, WorkspaceAssistantView, shelf_areas,
     },
     auth::{AgentKind, AuthProfile},
     copy_mode::{CopyCellKind, CopyModeView, TextPoint},
     image_preview::ImagePreview,
+    keeper,
 };
 
 // ---------------------------------------------------------------------------
@@ -36,23 +38,23 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 /// Deepest surface: the gutter behind the grid, and the dividers between panes.
-const INK: Color = Color::Rgb(7, 10, 14);
+pub(crate) const INK: Color = Color::Rgb(7, 10, 14);
 /// The app background, and the default background of terminal cells.
 const APP_BG: Color = Color::Rgb(11, 15, 20);
 /// Raised chrome: the tab strip and the status bar.
-const SURFACE: Color = Color::Rgb(16, 22, 29);
+pub(crate) const SURFACE: Color = Color::Rgb(16, 22, 29);
 /// Chrome under the cursor or otherwise active.
-const SURFACE_HI: Color = Color::Rgb(26, 35, 45);
+pub(crate) const SURFACE_HI: Color = Color::Rgb(26, 35, 45);
 
 /// Idle pane border. Present enough to read as a frame, quiet enough that the
 /// focused pane is the only thing on screen drawing the eye.
-const LINE: Color = Color::Rgb(42, 53, 66);
+pub(crate) const LINE: Color = Color::Rgb(42, 53, 66);
 /// Divider between two panes that are both idle.
 const LINE_SOFT: Color = Color::Rgb(30, 39, 49);
 
-const TEXT: Color = Color::Rgb(230, 237, 243);
-const TEXT_DIM: Color = Color::Rgb(150, 165, 180);
-const TEXT_FAINT: Color = Color::Rgb(98, 113, 129);
+pub(crate) const TEXT: Color = Color::Rgb(230, 237, 243);
+pub(crate) const TEXT_DIM: Color = Color::Rgb(150, 165, 180);
+pub(crate) const TEXT_FAINT: Color = Color::Rgb(98, 113, 129);
 
 /// Terminal-cell defaults, applied to any cell whose own colour is "default".
 const PANE_FG: Color = TEXT;
@@ -72,26 +74,22 @@ const SETTINGS_SHADOW: Color = Color::Rgb(4, 6, 10);
 const SETTINGS_BORDER: Color = Color::Rgb(58, 210, 210);
 const SETTINGS_MUTED: Color = Color::Rgb(118, 135, 149);
 const SETTINGS_TEXT: Color = Color::Rgb(230, 237, 243);
-const TAB_WAITING_BG: Color = WAITING;
 
 pub struct DrawState {
     pub grid_area: Rect,
     pub pane_rects: Vec<Rect>,
     pub tab_rects: Vec<(usize, Rect)>,
-    pub previous_panes_button: Option<Rect>,
     pub previous_pane_rows: Vec<(usize, Rect)>,
-    pub summary_refresh_button: Option<Rect>,
-    pub pane_settings_button: Option<Rect>,
     pub pane_settings_rename_button: Option<Rect>,
     pub pane_settings_reload_button: Option<Rect>,
     pub pane_settings_sleep_button: Option<Rect>,
     pub pane_settings_deactivate_button: Option<Rect>,
     pub pane_settings_goal_button: Option<Rect>,
     pub pane_settings_stop_goal_button: Option<Rect>,
-    pub background_jobs_button: Option<Rect>,
     pub background_job_rows: Vec<(usize, Rect)>,
-    pub ports_button: Option<Rect>,
     pub port_rows: Vec<(usize, Rect)>,
+    pub shelf_rows: Vec<(usize, Rect)>,
+    pub park_toast_rect: Option<Rect>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -102,10 +100,6 @@ pub struct PaneRenderCache {
     selection: Option<PaneSelection>,
     buffer: Buffer,
 }
-
-const STATUS_BRAND: &str = " GridBash ";
-const PREVIOUS_PANES_BUTTON: &str = " Panes ";
-const PANE_SETTINGS_BUTTON: &str = " Summary ";
 
 pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let area = frame.area();
@@ -120,14 +114,12 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
             Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(command_center_height),
-            Constraint::Length(1),
         ])
         .split(area);
 
     let tab_area = chunks[0];
     let grid_area = chunks[1];
     let command_center_area = chunks[2];
-    let status_area = chunks[3];
     let rects = app.pane_rects(grid_area);
     let palette = app.palette();
     let rename_view = app.rename_pane_view();
@@ -147,6 +139,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let close_grid_confirmation = app.close_grid_confirmation_view();
     let help_open = app.help_open();
     let copy_mode_open = app.copy_mode_open();
+    let park_sheet = app.park_sheet_view();
+    let account_sheet = app.account_sheet_view();
     let exited_recovery = if command_palette_view.is_some()
         || help_open
         || copy_mode_open
@@ -184,6 +178,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         || assistant_view.is_some()
         || quit_confirmation.is_some()
         || close_grid_confirmation.is_some()
+        || park_sheet.is_some()
+        || account_sheet.is_some()
         || exited_recovery.is_some();
     let mut pane_settings_rename_button = None;
     let mut pane_settings_reload_button = None;
@@ -191,7 +187,37 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
     let mut pane_settings_deactivate_button = None;
     let mut pane_settings_goal_button = None;
     let mut pane_settings_stop_goal_button = None;
-    let tab_rects = render_tabs(frame, tab_area, &app.tab_labels(), palette);
+    let tab_rects = render_tabs(
+        frame,
+        tab_area,
+        &app.tab_labels(),
+        palette,
+        &app.account_meters(),
+        app.tab_strip_note().as_deref(),
+    );
+
+    if let Some(hint) = app.empty_parked_hint() {
+        render_empty_parked(frame, grid_area, &hint);
+    }
+
+    let mut shelf_rows = Vec::new();
+    if let Some(shelf) = app.shelf_view() {
+        let banner = app.shelf_banner();
+        let areas = shelf_areas(grid_area, banner.is_some());
+        shelf_rows = render_shelf(frame, areas.list, &shelf, palette);
+        if let (Some(area), Some((condition, reason))) = (areas.banner, banner) {
+            render_shelf_banner(frame, area, &condition, &reason);
+        }
+    }
+    if let Some(view) = app.keeper_view() {
+        keeper::render(
+            frame,
+            keeper::areas(grid_area).table,
+            view.command,
+            view.snapshot,
+            palette,
+        );
+    }
 
     // Panes share the border cells that divide them, so whichever pane draws
     // last owns the colour of the line between them. Drawing in state order lets
@@ -235,6 +261,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         } else {
             let selection = app.selection_for_pane(index);
             app.render_pane_screen(frame, index, inner, selection);
+            if !frame_view.focused {
+                fade_toward_background(frame.buffer_mut(), inner);
+            }
         }
 
         if frame_view.focused && !sleeping && !modal_open && pane.screen().scrollback() == 0 {
@@ -242,18 +271,34 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         }
     }
 
+    if let Some(bounds) = rects
+        .iter()
+        .copied()
+        .filter(|rect| !rect.is_empty())
+        .reduce(|all, rect| all.union(rect))
+    {
+        round_outer_corners(frame.buffer_mut(), bounds);
+    }
+
+    if let Some(sheet) = park_sheet.as_ref()
+        && let Some(pane) = rects.get(sheet.pane_index).copied()
+    {
+        render_park_sheet(frame, pane, sheet, palette);
+    }
+    if let Some(sheet) = account_sheet.as_ref()
+        && let Some(pane) = rects.get(sheet.pane_index).copied()
+    {
+        render_account_sheet(frame, pane, sheet, palette);
+    }
+    let park_toast_rect = app
+        .park_toast_view()
+        .and_then(|toast| render_park_toast(frame, grid_area, &toast));
+
     if let Some(assistant) = assistant_view.as_ref() {
         render_workspace_assistant(frame, command_center_area, assistant, palette);
     } else if app.command_focused() {
         render_shell_command_center(frame, command_center_area, app, palette);
     }
-
-    let status_buttons = render_status_bar(frame, status_area, &StatusBar::from_app(app), palette);
-    let previous_panes_button = status_buttons.previous_panes;
-    let summary_refresh_button = status_buttons.summary_refresh;
-    let pane_settings_button = status_buttons.pane_settings;
-    let background_jobs_button = status_buttons.background_jobs;
-    let ports_button = status_buttons.ports;
 
     if app.settings_open() {
         render_settings(frame, area, app, palette);
@@ -318,20 +363,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &App) -> DrawState {
         grid_area,
         pane_rects: rects,
         tab_rects,
-        previous_panes_button,
         previous_pane_rows,
-        summary_refresh_button,
-        pane_settings_button,
         pane_settings_rename_button,
         pane_settings_reload_button,
         pane_settings_sleep_button,
         pane_settings_deactivate_button,
         pane_settings_goal_button,
         pane_settings_stop_goal_button,
-        background_jobs_button,
         background_job_rows,
-        ports_button,
         port_rows,
+        shelf_rows,
+        park_toast_rect,
     }
 }
 
@@ -366,49 +408,83 @@ fn render_tabs(
     area: Rect,
     tabs: &[TabLabel],
     palette: &GridPalette,
+    accounts: &[AccountMeterView],
+    note: Option<&str>,
 ) -> Vec<(usize, Rect)> {
     if area.width == 0 || area.height == 0 {
         return Vec::new();
     }
+    frame.render_widget(Block::default().style(Style::default().bg(SURFACE)), area);
 
     let shapes = tabs
         .iter()
         .enumerate()
         .map(|(index, tab)| tab_shape(index, tab, palette))
         .collect::<Vec<_>>();
-    let widths = shapes.iter().map(|shape| shape.width).collect::<Vec<_>>();
-    let active = tabs.iter().position(|tab| tab.active).unwrap_or(0);
+    let (pinned, grids): (Vec<_>, Vec<_>) = shapes
+        .into_iter()
+        .partition(|shape| tabs[shape.index].pinned);
 
-    let mut spans = vec![
-        Span::styled(STATUS_BRAND, brand_style(palette)),
-        Span::raw(" "),
-    ];
-    let brand_width = u16::try_from(spans.iter().map(Span::width).sum::<usize>())
-        .unwrap_or(u16::MAX)
-        .min(area.width);
-    let mut tab_x = area.x.saturating_add(brand_width);
+    let mut tab_rects = Vec::with_capacity(tabs.len());
     let area_right = area.right();
+    let mut right = area_right;
+    for shape in pinned.iter().rev() {
+        let x = right.saturating_sub(shape.width).max(area.x);
+        tab_rects.push((shape.index, Rect::new(x, area.y, right - x, 1)));
+        frame.render_widget(
+            Paragraph::new(Line::from(shape.spans.clone())),
+            Rect::new(x, area.y, right - x, 1),
+        );
+        right = x.saturating_sub(TAB_GAP);
+    }
+    let strip = account_strip(accounts);
+    let strip_width = u16::try_from(strip.width()).unwrap_or(u16::MAX);
+    if !accounts.is_empty() && right.saturating_sub(area.x) > strip_width + ACCOUNT_STRIP_TAB_ROOM {
+        right -= strip_width;
+        frame.render_widget(
+            Paragraph::new(strip),
+            Rect::new(right, area.y, strip_width, 1),
+        );
+    }
+    if let Some(note) = note {
+        let width = u16::try_from(note.chars().count() + 2).unwrap_or(u16::MAX);
+        if right.saturating_sub(area.x) > width + 20 {
+            right -= width;
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("{note}  "),
+                    Style::default().fg(TEXT_FAINT),
+                )),
+                Rect::new(right, area.y, width, 1),
+            );
+        }
+    }
 
-    let (first, last) = visible_tabs(&widths, active, area_right.saturating_sub(tab_x));
-    let mut tab_rects = Vec::with_capacity(last.saturating_sub(first));
+    let widths = grids.iter().map(|shape| shape.width).collect::<Vec<_>>();
+    let active = grids
+        .iter()
+        .position(|shape| tabs[shape.index].active)
+        .unwrap_or(0);
+    let mut tab_x = area.x.saturating_add(1);
+    let (first, last) = visible_tabs(&widths, active, right.saturating_sub(tab_x));
     let overflow = Style::default().fg(TEXT_FAINT).bg(SURFACE);
-
+    let mut spans = Vec::new();
     if first > 0 {
         spans.push(Span::styled("‹ ", overflow));
         tab_x = tab_x.saturating_add(TAB_OVERFLOW_WIDTH);
     }
-    for (position, shape) in shapes.iter().enumerate().skip(first).take(last - first) {
+    for (position, shape) in grids.iter().enumerate().skip(first).take(last - first) {
         if position > first {
             spans.push(Span::raw(" "));
             tab_x = tab_x.saturating_add(TAB_GAP);
         }
-        if tab_x < area_right {
+        if tab_x < right {
             tab_rects.push((
                 shape.index,
                 Rect::new(
                     tab_x,
                     area.y,
-                    shape.width.min(area_right.saturating_sub(tab_x)),
+                    shape.width.min(right.saturating_sub(tab_x)),
                     1,
                 ),
             ));
@@ -416,31 +492,15 @@ fn render_tabs(
         tab_x = tab_x.saturating_add(shape.width);
         spans.extend(shape.spans.iter().cloned());
     }
-    if last < shapes.len() {
+    if last < grids.len() {
         spans.push(Span::styled(" ›", overflow));
-        tab_x = tab_x.saturating_add(TAB_OVERFLOW_WIDTH);
     }
-
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(SURFACE)),
-        area,
+        Paragraph::new(Line::from(spans)),
+        Rect::new(area.x + 1, area.y, right.saturating_sub(area.x + 1), 1),
     );
 
-    // Hints go in whatever is left after the tabs, and only what fits. Printing
-    // all five unconditionally spent sixty columns of the most valuable row on
-    // screen restating what F1 already lists, and on a narrow terminal it pushed
-    // the tabs themselves out of view.
-    let spare = area_right.saturating_sub(tab_x);
-    if spare > 4 {
-        let hints = tab_hints(spare.saturating_sub(2));
-        if hints.width() > 0 {
-            frame.render_widget(
-                Paragraph::new(hints.right_aligned()).style(Style::default().bg(SURFACE)),
-                Rect::new(tab_x, area.y, spare, 1),
-            );
-        }
-    }
-
+    tab_rects.sort_by_key(|(index, _)| *index);
     tab_rects
 }
 
@@ -502,17 +562,10 @@ fn visible_tabs(widths: &[u16], active: usize, budget: u16) -> (usize, usize) {
     (first, last)
 }
 
-/// The background a tab's body is filled with.
-///
-/// Every tab gets a fill, not just the current one: a tab that is only text on
-/// the strip's own background is not a tab, it is a word. The current one is
-/// brighter, which is a difference in emphasis rather than in kind.
+/// The selection colour marks the one grid on screen and nothing else; every other tab is
+/// the same dark grey whatever its panes are doing.
 fn tab_fill(tab: &TabLabel, palette: &GridPalette) -> Color {
-    // A grid with an agent waiting on the user outranks every other state: it is
-    // the only one that means "come here now".
-    if tab.waiting {
-        TAB_WAITING_BG
-    } else if tab.active {
+    if tab.active {
         palette.accent()
     } else {
         SURFACE_HI
@@ -520,16 +573,24 @@ fn tab_fill(tab: &TabLabel, palette: &GridPalette) -> Color {
 }
 
 fn tab_text_color(tab: &TabLabel, palette: &GridPalette) -> Color {
-    if tab.waiting || tab.active {
-        INK
-    } else if tab.exited {
-        palette.exited()
-    } else if tab.activity {
-        // A background grid that has produced output has something to say, so it
-        // is the one unselected tab allowed full-strength text.
-        TEXT
+    if tab.active {
+        text_on(palette.accent())
     } else {
         TEXT_DIM
+    }
+}
+
+/// Dark text on a light fill and light text on a dark one, so a label stays
+/// readable whatever colour the user picked for selection.
+fn text_on(background: Color) -> Color {
+    match color_rgb(background) {
+        Some((red, green, blue))
+            if 0.2126 * f32::from(red) + 0.7152 * f32::from(green) + 0.0722 * f32::from(blue)
+                < 115.0 =>
+        {
+            TEXT
+        }
+        _ => INK,
     }
 }
 
@@ -547,16 +608,19 @@ fn tab_shape(index: usize, tab: &TabLabel, palette: &GridPalette) -> TabShape {
     // rest is conveyed by colour, which needs no legend.
     let marker = if tab.exited {
         " ! "
-    } else if tab.waiting || (tab.activity && !tab.active) {
-        " • "
+    } else if tab.done {
+        " ✓ "
     } else {
         " "
     };
+    if tab.done && !tab.active {
+        body = body.fg(TEXT);
+    }
     // The number is how the user reaches the grid from the keyboard, so it is
     // always there — just never louder than the name it belongs to.
     let number = Style::default()
-        .fg(if tab.waiting || tab.active {
-            INK
+        .fg(if tab.active {
+            text_on(fill)
         } else {
             TEXT_FAINT
         })
@@ -581,43 +645,174 @@ fn tab_shape(index: usize, tab: &TabLabel, palette: &GridPalette) -> TabShape {
     }
 }
 
-/// Tab-strip hints, most useful first. Dropped from the end as width runs out.
-const TAB_HINTS: [(&str, &str); 5] = [
-    ("Alt+N", "new"),
-    ("Alt+T", "switch"),
-    ("Alt+Shift+R", "rename"),
-    ("Alt+Shift+S", "select"),
-    ("Alt+X", "swap"),
-];
+/// Columns the grid tabs keep before the account strip gives way to them.
+const ACCOUNT_STRIP_TAB_ROOM: u16 = 30;
+const ACCOUNT_BATTERY_CELLS: usize = 4;
+const ACCOUNT_NEARLY_EMPTY: u8 = 15;
+const EIGHTHS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
 
-fn tab_hints(budget: u16) -> Line<'static> {
+fn account_strip(accounts: &[AccountMeterView]) -> Line<'static> {
     let mut spans = Vec::new();
-    let mut used = 0usize;
-
-    for (key, action) in TAB_HINTS {
-        let width = key.chars().count() + action.chars().count() + 2;
-        if used + width > budget as usize {
-            break;
-        }
-        used += width;
+    for account in accounts {
+        let name = if account.current {
+            Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(TEXT_FAINT)
+        };
+        spans.push(Span::styled(format!("{} ", account.name), name));
+        let left = account_left_label(account);
         spans.push(Span::styled(
-            key,
-            Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+            format!("{left} "),
+            Style::default().fg(TEXT_DIM),
         ));
+        spans.extend(account_battery(account));
+        spans.push(Span::raw("   "));
+    }
+    if let Some(next) = accounts
+        .iter()
+        .filter_map(|account| Some((account.resets_in_secs?, account)))
+        .min_by_key(|(left, _)| *left)
+    {
         spans.push(Span::styled(
-            format!(" {action}  "),
+            format!("↻ {} {}", next.1.name, short_duration(next.0)),
             Style::default().fg(TEXT_FAINT),
         ));
+        spans.push(Span::raw("  "));
     }
-
-    Line::from(spans)
+    Line::from(spans).style(Style::default().bg(SURFACE))
 }
 
-fn brand_style(palette: &GridPalette) -> Style {
-    Style::default()
-        .fg(INK)
-        .bg(palette.accent())
-        .add_modifier(Modifier::BOLD)
+fn account_left_percent(account: &AccountMeterView) -> Option<u8> {
+    account
+        .signed_in
+        .then_some(account.used_percent)
+        .flatten()
+        .map(|used| 100 - used.min(100))
+}
+
+fn account_left_label(account: &AccountMeterView) -> String {
+    if !account.signed_in {
+        return "signed out".into();
+    }
+    account_left_percent(account).map_or("?".into(), |left| format!("{left}%"))
+}
+
+fn account_battery(account: &AccountMeterView) -> Vec<Span<'static>> {
+    let left = account_left_percent(account).unwrap_or(0);
+    let eighths =
+        ((usize::from(left) * ACCOUNT_BATTERY_CELLS * 8 + 50) / 100).max(usize::from(left > 0));
+    let full = eighths / 8;
+    let partial = EIGHTHS[eighths % 8];
+    let empty = ACCOUNT_BATTERY_CELLS - full - usize::from(!partial.is_empty());
+    let charge = match account_left_percent(account) {
+        Some(left) if left <= ACCOUNT_NEARLY_EMPTY => WAITING,
+        _ if account.current => TEXT,
+        _ => TEXT_DIM,
+    };
+    let body = Style::default().fg(charge).bg(LINE);
+    vec![
+        Span::styled("█".repeat(full), body),
+        Span::styled(partial, body),
+        Span::styled(" ".repeat(empty), body),
+        Span::styled("╸", Style::default().fg(LINE)),
+    ]
+}
+
+fn short_duration(seconds: i64) -> String {
+    let hours = seconds / 3600;
+    if hours >= 48 {
+        format!("{}d", hours / 24)
+    } else if hours >= 1 {
+        format!("{hours}h")
+    } else {
+        format!("{}m", (seconds / 60).max(1))
+    }
+}
+
+fn render_account_sheet(
+    frame: &mut Frame<'_>,
+    pane: Rect,
+    view: &AccountSheetView,
+    palette: &GridPalette,
+) {
+    let rows = u16::try_from(view.accounts.len()).unwrap_or(u16::MAX);
+    let height = (rows + 3).min(pane.height.saturating_sub(2));
+    if height < 4 || pane.width < 30 {
+        return;
+    }
+    let area = Rect::new(
+        pane.x + 1,
+        pane.bottom() - 1 - height,
+        pane.width - 2,
+        height,
+    );
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(palette.accent()))
+        .title(Span::styled(
+            " Account for this pane ",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(SURFACE));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let name_width = view
+        .accounts
+        .iter()
+        .map(|account| account.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let mut lines = Vec::new();
+    for (index, account) in view.accounts.iter().enumerate() {
+        let background = if index == view.cursor {
+            SURFACE_HI
+        } else {
+            SURFACE
+        };
+        let mut spans = vec![
+            Span::styled(format!(" {} ", index + 1), Style::default().fg(TEXT_FAINT)),
+            Span::styled(
+                format!("{:name_width$}  ", account.name),
+                Style::default()
+                    .fg(TEXT)
+                    .add_modifier(if index == view.cursor {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+        ];
+        spans.extend(account_battery(account));
+        let detail = if !account.signed_in {
+            "  not signed in".to_string()
+        } else {
+            let used = account_left_percent(account)
+                .map_or("  usage unknown".to_string(), |left| {
+                    format!("  {left:>3}% left")
+                });
+            let reset = account
+                .resets_in_secs
+                .map(|left| format!("   resets in {}", short_duration(left)))
+                .unwrap_or_default();
+            format!("{used}{reset}")
+        };
+        spans.push(Span::styled(detail, Style::default().fg(TEXT_DIM)));
+        if account.current {
+            spans.push(Span::styled(
+                "   this pane",
+                Style::default().fg(TEXT_FAINT),
+            ));
+        }
+        lines.push(Line::from(spans).style(Style::default().bg(background)));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        " Enter or 1-9 move it there, keeping the conversation   Esc cancel",
+        Style::default().fg(TEXT_FAINT),
+    )));
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn command_center_height(total_height: u16, open: bool, requested: u16) -> u16 {
@@ -810,7 +1005,7 @@ impl PaneState {
     fn color(self, palette: &GridPalette) -> Color {
         match self {
             Self::Live => TEXT_FAINT,
-            Self::Waiting => WAITING,
+            Self::Waiting => TEXT_DIM,
             Self::Idle => palette.quiet(),
             Self::Sleeping => TEXT_FAINT,
             Self::Exited => palette.exited(),
@@ -862,9 +1057,7 @@ fn pane_state(app: &App, index: usize) -> PaneState {
     if app.pane_sleeping(index) {
         return PaneState::Sleeping;
     }
-    // Both remaining states are read off the same quiet-output signal the
-    // activity-badge setting governs.
-    if !app.activity_badges_enabled() || !pane.output_quiet() {
+    if !app.activity_badges_enabled() || !pane.awaiting_input() {
         return PaneState::Live;
     }
     if app.pane_needs_input(index) {
@@ -887,7 +1080,7 @@ fn pane_border_style(view: &PaneFrame, palette: &GridPalette) -> Style {
     }
 
     match view.state {
-        PaneState::Waiting => Style::default().fg(WAITING),
+        PaneState::Waiting => Style::default().fg(LINE),
         PaneState::Exited => Style::default().fg(palette.exited()),
         PaneState::Idle => Style::default().fg(LINE),
         PaneState::Sleeping => Style::default().fg(LINE_SOFT),
@@ -903,13 +1096,13 @@ fn pane_border_style(view: &PaneFrame, palette: &GridPalette) -> Style {
 fn pane_number_style(view: &PaneFrame, palette: &GridPalette) -> Style {
     if view.focused {
         return Style::default()
-            .fg(INK)
+            .fg(text_on(palette.focus()))
             .bg(palette.focus())
             .add_modifier(Modifier::BOLD);
     }
     if view.selected {
         return Style::default()
-            .fg(INK)
+            .fg(text_on(palette.selected()))
             .bg(palette.selected())
             .add_modifier(Modifier::BOLD);
     }
@@ -993,7 +1186,11 @@ fn pane_header_leading(view: &PaneFrame, palette: &GridPalette, budget: u16) -> 
 
     // The name is how the user tells one pane from another, so it is the last
     // thing to go.
-    let label = truncate_text(&view.label, budget - used - 1);
+    let label = if view.label == view.number.to_string() {
+        String::new()
+    } else {
+        truncate_text(&view.label, budget - used - 1)
+    };
     if !label.is_empty() {
         used += label.chars().count() + 1;
         spans.push(Span::styled(
@@ -1043,19 +1240,23 @@ fn pane_header_trailing(view: &PaneFrame, palette: &GridPalette, width: u16) -> 
         && !view.compact
         && width >= USAGE_HEADER_WIDTH
     {
+        let separator = if view.state.badge().is_empty() {
+            " "
+        } else {
+            " · "
+        };
         spans.push(Span::styled(
-            format!("{usage} "),
+            format!("{usage}{separator}"),
             Style::default().fg(TEXT_FAINT),
         ));
     }
 
     let badge = view.state.badge();
     if !badge.is_empty() {
-        let mut style = Style::default().fg(view.state.color(palette));
-        if view.state == PaneState::Waiting {
-            style = style.add_modifier(Modifier::BOLD);
-        }
-        spans.push(Span::styled(format!("{badge} "), style));
+        spans.push(Span::styled(
+            format!("{badge} "),
+            Style::default().fg(view.state.color(palette)),
+        ));
     }
 
     // Right-aligned text lands flush against the border rule that fills the rest
@@ -1065,432 +1266,6 @@ fn pane_header_trailing(view: &PaneFrame, palette: &GridPalette, width: u16) -> 
     }
 
     Line::from(spans)
-}
-
-/// Where the status bar's clickable chips ended up.
-#[derive(Debug, Clone, Copy, Default)]
-struct StatusButtons {
-    previous_panes: Option<Rect>,
-    pane_settings: Option<Rect>,
-    background_jobs: Option<Rect>,
-    ports: Option<Rect>,
-    summary_refresh: Option<Rect>,
-}
-
-/// Everything the status bar draws, with nothing left to look up.
-///
-/// Like `PaneFrame`, this exists so the bar can be rendered without a live
-/// `App` behind it. That is not only convenience: `App::new` starts the agent
-/// control server, so building one just to read a handful of booleans leaves a
-/// bound port and a listener thread behind for the rest of the process.
-#[derive(Debug, Clone, Default)]
-pub struct StatusBar {
-    pub previous_panes_open: bool,
-    pub pane_settings_open: bool,
-    pub background_jobs_open: bool,
-    pub port_inspector_open: bool,
-    pub background_jobs: usize,
-    pub ports: usize,
-    pub voice_listening: bool,
-    pub zoomed: bool,
-    pub command_center_open: bool,
-    pub input_scope: &'static str,
-    pub selected_panes: usize,
-    pub selected_grids: usize,
-    pub status: String,
-    pub pane: FocusedPaneSummary,
-}
-
-impl StatusBar {
-    fn from_app(app: &App) -> Self {
-        Self {
-            previous_panes_open: app.previous_panes_open(),
-            pane_settings_open: app.pane_settings_open(),
-            background_jobs_open: app.background_jobs_open(),
-            port_inspector_open: app.port_inspector_open(),
-            background_jobs: app.background_job_count(),
-            ports: app.agent_port_count(),
-            voice_listening: app.voice_listening(),
-            zoomed: app.zoomed(),
-            command_center_open: app.command_center_open(),
-            input_scope: app.input_scope_label(),
-            selected_panes: app.selected().len(),
-            selected_grids: app.selected_grid_count(),
-            status: app.status().to_string(),
-            pane: app.focused_pane_summary(),
-        }
-    }
-
-    /// The input mode, but only when it is not the ordinary one.
-    ///
-    /// A bar that printed `LIVE` on every frame of every session was spending
-    /// four columns and a colour to report that nothing unusual was happening.
-    fn mode(&self) -> Option<&'static str> {
-        if self.voice_listening {
-            Some("MIC")
-        } else if self.zoomed {
-            Some("ZOOM")
-        } else {
-            None
-        }
-    }
-
-    /// Where typing will land, for the same reason: silent when it is the pane
-    /// the user is already looking at.
-    fn scope(&self) -> Option<&'static str> {
-        match self.input_scope {
-            "" | "focused pane" => None,
-            scope => Some(scope),
-        }
-    }
-
-    /// The selection count, or nothing at all when nothing is selected.
-    ///
-    /// "0 panes selected" used to sit on screen permanently, reporting that the
-    /// normal state was the normal state.
-    fn selection_summary(&self) -> Option<String> {
-        match (self.selected_panes, self.selected_grids) {
-            (0, 0) => None,
-            (panes, 0) => Some(format!("{panes} selected")),
-            (0, grids) => Some(format!("{grids} grids selected")),
-            (panes, grids) => Some(format!("{panes} panes, {grids} grids selected")),
-        }
-    }
-}
-
-/// Draws the status bar and reports where its chips landed.
-///
-/// The chip rects used to be derived a second time by a set of functions that
-/// re-added the same string lengths the renderer had just laid out by hand. Two
-/// copies of one layout is one copy too many: renaming a button moved it on
-/// screen without moving the thing the mouse hit. Laying out once and returning
-/// the rects makes that class of bug unrepresentable.
-fn render_status_bar(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    view: &StatusBar,
-    palette: &GridPalette,
-) -> StatusButtons {
-    if area.width == 0 || area.height == 0 {
-        return StatusButtons::default();
-    }
-
-    frame.render_widget(Paragraph::new("").style(Style::default().bg(SURFACE)), area);
-
-    // No brand chip down here. The tab strip already carries the name at the
-    // top of the screen, and ten columns of it repeated along the bottom bought
-    // nothing but a narrower middle for the line that is actually read.
-    let mut buttons = StatusButtons::default();
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut cursor = area.x;
-
-    let chip = |spans: &mut Vec<Span<'static>>,
-                cursor: &mut u16,
-                label: String,
-                style: Style|
-     -> Option<Rect> {
-        let width = label.chars().count() as u16;
-        let rect = (*cursor < area.right()).then(|| {
-            Rect::new(
-                *cursor,
-                area.y,
-                width.min(area.right().saturating_sub(*cursor)),
-                1,
-            )
-        });
-        *cursor = cursor.saturating_add(width);
-        spans.push(Span::styled(label, style));
-        rect
-    };
-
-    buttons.previous_panes = chip(
-        &mut spans,
-        &mut cursor,
-        PREVIOUS_PANES_BUTTON.to_string(),
-        chip_style(view.previous_panes_open, palette.focus()),
-    );
-    spans.push(Span::raw(" "));
-    cursor = cursor.saturating_add(1);
-    buttons.pane_settings = chip(
-        &mut spans,
-        &mut cursor,
-        PANE_SETTINGS_BUTTON.to_string(),
-        chip_style(view.pane_settings_open, palette.focus()),
-    );
-    spans.push(Span::raw(" "));
-    cursor = cursor.saturating_add(1);
-    buttons.background_jobs = chip(
-        &mut spans,
-        &mut cursor,
-        background_jobs_button_label(view.background_jobs),
-        if view.background_jobs > 0 {
-            chip_style(view.background_jobs_open, palette.accent())
-        } else {
-            quiet_chip_style(view.background_jobs_open)
-        },
-    );
-
-    // Everything past the chips is read, not clicked, so it is styled as a
-    // sentence rather than as more buttons — and only when it has something to
-    // say. Both of these used to be printed on every frame in their default
-    // state, which is how the left of the bar came to be furniture.
-    if let Some(mode) = view.mode() {
-        spans.push(Span::styled(
-            format!("  {mode}"),
-            Style::default()
-                .fg(if view.voice_listening {
-                    palette.accent()
-                } else {
-                    palette.focus()
-                })
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if let Some(scope) = view.scope() {
-        spans.push(Span::styled(
-            format!("  {scope}"),
-            Style::default().fg(if view.command_center_open {
-                palette.accent()
-            } else if view.selected_panes > 1 {
-                palette.selected()
-            } else {
-                TEXT_DIM
-            }),
-        ));
-    }
-    if let Some(selection) = view.selection_summary() {
-        spans.push(Span::styled(
-            format!("  {selection}"),
-            Style::default().fg(palette.selected()),
-        ));
-    }
-    // The ports chip is anchored to the right edge, so the left side is drawn
-    // into what is left over rather than across the whole bar. Rendering both
-    // over the full width let a long status message run underneath the chip and
-    // get overwritten.
-    buttons.ports = ports_button_rect(area, view.ports);
-    let left_width =
-        u16::try_from(spans.iter().map(Span::width).sum::<usize>()).unwrap_or(u16::MAX);
-    let text_area = Rect {
-        width: buttons
-            .ports
-            .map_or(area.width, |chip| chip.x.saturating_sub(area.x + 1)),
-        ..area
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(SURFACE)),
-        text_area,
-    );
-
-    // The middle of the bar belongs to whatever the focused pane is doing. It is
-    // drawn after the left-hand run and centred on the bar rather than on the
-    // gap, so it stays put as chips come and go instead of sliding around under
-    // the reader. A status message takes the slot while it lasts: it is the
-    // answer to something the user just did, and it goes away on its own.
-    if let Some((start, room)) = status_centre_gap(
-        area,
-        area.x.saturating_add(left_width),
-        buttons.ports.map_or(area.right(), |chip| chip.x),
-    ) {
-        // The refresh control is only offered alongside the summary it refreshes,
-        // never over a status message that is about to disappear.
-        let clock = if view.status.is_empty() && view.pane.refreshable {
-            summary_clock_spans(&view.pane)
-        } else {
-            Vec::new()
-        };
-        let clock_width = u16::try_from(clock.iter().map(Span::width).sum::<usize>())
-            .unwrap_or(u16::MAX)
-            .min(room);
-        let text_room = room.saturating_sub(clock_width) as usize;
-
-        let mut spans = if !view.status.is_empty() {
-            // Status messages are sentences and routinely outrun the bar.
-            // Trimming ends them in an ellipsis rather than mid-word, so a cut
-            // message reads as cut rather than as a typo.
-            vec![Span::styled(
-                truncate_text(&view.status, text_room),
-                Style::default().fg(TEXT),
-            )]
-        } else {
-            pane_summary_line(&view.pane, text_room).spans
-        };
-        let text_width = u16::try_from(spans.iter().map(Span::width).sum::<usize>())
-            .unwrap_or(u16::MAX)
-            .min(room);
-        // A clock with nothing in front of it is a countdown to nothing.
-        let clock_width = if text_width > 0 { clock_width } else { 0 };
-        if clock_width > 0 {
-            spans.extend(clock);
-        }
-
-        let width = text_width.saturating_add(clock_width).min(room);
-        if width > 0 {
-            let centred = area.x + area.width.saturating_sub(width) / 2;
-            let x = centred.clamp(start, start + room - width);
-            frame.render_widget(
-                Paragraph::new(Line::from(spans)).style(Style::default().bg(SURFACE)),
-                Rect::new(x, area.y, width, 1),
-            );
-            // The whole clock is the click target, not just the glyph on the end
-            // of it: one cell is a hard thing to hit, and a font that renders the
-            // glyph badly would otherwise leave nothing to aim at.
-            buttons.summary_refresh =
-                (clock_width > 0).then(|| Rect::new(x + text_width, area.y, clock_width, 1));
-        }
-    }
-
-    if let Some(button) = buttons.ports {
-        frame.render_widget(
-            Paragraph::new(ports_button_label(view.ports))
-                .alignment(Alignment::Center)
-                .style(if view.ports > 0 {
-                    chip_style(view.port_inspector_open, palette.accent())
-                } else {
-                    quiet_chip_style(view.port_inspector_open)
-                }),
-            button,
-        );
-    }
-
-    buttons
-}
-
-/// Breathing room between the centre line and the chips on either side.
-const STATUS_CENTRE_MARGIN: u16 = 2;
-/// Below this the centre line is all ellipsis and no sentence, and the bar is
-/// better off leaving the space blank.
-const STATUS_CENTRE_MIN: u16 = 16;
-const SUMMARY_SEPARATOR: &str = " · ";
-/// The refresh control on the end of the countdown. Padded so it reads as a
-/// button rather than as punctuation.
-const SUMMARY_REFRESH_GLYPH: &str = " ⟳ ";
-
-/// The span of the bar the centre line may use: `(x, width)`, or nothing when
-/// the chips have eaten the middle.
-fn status_centre_gap(area: Rect, left_end: u16, right_start: u16) -> Option<(u16, u16)> {
-    let start = left_end.saturating_add(STATUS_CENTRE_MARGIN).max(area.x);
-    let end = right_start
-        .saturating_sub(STATUS_CENTRE_MARGIN)
-        .min(area.right());
-    let room = end.checked_sub(start)?;
-    (room >= STATUS_CENTRE_MIN).then_some((start, room))
-}
-
-/// The countdown on the focused pane's cached summary, and the control that
-/// skips it.
-///
-/// Summaries are cached for minutes at a time to keep the API bill down, which
-/// makes "how old is this" a fair question — so the bar answers it, and puts the
-/// way to get a fresh one right next to the answer.
-fn summary_clock_spans(pane: &FocusedPaneSummary) -> Vec<Span<'static>> {
-    let clock = if pane.refreshing {
-        "···".to_string()
-    } else {
-        match pane.refresh_in {
-            Some(left) => {
-                let seconds = left.as_secs();
-                format!("{}:{:02}", seconds / 60, seconds % 60)
-            }
-            None => "due".to_string(),
-        }
-    };
-
-    vec![
-        Span::styled(
-            format!("{SUMMARY_SEPARATOR}{clock}"),
-            Style::default().fg(TEXT_FAINT),
-        ),
-        Span::styled(
-            SUMMARY_REFRESH_GLYPH,
-            Style::default()
-                .fg(if pane.refreshing {
-                    TEXT_FAINT
-                } else {
-                    TEXT_DIM
-                })
-                .bg(SURFACE_HI),
-        ),
-    ]
-}
-
-/// `2 Fluent · running the failing test alone`, trimmed to fit.
-///
-/// The name is dimmer than the summary. Which pane has the keyboard is already
-/// obvious from the focus ring; the sentence is the part worth reading, and it
-/// is measured first so a long grid name cannot crowd it out.
-fn pane_summary_line(pane: &FocusedPaneSummary, room: usize) -> Line<'static> {
-    if pane.is_empty() || room == 0 {
-        return Line::default();
-    }
-
-    let title = pane.title.trim();
-    let overhead = title.chars().count() + SUMMARY_SEPARATOR.chars().count();
-    if title.is_empty() || room < overhead + STATUS_CENTRE_MIN as usize {
-        return Line::from(Span::styled(
-            truncate_text(&pane.detail, room),
-            Style::default().fg(TEXT_DIM),
-        ));
-    }
-
-    Line::from(vec![
-        Span::styled(title.to_string(), Style::default().fg(TEXT_FAINT)),
-        Span::styled(SUMMARY_SEPARATOR, Style::default().fg(TEXT_FAINT)),
-        Span::styled(
-            truncate_text(&pane.detail, room - overhead),
-            Style::default().fg(TEXT_DIM),
-        ),
-    ])
-}
-
-/// A chip the user can click. Filled when its panel is open, so the status bar
-/// always says which overlay is up without the user having to look at it.
-fn chip_style(open: bool, color: Color) -> Style {
-    if open {
-        Style::default()
-            .fg(INK)
-            .bg(WAITING)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(INK)
-            .bg(color)
-            .add_modifier(Modifier::BOLD)
-    }
-}
-
-/// A chip with nothing behind it. Still clickable, but it has no business
-/// drawing the eye when the count it carries is zero.
-fn quiet_chip_style(open: bool) -> Style {
-    if open {
-        Style::default()
-            .fg(INK)
-            .bg(WAITING)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(TEXT_FAINT).bg(SURFACE_HI)
-    }
-}
-
-fn background_jobs_button_label(count: usize) -> String {
-    format!(" BG {count} ")
-}
-
-fn ports_button_label(count: usize) -> String {
-    format!(" Ports {count} ")
-}
-
-fn ports_button_rect(status_area: Rect, count: usize) -> Option<Rect> {
-    let width = ports_button_label(count).len() as u16;
-    if status_area.height == 0 || status_area.width < width {
-        return None;
-    }
-    Some(Rect {
-        x: status_area.right().saturating_sub(width),
-        y: status_area.y,
-        width,
-        height: 1,
-    })
 }
 
 fn render_pane_settings(
@@ -2003,7 +1778,7 @@ fn assistant_transcript_lines(
         let welcome = if view.configured {
             "Ask me to brief this grid, sharpen a prompt, delegate work, or start a /goal."
         } else {
-            "Set the Manager endpoint, model, and API key in Alt+O to start chatting."
+            "Set the Manager endpoint, model, and API key in Settings to start chatting."
         };
         push_assistant_message_lines(
             &mut lines,
@@ -4683,6 +4458,23 @@ fn wrap_dialog_text(text: &str, width: usize, max_lines: usize) -> Vec<String> {
     lines
 }
 
+fn render_empty_parked(frame: &mut Frame<'_>, area: Rect, hint: &str) {
+    if area.height == 0 {
+        return;
+    }
+    let middle = Rect {
+        y: area.y + area.height / 2,
+        height: 1,
+        ..area
+    };
+    frame.render_widget(
+        Paragraph::new(hint.to_string())
+            .style(Style::default().fg(TEXT_DIM))
+            .alignment(Alignment::Center),
+        middle,
+    );
+}
+
 fn render_sleeping_screen(frame: &mut Frame<'_>, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -5094,6 +4886,418 @@ fn flush_span<'a>(
     ));
 }
 
+/// Rounds the four corners of the whole grid. Corners where panes meet stay
+/// square, because border merging only knows how to join square corners.
+const SHELF_ROW_HEIGHT: u16 = 4;
+const SHELF_FOOTER_HEIGHT: u16 = 5;
+
+fn render_shelf(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    view: &ShelfView,
+    palette: &GridPalette,
+) -> Vec<(usize, Rect)> {
+    if area.width < 8 || area.height < 4 {
+        return Vec::new();
+    }
+    let block = Block::default()
+        .borders(Borders::RIGHT)
+        .border_style(Style::default().fg(LINE))
+        .style(Style::default().bg(APP_BG));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " Parked",
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" · {}", view.rows.len()),
+                Style::default().fg(TEXT_FAINT),
+            ),
+        ])),
+        Rect { height: 1, ..inner },
+    );
+
+    let footer_height = SHELF_FOOTER_HEIGHT.min(inner.height.saturating_sub(2));
+    let list = Rect {
+        y: inner.y + 2,
+        height: inner.height.saturating_sub(2 + footer_height),
+        ..inner
+    };
+    let visible = usize::from(list.height / SHELF_ROW_HEIGHT).max(1);
+    let focused = view.rows.iter().position(|row| row.focused).unwrap_or(0);
+    let first = focused.saturating_sub(visible - 1);
+    let width = usize::from(list.width.saturating_sub(3));
+
+    let mut rows = Vec::new();
+    for (offset, row) in view.rows.iter().enumerate().skip(first).take(visible) {
+        let y = list.y + u16::try_from(offset - first).unwrap_or(0) * SHELF_ROW_HEIGHT;
+        let rect = Rect::new(
+            list.x,
+            y,
+            list.width,
+            SHELF_ROW_HEIGHT.min(list.bottom() - y),
+        );
+        let background = if row.focused { SURFACE_HI } else { APP_BG };
+        frame.render_widget(
+            Block::default().style(Style::default().bg(background)),
+            Rect {
+                height: rect.height.saturating_sub(1),
+                ..rect
+            },
+        );
+        if row.focused {
+            for line in 0..rect.height.saturating_sub(1) {
+                frame.buffer_mut()[(rect.x, rect.y + line)]
+                    .set_symbol("▌")
+                    .set_fg(palette.accent())
+                    .set_bg(background);
+            }
+        }
+        let (mark, state) = match row.state {
+            ShelfState::Done => ("✓", "DONE"),
+            ShelfState::Checking => ("◐", "checking"),
+            ShelfState::Watching => ("○", "watching"),
+            ShelfState::Parked => ("·", ""),
+        };
+        let done = row.state == ShelfState::Done;
+        let head = Line::from(vec![
+            Span::styled(
+                format!("{mark} "),
+                Style::default().fg(if done { TEXT } else { TEXT_FAINT }),
+            ),
+            Span::styled(
+                truncate_text(&row.name, width.saturating_sub(state.len() + 4)),
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                truncate_text(
+                    &format!(" from {}", row.from),
+                    width.saturating_sub(row.name.chars().count() + state.len() + 4),
+                ),
+                Style::default().fg(TEXT_FAINT),
+            ),
+        ]);
+        let text_area = Rect::new(rect.x + 2, rect.y, rect.width.saturating_sub(3), 1);
+        frame.render_widget(Paragraph::new(head), text_area);
+        if !state.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    state,
+                    Style::default()
+                        .fg(if done { TEXT } else { TEXT_FAINT })
+                        .add_modifier(if done {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                ))
+                .alignment(Alignment::Right),
+                text_area,
+            );
+        }
+        let condition = row.condition.as_ref().map_or_else(
+            || "no condition".to_string(),
+            |condition| format!("when {condition}"),
+        );
+        let lines = [
+            (condition, TEXT_DIM),
+            (row.detail.clone(), if done { TEXT } else { TEXT_FAINT }),
+        ];
+        for (line, (text, color)) in lines.into_iter().enumerate() {
+            let y = rect.y + 1 + u16::try_from(line).unwrap_or(0);
+            if y >= rect.bottom() || y >= list.bottom() {
+                break;
+            }
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    truncate_text(&text, width.saturating_sub(2)),
+                    Style::default().fg(color),
+                )),
+                Rect::new(rect.x + 4, y, rect.width.saturating_sub(5), 1),
+            );
+        }
+        rows.push((offset, rect));
+    }
+
+    if footer_height > 0 {
+        let footer = Rect {
+            y: inner.bottom() - footer_height,
+            height: footer_height,
+            ..inner
+        };
+        let lines = vec![
+            Line::from(Span::styled(
+                " Watcher",
+                Style::default().fg(TEXT_DIM).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                " Claude reads a pane each time it goes still",
+                Style::default().fg(TEXT_FAINT),
+            )),
+            Line::from(Span::styled(
+                format!(
+                    " {} checks · {:.1}k tokens since GridBash started",
+                    view.checks,
+                    view.tokens as f64 / 1000.0
+                ),
+                Style::default().fg(TEXT_FAINT),
+            )),
+            Line::from(Span::styled(
+                match &view.watch_key {
+                    Some(watch_key) => format!(
+                        " {} back to its grid · {watch_key} new goal",
+                        view.return_key
+                    ),
+                    None => format!(" {} back to its grid", view.return_key),
+                },
+                Style::default().fg(TEXT_FAINT),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(lines), footer);
+    }
+    rows
+}
+
+fn render_shelf_banner(frame: &mut Frame<'_>, area: Rect, condition: &str, reason: &str) {
+    let width = usize::from(area.width.saturating_sub(4));
+    frame.render_widget(Block::default().style(Style::default().bg(SURFACE)), area);
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                " ✓ Done  ",
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                truncate_text(condition, width.saturating_sub(9)),
+                Style::default().fg(TEXT_DIM),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!(" {}", truncate_text(reason, width)),
+            Style::default().fg(TEXT),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), Rect { height: 2, ..area });
+}
+
+const PARK_SHEET_HEIGHT: u16 = 7;
+
+fn render_park_sheet(
+    frame: &mut Frame<'_>,
+    pane: Rect,
+    view: &ParkSheetView,
+    palette: &GridPalette,
+) {
+    let height = PARK_SHEET_HEIGHT.min(pane.height.saturating_sub(2));
+    if height < 3 || pane.width < 12 {
+        return;
+    }
+    let area = Rect::new(
+        pane.x + 1,
+        pane.bottom() - 1 - height,
+        pane.width - 2,
+        height,
+    );
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(palette.accent()))
+        .title(Span::styled(
+            if view.parking {
+                " Park · notify me when "
+            } else {
+                " Notify me when "
+            },
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(SURFACE));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let field = Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), 1);
+    let room = usize::from(field.width.saturating_sub(3));
+    let skip = view.cursor.saturating_sub(room);
+    let shown = view.value.chars().skip(skip).take(room).collect::<String>();
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("❯ ", Style::default().fg(TEXT_DIM)),
+            if view.value.is_empty() {
+                Span::styled(
+                    "in your words, e.g. the PR is merged and CI is green",
+                    Style::default().fg(TEXT_FAINT),
+                )
+            } else {
+                Span::styled(shown, Style::default().fg(TEXT))
+            },
+        ]))
+        .style(Style::default().bg(SURFACE_HI)),
+        field,
+    );
+    let cursor_x = field.x + 2 + u16::try_from(view.cursor - skip).unwrap_or(0);
+    frame.set_cursor_position((cursor_x.min(field.right().saturating_sub(1)), field.y));
+
+    let empty = if view.parking {
+        "Leave it empty to just park it until you bring it back."
+    } else {
+        "Leave it empty to stop watching it."
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            "Claude reads the pane each time it goes still: one Haiku call on your login.",
+            Style::default().fg(TEXT_FAINT),
+        )),
+        Line::from(Span::styled(empty, Style::default().fg(TEXT_FAINT))),
+        Line::from(Span::styled(
+            if view.parking {
+                "Enter park   Esc cancel"
+            } else {
+                "Enter save   Esc cancel"
+            },
+            Style::default().fg(TEXT_DIM),
+        )),
+    ];
+    let text = Rect::new(
+        inner.x + 1,
+        field.y + 2,
+        inner.width.saturating_sub(2),
+        inner.bottom().saturating_sub(field.y + 2),
+    );
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), text);
+}
+
+fn render_park_toast(frame: &mut Frame<'_>, grid: Rect, view: &ParkToastView) -> Option<Rect> {
+    let head = format!("✓ {} is done", view.name);
+    let tail = format!("{} view", view.key);
+    let fixed = head.chars().count() + tail.chars().count() + 10;
+    let max_width = usize::from(grid.width.saturating_sub(4));
+    if max_width < fixed + 8 || grid.height < 6 {
+        return None;
+    }
+    let reason = truncate_text(&view.reason, (max_width - fixed).min(70));
+    let width = u16::try_from(fixed + reason.chars().count()).ok()?;
+    let area = Rect::new(grid.right() - width - 2, grid.bottom() - 4, width, 3);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(LINE))
+        .style(Style::default().bg(SURFACE));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(" {head}   "),
+                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{reason}   "), Style::default().fg(TEXT_DIM)),
+            Span::styled(tail, Style::default().fg(TEXT_FAINT)),
+        ])),
+        inner,
+    );
+    Some(area)
+}
+
+fn round_outer_corners(buffer: &mut Buffer, bounds: Rect) {
+    if bounds.width < 2 || bounds.height < 2 {
+        return;
+    }
+    let (left, top) = (bounds.left(), bounds.top());
+    let (right, bottom) = (bounds.right() - 1, bounds.bottom() - 1);
+    for (x, y, square, round) in [
+        (left, top, "┌", "╭"),
+        (right, top, "┐", "╮"),
+        (left, bottom, "└", "╰"),
+        (right, bottom, "┘", "╯"),
+    ] {
+        if let Some(cell) = buffer.cell_mut((x, y))
+            && cell.symbol() == square
+        {
+            cell.set_symbol(round);
+        }
+    }
+}
+
+/// How much of a pane's own colour survives when it is not focused, so the
+/// pane taking keystrokes is the brightest thing on screen.
+const UNFOCUSED_TEXT_STRENGTH: f32 = 0.68;
+
+pub(crate) fn fade_toward_background(buffer: &mut Buffer, area: Rect) {
+    let area = area.intersection(buffer.area);
+    let Some((bg_red, bg_green, bg_blue)) = color_rgb(PANE_BG) else {
+        return;
+    };
+    let blend = |value: u8, background: u8| -> u8 {
+        (f32::from(value) * UNFOCUSED_TEXT_STRENGTH
+            + f32::from(background) * (1.0 - UNFOCUSED_TEXT_STRENGTH)) as u8
+    };
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buffer[(x, y)];
+            let fg = if cell.fg == Color::Reset {
+                PANE_FG
+            } else {
+                cell.fg
+            };
+            if let Some((red, green, blue)) = color_rgb(fg) {
+                cell.fg = Color::Rgb(
+                    blend(red, bg_red),
+                    blend(green, bg_green),
+                    blend(blue, bg_blue),
+                );
+            }
+        }
+    }
+}
+
+/// The xterm default for the sixteen named colours.
+/// A terminal profile can redefine the first sixteen; that only shifts how a
+/// faded colour looks, not whether it reads as faded.
+fn color_rgb(color: Color) -> Option<(u8, u8, u8)> {
+    const NAMED: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (205, 0, 0),
+        (0, 205, 0),
+        (205, 205, 0),
+        (0, 0, 238),
+        (205, 0, 205),
+        (0, 205, 205),
+        (229, 229, 229),
+        (127, 127, 127),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (92, 92, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+    Some(match color {
+        Color::Rgb(red, green, blue) => (red, green, blue),
+        Color::Indexed(index) => return color_rgb(indexed_color(index)),
+        Color::Black => NAMED[0],
+        Color::Red => NAMED[1],
+        Color::Green => NAMED[2],
+        Color::Yellow => NAMED[3],
+        Color::Blue => NAMED[4],
+        Color::Magenta => NAMED[5],
+        Color::Cyan => NAMED[6],
+        Color::Gray => NAMED[7],
+        Color::DarkGray => NAMED[8],
+        Color::LightRed => NAMED[9],
+        Color::LightGreen => NAMED[10],
+        Color::LightYellow => NAMED[11],
+        Color::LightBlue => NAMED[12],
+        Color::LightMagenta => NAMED[13],
+        Color::LightCyan => NAMED[14],
+        Color::White => NAMED[15],
+        Color::Reset => return None,
+    })
+}
+
 fn vt_color(color: vt100::Color, default: Color) -> Color {
     match color {
         vt100::Color::Default => default,
@@ -5164,7 +5368,6 @@ mod tests {
     };
     use clap::Parser;
     use ratatui::{Terminal, backend::TestBackend};
-    use std::time::Duration;
 
     /// One pane in a rendered preview of the shell.
     struct PreviewPane {
@@ -5234,7 +5437,7 @@ mod tests {
         ]
     }
 
-    /// Renders the main shell — tab strip, pane lattice, status bar — to text.
+    /// Renders the main shell, tab strip and pane lattice, to text.
     ///
     /// The grid is the one part of GridBash that cannot be judged from its
     /// source: whether nine panes read as a workspace or as noise is a question
@@ -5257,14 +5460,14 @@ mod tests {
                         title: (*title).into(),
                         active: index == 0,
                         selected: index == 1,
-                        waiting: index == 2,
-                        activity: false,
                         exited: false,
+                        pinned: false,
+                        done: false,
                     })
                     .collect::<Vec<_>>();
-                render_tabs(frame, Rect::new(0, 0, width, 1), &tabs, &palette);
+                render_tabs(frame, Rect::new(0, 0, width, 1), &tabs, &palette, &[], None);
 
-                let grid_area = Rect::new(0, 1, width, height.saturating_sub(2));
+                let grid_area = Rect::new(0, 1, width, height.saturating_sub(1));
                 let panes = preview_panes();
                 let rects = GridLayout::new(grid).rects(grid_area, panes.len());
                 let mut order = (0..panes.len()).collect::<Vec<_>>();
@@ -5285,26 +5488,6 @@ mod tests {
                         );
                     }
                 }
-
-                render_status_bar(
-                    frame,
-                    Rect::new(0, height.saturating_sub(1), width, 1),
-                    &StatusBar {
-                        input_scope: "focused pane",
-                        selected_panes: 1,
-                        background_jobs: 2,
-                        ports: 3,
-                        pane: FocusedPaneSummary {
-                            title: "1 Frontend".into(),
-                            detail: "wiring the checkout form to the new API".into(),
-                            refresh_in: Some(Duration::from_secs(134)),
-                            refreshable: true,
-                            ..FocusedPaneSummary::default()
-                        },
-                        ..StatusBar::default()
-                    },
-                    &palette,
-                );
             })
             .expect("render preview");
 
@@ -5413,32 +5596,39 @@ mod tests {
                 title: "Frontend".into(),
                 active: true,
                 selected: false,
-                waiting: false,
-                activity: false,
                 exited: false,
+                pinned: false,
+                done: false,
             },
             TabLabel {
                 title: "Tests".into(),
                 active: false,
                 selected: true,
-                waiting: false,
-                activity: false,
                 exited: false,
+                pinned: false,
+                done: false,
             },
             TabLabel {
                 title: "Review".into(),
                 active: false,
                 selected: false,
-                waiting: true,
-                activity: false,
                 exited: false,
+                pinned: false,
+                done: false,
             },
         ];
         let mut targets = Vec::new();
 
         terminal
             .draw(|frame| {
-                targets = render_tabs(frame, frame.area(), &tabs, &GridPalette::default());
+                targets = render_tabs(
+                    frame,
+                    frame.area(),
+                    &tabs,
+                    &GridPalette::default(),
+                    &[],
+                    None,
+                );
             })
             .expect("render tabs");
 
@@ -5457,15 +5647,17 @@ mod tests {
             rendered.contains(&format!("{TAB_CAP_LEFT} 1 Frontend {TAB_CAP_RIGHT}")),
             "the current tab must be drawn as a capped shape: {rendered}"
         );
-        // A grid with an agent waiting on the user gets the one colour in the
-        // strip that shouts.
+        // Only the current grid is coloured; a waiting grid stays grey.
+        let cells = terminal.backend().buffer().content();
         assert!(
-            terminal
-                .backend()
-                .buffer()
-                .content()
+            cells
                 .iter()
-                .any(|cell| cell.symbol() == "R" && cell.bg == TAB_WAITING_BG)
+                .any(|cell| cell.symbol() == "F" && cell.bg == GridPalette::default().accent())
+        );
+        assert!(
+            !cells
+                .iter()
+                .any(|cell| cell.symbol() == "R" && cell.bg == GridPalette::default().accent())
         );
     }
 
@@ -5480,24 +5672,31 @@ mod tests {
                 title: "Frontend".into(),
                 active: true,
                 selected: false,
-                waiting: false,
-                activity: false,
                 exited: false,
+                pinned: false,
+                done: false,
             },
             TabLabel {
                 title: "Tests".into(),
                 active: false,
                 selected: false,
-                waiting: false,
-                activity: false,
                 exited: false,
+                pinned: false,
+                done: false,
             },
         ];
 
         let mut targets = Vec::new();
         terminal
             .draw(|frame| {
-                targets = render_tabs(frame, frame.area(), &tabs, &GridPalette::default());
+                targets = render_tabs(
+                    frame,
+                    frame.area(),
+                    &tabs,
+                    &GridPalette::default(),
+                    &[],
+                    None,
+                );
             })
             .expect("render tabs");
 
@@ -5539,257 +5738,6 @@ mod tests {
         // An active tab wider than the whole strip is still the one that is
         // drawn; the paragraph clips it rather than the strip dropping it.
         assert_eq!(visible_tabs(&[80, 10], 0, 20), (0, 1));
-    }
-
-    /// The chrome must be drawable from plain data.
-    ///
-    /// `App::new` starts the agent control server, so an `App` built purely to
-    /// read a few booleans leaves a bound port and a live listener behind for
-    /// the rest of the test process. Two such tests were enough to make the
-    /// timing-sensitive `pane_host` socket tests fail later in the same run.
-    /// Rendering from a view model keeps that out of the test binary entirely.
-    #[test]
-    fn the_status_bar_renders_without_a_live_app() {
-        let backend = TestBackend::new(100, 1);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        let view = StatusBar {
-            background_jobs: 4,
-            ports: 2,
-            zoomed: true,
-            input_scope: "selected panes",
-            selected_panes: 3,
-            status: "everything is fine".into(),
-            ..StatusBar::default()
-        };
-
-        terminal
-            .draw(|frame| {
-                render_status_bar(frame, frame.area(), &view, &GridPalette::default());
-            })
-            .expect("render status bar");
-
-        let rendered = buffer_text(&terminal);
-        assert!(rendered.contains("ZOOM"), "bar: {rendered}");
-        assert!(rendered.contains(" BG 4 "), "bar: {rendered}");
-        assert!(rendered.contains(" Ports 2 "), "bar: {rendered}");
-        assert!(rendered.contains("3 selected"), "bar: {rendered}");
-    }
-
-    /// The middle of the bar is the one place a pane summary is the point
-    /// rather than a garnish, so it is centred on the bar itself — not parked
-    /// wherever the run of chips happens to end.
-    #[test]
-    fn the_status_bar_centres_the_focused_panes_summary() {
-        let backend = TestBackend::new(120, 1);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        let view = StatusBar {
-            pane: FocusedPaneSummary {
-                title: "2 Fluent".into(),
-                detail: "running the failing test alone".into(),
-                refresh_in: Some(Duration::from_secs(134)),
-                refreshable: true,
-                ..FocusedPaneSummary::default()
-            },
-            ..StatusBar::default()
-        };
-
-        terminal
-            .draw(|frame| {
-                render_status_bar(frame, frame.area(), &view, &GridPalette::default());
-            })
-            .expect("render status bar");
-
-        let rendered = buffer_text(&terminal);
-        let expected = "2 Fluent · running the failing test alone · 2:14 ⟳";
-        let start = rendered
-            .find(expected)
-            .map(|byte| rendered[..byte].chars().count())
-            .unwrap_or_else(|| panic!("summary missing from the bar: {rendered}"));
-        // The clock is part of the centred block, so the whole run is what has
-        // to sit in the middle — not the sentence with the clock hanging off it.
-        let middle = start + expected.chars().count() / 2;
-        assert!(
-            middle.abs_diff(60) <= 1,
-            "the summary's midpoint landed at {middle}, not the bar's: {rendered}"
-        );
-
-        // The furniture that used to fill this space said the same thing on
-        // every frame of every session.
-        assert!(!rendered.contains("LIVE"), "bar: {rendered}");
-        assert!(!rendered.contains("focused pane"), "bar: {rendered}");
-    }
-
-    /// The countdown says how stale the cached summary is, and the control next
-    /// to it is what skips the wait. Both have to be hittable with a mouse.
-    #[test]
-    fn the_refresh_control_is_clickable_and_reports_the_cache_age() {
-        let backend = TestBackend::new(120, 1);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        let view = StatusBar {
-            pane: FocusedPaneSummary {
-                title: "2 Fluent".into(),
-                detail: "running the failing test alone".into(),
-                refresh_in: Some(Duration::from_secs(134)),
-                refreshable: true,
-                ..FocusedPaneSummary::default()
-            },
-            ..StatusBar::default()
-        };
-
-        let mut buttons = StatusButtons::default();
-        terminal
-            .draw(|frame| {
-                buttons = render_status_bar(frame, frame.area(), &view, &GridPalette::default());
-            })
-            .expect("render status bar");
-
-        let buffer = terminal.backend().buffer().clone();
-        let button = buttons.summary_refresh.expect("refresh control");
-        let hit = (button.x..button.right())
-            .map(|x| buffer[(x, 0)].symbol())
-            .collect::<String>();
-        assert_eq!(
-            hit, " · 2:14 ⟳ ",
-            "the whole clock must be the click target"
-        );
-
-        // Clock formats, including the two states that are not a countdown.
-        let spans = |pane: &FocusedPaneSummary| {
-            summary_clock_spans(pane)
-                .iter()
-                .map(|span| span.content.to_string())
-                .collect::<String>()
-        };
-        let base = FocusedPaneSummary {
-            refreshable: true,
-            ..FocusedPaneSummary::default()
-        };
-        assert_eq!(
-            spans(&FocusedPaneSummary {
-                refresh_in: Some(Duration::from_secs(7)),
-                ..base.clone()
-            }),
-            " · 0:07 ⟳ "
-        );
-        assert_eq!(spans(&base), " · due ⟳ ");
-        assert_eq!(
-            spans(&FocusedPaneSummary {
-                refreshing: true,
-                ..base.clone()
-            }),
-            " · ··· ⟳ "
-        );
-    }
-
-    /// Nothing to refresh, nothing to offer: a pane that cannot be summarized
-    /// must not grow a control that would only report an error when pressed.
-    #[test]
-    fn an_unrefreshable_pane_gets_no_clock() {
-        let backend = TestBackend::new(120, 1);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        let off = StatusBar {
-            pane: FocusedPaneSummary {
-                title: "2 Fluent".into(),
-                detail: "turn on AI activity summaries in Settings > Manager".into(),
-                ..FocusedPaneSummary::default()
-            },
-            ..StatusBar::default()
-        };
-
-        let mut buttons = StatusButtons::default();
-        terminal
-            .draw(|frame| {
-                buttons = render_status_bar(frame, frame.area(), &off, &GridPalette::default());
-            })
-            .expect("render status bar");
-        assert_eq!(buttons.summary_refresh, None);
-        assert!(!buffer_text(&terminal).contains('⟳'));
-
-        // Nor while a status message has taken the centre away from it.
-        let busy = StatusBar {
-            status: "copied 3 lines".into(),
-            pane: FocusedPaneSummary {
-                title: "2 Fluent".into(),
-                detail: "running the failing test alone".into(),
-                refresh_in: Some(Duration::from_secs(134)),
-                refreshable: true,
-                ..FocusedPaneSummary::default()
-            },
-            ..StatusBar::default()
-        };
-        terminal
-            .draw(|frame| {
-                buttons = render_status_bar(frame, frame.area(), &busy, &GridPalette::default());
-            })
-            .expect("render status bar");
-        assert_eq!(buttons.summary_refresh, None);
-    }
-
-    /// A status message is the answer to something the user just did, so it
-    /// takes the centre for as long as it lasts.
-    #[test]
-    fn a_status_message_outranks_the_pane_summary() {
-        let backend = TestBackend::new(120, 1);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        let view = StatusBar {
-            status: "copied 3 lines".into(),
-            pane: FocusedPaneSummary {
-                title: "2 Fluent".into(),
-                detail: "running the failing test alone".into(),
-                refresh_in: Some(Duration::from_secs(134)),
-                refreshable: true,
-                ..FocusedPaneSummary::default()
-            },
-            ..StatusBar::default()
-        };
-
-        terminal
-            .draw(|frame| {
-                render_status_bar(frame, frame.area(), &view, &GridPalette::default());
-            })
-            .expect("render status bar");
-
-        let rendered = buffer_text(&terminal);
-        assert!(rendered.contains("copied 3 lines"), "bar: {rendered}");
-        assert!(!rendered.contains("running the failing"), "bar: {rendered}");
-    }
-
-    /// The summary is the reason the line exists; the pane's name is context.
-    /// A narrow bar drops the context rather than the sentence.
-    #[test]
-    fn a_narrow_centre_keeps_the_sentence_and_drops_the_pane_name() {
-        let pane = FocusedPaneSummary {
-            title: "2 Fluent".into(),
-            detail: "running the failing test alone".into(),
-            ..FocusedPaneSummary::default()
-        };
-
-        let wide = pane_summary_line(&pane, 60);
-        assert!(wide.to_string().starts_with("2 Fluent · "));
-
-        let narrow = pane_summary_line(&pane, 20);
-        assert!(!narrow.to_string().contains("Fluent"), "{narrow}");
-        assert!(narrow.to_string().starts_with("running"), "{narrow}");
-
-        for room in [0usize, 1, 4, 17, 40, 200] {
-            assert!(pane_summary_line(&pane, room).width() <= room);
-        }
-        assert_eq!(
-            pane_summary_line(&FocusedPaneSummary::default(), 80).width(),
-            0
-        );
-    }
-
-    /// The centre has to give way rather than overprint the chips it sits
-    /// between, and the ports chip is anchored to the right edge.
-    #[test]
-    fn the_centre_line_never_overlaps_the_chips() {
-        assert_eq!(status_centre_gap(Rect::new(0, 0, 40, 1), 30, 40), None);
-        assert_eq!(status_centre_gap(Rect::new(0, 0, 20, 1), 18, 4), None);
-
-        let (start, room) = status_centre_gap(Rect::new(0, 0, 120, 1), 34, 110).expect("gap");
-        assert_eq!(start, 36);
-        assert_eq!(start + room, 108);
     }
 
     /// The picker must say what it actually does. Adopting a window moves the
@@ -5842,90 +5790,6 @@ mod tests {
         });
         assert!(confirming.contains("replace this pane?"), "{confirming}");
         assert!(confirming.contains("its shell closes"), "{confirming}");
-    }
-
-    /// The hints exist to be discoverable, not to be load-bearing. A terminal
-    /// too narrow for them must spend its width on the tabs instead.
-    #[test]
-    fn tab_hints_give_way_to_the_tabs_themselves() {
-        assert_eq!(tab_hints(0).width(), 0);
-        assert!(tab_hints(200).width() > 0);
-        assert!(tab_hints(200).width() >= tab_hints(20).width());
-
-        for budget in [0, 1, 7, 13, 40, 200] {
-            assert!(
-                tab_hints(budget).width() <= budget as usize,
-                "hints overflowed a {budget}-column budget"
-            );
-        }
-    }
-
-    /// The status bar lays out its chips once and reports where they landed.
-    /// When that layout was duplicated by a second set of offset calculations,
-    /// renaming a button moved it on screen without moving its click target.
-    #[test]
-    fn status_bar_click_targets_match_what_was_drawn() {
-        let backend = TestBackend::new(120, 1);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        let mut buttons = StatusButtons::default();
-        let view = StatusBar {
-            input_scope: "focused pane",
-            ..StatusBar::default()
-        };
-
-        terminal
-            .draw(|frame| {
-                buttons = render_status_bar(frame, frame.area(), &view, &GridPalette::default());
-            })
-            .expect("render status bar");
-
-        let buffer = terminal.backend().buffer().clone();
-        let text_at = |rect: Rect| {
-            (rect.x..rect.right())
-                .map(|x| buffer[(x, rect.y)].symbol())
-                .collect::<String>()
-        };
-
-        assert_eq!(
-            text_at(buttons.previous_panes.expect("panes chip")),
-            PREVIOUS_PANES_BUTTON
-        );
-        assert_eq!(
-            text_at(buttons.pane_settings.expect("summary chip")),
-            PANE_SETTINGS_BUTTON
-        );
-        assert_eq!(
-            text_at(buttons.background_jobs.expect("jobs chip")),
-            background_jobs_button_label(0)
-        );
-        assert_eq!(
-            text_at(buttons.ports.expect("ports chip")),
-            ports_button_label(0)
-        );
-    }
-
-    /// "0 panes selected" was permanently on screen to report that nothing
-    /// unusual was happening.
-    #[test]
-    fn the_status_bar_stays_silent_about_an_empty_selection() {
-        let quiet = StatusBar::default();
-        assert_eq!(quiet.selection_summary(), None);
-
-        let panes = StatusBar {
-            selected_panes: 3,
-            ..StatusBar::default()
-        };
-        assert_eq!(panes.selection_summary().as_deref(), Some("3 selected"));
-
-        let both = StatusBar {
-            selected_panes: 3,
-            selected_grids: 2,
-            ..StatusBar::default()
-        };
-        assert_eq!(
-            both.selection_summary().as_deref(),
-            Some("3 panes, 2 grids selected")
-        );
     }
 
     #[test]
@@ -6685,7 +6549,7 @@ mod tests {
 
         assert_eq!(
             pane_border_style(&view, &palette),
-            Style::default().fg(WAITING)
+            Style::default().fg(LINE)
         );
 
         view.selected = true;
@@ -6888,13 +6752,5 @@ mod tests {
         blit_buffer(&source, &mut target, Rect::new(9, 9, 2, 2));
 
         assert_eq!(target, untouched);
-    }
-
-    #[test]
-    fn ports_button_stays_anchored_to_footer_right_edge() {
-        let footer = Rect::new(4, 20, 80, 1);
-        let button = ports_button_rect(footer, 3).expect("ports button");
-        assert_eq!(button.right(), footer.right());
-        assert_eq!(button.width, ports_button_label(3).len() as u16);
     }
 }

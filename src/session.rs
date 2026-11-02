@@ -1,10 +1,11 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs::{self, OpenOptions},
-    io::{self, IsTerminal, Write},
+    io::{self, IsTerminal, Read, Seek, Write},
     path::{Path, PathBuf},
-    sync::OnceLock,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Mutex, OnceLock},
+    thread::{self, JoinHandle},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -21,7 +22,7 @@ use crate::{
     config::Config,
     layout::{GridSize, MAX_PANES},
     pane_host::{PtyHostRef, PtyPane, terminate_saved_host},
-    ports::roots_with_descendant_named,
+    ports::ProcessTable,
     profiles::{Profile, all_profiles},
     setup::{LaunchPlan, PaneLaunchSpec, folder_display_name},
 };
@@ -120,6 +121,28 @@ pub struct SavedTab {
     pub view: SavedView,
     #[serde(default)]
     pub panes: Vec<SavedPane>,
+    /// Set only on the Parked tab: for each pane, in order, the grid and cell it
+    /// was parked from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked_from: Vec<SavedParkedFrom>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedParkedFrom {
+    pub grid: String,
+    pub slot: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_when: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub met: Option<SavedVerdict>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub briefed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedVerdict {
+    pub reason: String,
+    pub at_unix: u64,
 }
 
 /// How a grid looked, beyond which panes it held: which pane had focus, whether
@@ -157,6 +180,8 @@ pub struct SavedPaneHistory {
     pub input_history: Vec<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub output_tail: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mid_turn: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -192,6 +217,21 @@ pub struct SessionRecorder {
     /// text itself pinned a multi-megabyte copy for the life of the process.
     /// Only the change check needs it, and a digest answers that in 8 bytes.
     last_saved_digest: Option<u64>,
+    pending_write: Option<JoinHandle<Result<()>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SaveMode {
+    Now,
+    /// Serialize now and write and flush on another thread; the next save
+    /// waits for it, so writes still land in order.
+    Background,
+}
+
+impl Drop for SessionRecorder {
+    fn drop(&mut self) {
+        let _ = self.wait_for_write();
+    }
 }
 
 impl SessionRecord {
@@ -209,6 +249,7 @@ impl SavedSession {
             grid: self.grid,
             view: self.view.clone(),
             panes: self.panes.clone(),
+            parked_from: Vec::new(),
         }
     }
 
@@ -354,7 +395,12 @@ impl SavedTab {
             grid: live.plan.grid.into(),
             view: live.view.clone(),
             panes: saved_panes_from_live(live),
+            parked_from: Vec::new(),
         }
+    }
+
+    pub fn is_parked(&self) -> bool {
+        !self.parked_from.is_empty()
     }
 
     pub fn launch_plan(&self, config: &Config) -> Result<LaunchPlan> {
@@ -406,6 +452,9 @@ pub struct LiveGrid<'a> {
     pub pane_names: &'a [Option<String>],
     pub sleeping: &'a BTreeSet<usize>,
     pub view: SavedView,
+    /// Processes running when the snapshot was taken, or `None` when they
+    /// could not be listed.
+    pub processes: Option<&'a ProcessTable>,
 }
 
 /// Rebuild a grid exactly as it was saved.
@@ -487,7 +536,9 @@ fn saved_panes_from_live(live: &LiveGrid<'_>) -> Vec<SavedPane> {
         .iter()
         .filter_map(PtyPane::host_process_id)
         .collect::<Vec<_>>();
-    let codex_roots = roots_with_descendant_named(&host_processes, "codex").ok();
+    let codex_roots = live
+        .processes
+        .map(|processes| processes.roots_with_descendant_named(&host_processes, "codex"));
     let claude_sessions = claude_sessions_from_live(live);
     live.plan
         .panes
@@ -550,6 +601,30 @@ fn saved_panes_from_live(live: &LiveGrid<'_>) -> Vec<SavedPane> {
 /// cannot prove it owns a conversation is saved without one instead, so it
 /// resumes as a fresh Claude in the right folder.
 fn claude_sessions_from_live(live: &LiveGrid<'_>) -> Vec<Option<String>> {
+    // Only a pane with Claude running under it can be in a conversation. A pane
+    // that ran one and dropped back to a shell still has the prompts in its
+    // history, and matching those would resume a conversation the user closed.
+    let host_processes = live
+        .panes
+        .iter()
+        .filter_map(PtyPane::host_process_id)
+        .collect::<Vec<_>>();
+    let claude_roots = live
+        .processes
+        .map(|processes| processes.roots_with_descendant_named(&host_processes, "claude"));
+    let running = live
+        .processes
+        .and_then(|processes| live_claude_sessions(processes, &host_processes));
+    let running_here = |pane: Option<&PtyPane>| {
+        let host = pane?.host_process_id()?;
+        running.as_ref()?.by_host.get(&host).cloned()
+    };
+    let running_anywhere = live
+        .panes
+        .iter()
+        .filter_map(|pane| running_here(Some(pane)))
+        .collect::<BTreeSet<_>>();
+
     let claims = live
         .plan
         .panes
@@ -557,12 +632,42 @@ fn claude_sessions_from_live(live: &LiveGrid<'_>) -> Vec<Option<String>> {
         .enumerate()
         .map(|(index, spec)| {
             let pane = live.panes.get(index);
+            let launched_claude = spec.command.agent_kind == Some(AgentKind::Claude)
+                && is_direct_claude_command(&spec.command.command);
+            let host_running = pane
+                .and_then(PtyPane::host_process_id)
+                .zip(running.as_ref())
+                .is_some_and(|(host, running)| running.running_hosts.contains(&host));
+            if !launched_claude && host_running && running_here(pane).is_none() {
+                // A shell whose Claude has exited. Its history still names the
+                // conversation, and resuming that would reopen one the user
+                // closed.
+                return ClaudeSessionClaim::default();
+            }
+            let input_history = pane.map(PtyPane::input_history).unwrap_or_default();
+            // What the pane's Claude has open right now outranks anything
+            // remembered, and a remembered id that another pane's Claude has
+            // open is that pane's.
+            let pinned = running_here(pane).or_else(|| {
+                pane.and_then(PtyPane::agent_session_id)
+                    .filter(|session_id| !running_anywhere.contains(*session_id))
+                    .map(str::to_string)
+            });
+            let mentioned = claude_resume_id(&spec.command, input_history);
+            let running_claude = pane.is_some_and(|pane| {
+                pane.host_process_id().is_some_and(|process_id| {
+                    claude_roots
+                        .as_ref()
+                        .is_some_and(|roots| roots.contains(&process_id))
+                })
+            });
+            let inferred = (pinned.is_none() && mentioned.is_none() && running_claude)
+                .then(|| pane.and_then(|pane| infer_claude_session(pane.cwd(), input_history)))
+                .flatten();
             ClaudeSessionClaim {
-                pinned: pane.and_then(PtyPane::agent_session_id).map(str::to_string),
-                mentioned: claude_resume_id(
-                    &spec.command,
-                    pane.map(PtyPane::input_history).unwrap_or_default(),
-                ),
+                pinned,
+                mentioned,
+                inferred,
             }
         })
         .collect::<Vec<_>>();
@@ -576,6 +681,9 @@ fn claude_sessions_from_live(live: &LiveGrid<'_>) -> Vec<Option<String>> {
 struct ClaudeSessionClaim {
     pinned: Option<String>,
     mentioned: Option<String>,
+    /// Conversation matched from the pane's typed prompts, for a pane where the
+    /// user started Claude inside their own shell and so nothing was pinned.
+    inferred: Option<String>,
 }
 
 /// Settle which pane resumes which conversation.
@@ -598,8 +706,9 @@ fn resolve_claude_sessions(claims: &[ClaudeSessionClaim]) -> Vec<Option<String>>
                 None => claim
                     .mentioned
                     .clone()
+                    .or_else(|| claim.inferred.clone())
                     // A conversation some other pane pinned belongs to that
-                    // pane, however this one came to mention it.
+                    // pane, however this one came to mention or match it.
                     .filter(|session_id| !pinned.contains(session_id))?,
             };
 
@@ -952,6 +1061,16 @@ fn claude_resume_profile(
     )
 }
 
+/// The same agent reopening `session_id`, or starting fresh when that
+/// conversation never wrote a transcript and so cannot be resumed.
+pub fn reopen_claude_conversation(command: &Profile, cwd: &Path, session_id: &str) -> Profile {
+    if claude_session_exists(cwd, session_id) {
+        claude_resume_profile("", command, session_id).1
+    } else {
+        without_claude_session_pin(command)
+    }
+}
+
 /// Swap whatever conversation selection the pane carried for a resume of
 /// `session_id`. Re-passing `--session-id` would ask Claude to create a session
 /// that already exists, which it refuses.
@@ -960,6 +1079,37 @@ fn claude_resume_args(args: &[String], session_id: &str) -> Vec<String> {
     resumed.push("--resume".into());
     resumed.push(session_id.to_string());
     resumed
+}
+
+/// The same agent with no conversation selected, for a pane that should start
+/// fresh rather than open the conversation the command was copied from.
+pub fn without_conversation(command: &Profile) -> Profile {
+    let mut command = command.clone();
+    match command.agent_kind {
+        Some(AgentKind::Claude) => {
+            command.args = args_without_claude_session_selection(&command.args);
+        }
+        Some(AgentKind::Codex) => {
+            if let Some(resume) = command
+                .args
+                .iter()
+                .position(|argument| argument == "resume")
+            {
+                let end = if command
+                    .args
+                    .get(resume + 1)
+                    .is_some_and(|argument| looks_like_thread_id(argument))
+                {
+                    resume + 2
+                } else {
+                    resume + 1
+                };
+                command.args.drain(resume..end);
+            }
+        }
+        _ => {}
+    }
+    command
 }
 
 fn without_claude_session_pin(command: &Profile) -> Profile {
@@ -1052,7 +1202,7 @@ fn claude_session_id_in_text(value: &str) -> Option<String> {
     })
 }
 
-fn is_direct_claude_command(command: &str) -> bool {
+pub(crate) fn is_direct_claude_command(command: &str) -> bool {
     Path::new(command)
         .file_stem()
         .and_then(|name| name.to_str())
@@ -1195,15 +1345,334 @@ fn claude_project_dirs() -> &'static [PathBuf] {
     })
 }
 
-fn claude_projects_dir() -> Option<PathBuf> {
-    if let Some(configured) = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-    {
-        return Some(configured.join("projects"));
+/// Longest a probe's transcript tail is read back over. Transcripts run to tens
+/// of megabytes, and the prompt being looked for is one of the last things
+/// written, so the tail is where the answer is and the head is pure I/O.
+const CLAUDE_TAIL_SCAN_BYTES: u64 = 512 * 1024;
+/// Transcripts considered for a match, newest first. A pane's own conversation
+/// is by definition among the ones written most recently, so widening this only
+/// buys candidates that cannot be the answer.
+const CLAUDE_INFER_CANDIDATES: usize = 16;
+/// Shortest typed line worth searching for. Below this the text is a `y` or a
+/// `go` that appears in half the transcripts on disk.
+const CLAUDE_PROBE_MIN_CHARS: usize = 24;
+/// Typed lines a pane is matched on, newest first. Six is enough to see past a
+/// run of generic replies to the last thing the user said that was their own,
+/// and short enough that it does not reach back into a conversation the pane
+/// has since left.
+const CLAUDE_PROBE_COUNT: usize = 6;
+
+/// How long a failed inference is left alone before it is tried again. A prompt
+/// typed a moment ago may not be flushed to the transcript yet, so a miss has to
+/// expire; retrying it on every five-second autosave would not.
+const CLAUDE_INFER_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone)]
+enum InferredClaudeSession {
+    Found(String),
+    Missed(Instant),
+}
+
+/// Work out which conversation a pane is in from what the user typed into it.
+///
+/// A pane GridBash launched carries the id it pinned, but a pane where the user
+/// ran `claude` inside their own shell carries nothing at all, and that is most
+/// of them. Such a pane used to be saved with no conversation and came back as a
+/// bare shell, which is the resume that "brings back the grid but not the work".
+///
+/// The join is the prompt text: what the user typed into the pane is written
+/// verbatim into the transcript of the conversation that received it, so a
+/// distinctive prompt names its conversation exactly. An ambiguous prompt names
+/// nothing and is ignored, and a pane with no distinctive prompt at all comes
+/// back without a conversation, because resuming the wrong one into a pane is
+/// worse than resuming none.
+///
+/// The result is cached against the newest prompt it was derived from, so this
+/// re-reads transcripts only when the user has typed something new — not on
+/// every five-second autosave.
+fn infer_claude_session(cwd: &Path, input_history: &[String]) -> Option<String> {
+    let probes = claude_probes(input_history);
+    let primary = probes.first()?;
+
+    static CACHE: OnceLock<Mutex<HashMap<String, InferredClaudeSession>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Mutex::default);
+    let key = format!("{}\u{0}{primary}", cwd.display());
+    let now = Instant::now();
+    if let Ok(cache) = cache.lock() {
+        match cache.get(&key) {
+            Some(InferredClaudeSession::Found(session_id)) => return Some(session_id.clone()),
+            Some(InferredClaudeSession::Missed(missed_at))
+                if now.duration_since(*missed_at) < CLAUDE_INFER_RETRY_AFTER =>
+            {
+                return None;
+            }
+            _ => {}
+        }
     }
 
-    BaseDirs::new().map(|dirs| dirs.home_dir().join(".claude").join("projects"))
+    let found = pick_claude_transcript(&recent_claude_transcripts(cwd), &probes);
+    if let Ok(mut cache) = cache.lock() {
+        // A miss is remembered with its time so the retry window applies; a hit
+        // is remembered outright, because the conversation a prompt landed in
+        // does not change afterwards.
+        cache.insert(
+            key,
+            match &found {
+                Some(session_id) => InferredClaudeSession::Found(session_id.clone()),
+                None => InferredClaudeSession::Missed(now),
+            },
+        );
+    }
+    found
+}
+
+/// Typed lines distinctive enough to name a conversation, most recent first.
+///
+/// Only text that survives into the transcript byte for byte is usable, so
+/// anything JSON would have escaped is skipped rather than escaped here: the
+/// search is a substring scan, and a probe that needs encoding is a probe that
+/// can silently stop matching.
+fn claude_probes(input_history: &[String]) -> Vec<String> {
+    input_history
+        .iter()
+        .rev()
+        .map(|input| input.trim())
+        .filter(|input| {
+            input.chars().count() >= CLAUDE_PROBE_MIN_CHARS
+                && !input
+                    .chars()
+                    .any(|character| character.is_control() || matches!(character, '"' | '\\'))
+                // A line that launches Claude is a shell command, not a prompt.
+                // `claude --resume <id>` is long and distinctive enough to pass
+                // every other filter here, and it turns up inside transcripts
+                // of unrelated conversations that happened to discuss it, which
+                // is a match on the wrong pane's work.
+                && !mentions_claude_command(input)
+        })
+        .map(str::to_string)
+        // The same line typed twice is one piece of evidence, not two.
+        .fold(Vec::new(), |mut probes, input| {
+            if !probes.contains(&input) {
+                probes.push(input);
+            }
+            probes
+        })
+        .into_iter()
+        .take(CLAUDE_PROBE_COUNT)
+        .collect()
+}
+
+/// The one transcript that holds this pane's prompts.
+///
+/// A probe found in exactly one candidate names that conversation and nothing
+/// else; a probe found in several ("summarize what ur doing", typed into every
+/// pane on this machine) names nothing and is ignored no matter how many
+/// transcripts it hits. Counting hits instead would let a handful of generic
+/// lines outvote the one sentence the user only ever said once.
+///
+/// Probes are tried newest first and the first distinctive one wins. A pane
+/// that has been through several conversations — `/exit`, `claude` again, a
+/// `--resume` — has prompts belonging to all of them in its history, and the
+/// one it is in now is the one that received its latest prompt. Requiring the
+/// older probes to agree would make every such pane unresumable, and those are
+/// exactly the panes that have been open long enough to be worth resuming.
+fn pick_claude_transcript(transcripts: &[PathBuf], probes: &[String]) -> Option<String> {
+    let prompts = transcripts
+        .iter()
+        .map(|path| (path, transcript_prompts(path)))
+        .collect::<Vec<_>>();
+
+    let winner = probes.iter().find_map(|probe| {
+        let mut matched = prompts
+            .iter()
+            .filter(|(_, prompts)| prompts.iter().any(|line| line.contains(probe.as_str())))
+            .map(|(path, _)| *path);
+        match (matched.next(), matched.next()) {
+            (Some(only), None) => Some(only),
+            _ => None,
+        }
+    })?;
+
+    let session_id = winner.file_stem()?.to_str()?.to_string();
+    looks_like_thread_id(&session_id).then_some(session_id)
+}
+
+/// Lines of a transcript that record something the user typed.
+///
+/// A transcript is mostly tool output, and that output routinely quotes other
+/// panes' prompts — reading a saved GridBash session, or grepping a log, pulls
+/// every pane's typed history into one conversation's file. Matching on that
+/// text would attribute all of those panes to whichever conversation read the
+/// file. Claude writes tool results as user messages too, but tags them with a
+/// tool-use id, which is what separates them from something a person typed.
+fn transcript_prompts(path: &Path) -> Vec<String> {
+    read_file_tail(path)
+        .into_iter()
+        .flat_map(|tail| {
+            tail.lines()
+                .filter(|line| line.contains(r#""type":"user""#) && !line.contains("tool_use_id"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The last `CLAUDE_TAIL_SCAN_BYTES` of a file, as text.
+fn read_file_tail(path: &Path) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    if length > CLAUDE_TAIL_SCAN_BYTES {
+        file.seek(io::SeekFrom::Start(length - CLAUDE_TAIL_SCAN_BYTES))
+            .ok()?;
+    }
+    let mut tail = Vec::new();
+    file.take(CLAUDE_TAIL_SCAN_BYTES)
+        .read_to_end(&mut tail)
+        .ok()?;
+    // The tail opens mid-line and can split a UTF-8 character. Lossy decoding
+    // turns that into a replacement character in the one truncated line, which
+    // costs at most a match and can never invent one.
+    Some(String::from_utf8_lossy(&tail).into_owned())
+}
+
+/// Transcripts for this folder, newest first and capped.
+fn recent_claude_transcripts(cwd: &Path) -> Vec<PathBuf> {
+    let Some(root) = claude_projects_dir() else {
+        return Vec::new();
+    };
+    let mut transcripts = claude_search_folders(&root, cwd)
+        .into_iter()
+        .filter_map(|directory| fs::read_dir(directory).ok())
+        .flat_map(|entries| entries.flatten())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect::<Vec<_>>();
+    transcripts.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    transcripts.truncate(CLAUDE_INFER_CANDIDATES);
+    transcripts.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Transcript folders a pane's conversation can be in: its own directory, plus
+/// the worktrees underneath it.
+///
+/// Claude files a transcript under the directory it was launched in, and a pane
+/// sitting in a repo root routinely runs an agent inside a worktree of that
+/// repo. Searching only the pane's own folder misses those entirely, which is
+/// how a pane whose conversation is very much on disk still comes back as a
+/// bare shell. Unrelated repos are left out: widening to every project on the
+/// machine trades a missed match for a wrong one.
+fn claude_search_folders(root: &Path, cwd: &Path) -> Vec<PathBuf> {
+    let folder = claude_project_folder(cwd);
+    let mut folders = vec![root.join(&folder)];
+    let prefix = format!("{folder}-");
+    if let Ok(entries) = fs::read_dir(root) {
+        folders.extend(entries.flatten().filter_map(|entry| {
+            let path = entry.path();
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&prefix))
+                .then_some(path)
+        }));
+    }
+    folders
+}
+
+/// Whether a typed line is a command that runs Claude rather than a prompt sent
+/// to one.
+///
+/// Only the leading word counts. "find me the other claude session" is a prompt,
+/// and one of the most distinctive a user is likely to type; rejecting every
+/// line that says "claude" anywhere throws away the best probes there are.
+fn mentions_claude_command(value: &str) -> bool {
+    value
+        .split_whitespace()
+        .next()
+        .map(|token| {
+            Path::new(
+                token.trim_matches(|character: char| matches!(character, '"' | '\'' | ';' | ',')),
+            )
+        })
+        .and_then(|token| token.file_stem())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("claude"))
+}
+
+/// What is known about the Claude processes running under a set of panes.
+pub struct LiveClaudeSessions {
+    /// Conversation each pane's Claude has open, keyed by the pane's host pid.
+    pub by_host: HashMap<u32, String>,
+    /// Hosts that were running when looked at. A running host missing from
+    /// `by_host` has no Claude under it.
+    pub running_hosts: HashSet<u32>,
+}
+
+/// Ask Claude Code which conversation each pane's Claude process has open.
+///
+/// Claude Code writes `<config>/sessions/<pid>.json` for every running process,
+/// naming the conversation that process is in and updating it on `/clear`. It
+/// is the only record that ties a process to a conversation, so it decides even
+/// when several Claudes share a folder. `None` means this Claude Code does not
+/// write those files and nothing can be read from them.
+pub fn live_claude_sessions(
+    processes: &ProcessTable,
+    host_pids: &[u32],
+) -> Option<LiveClaudeSessions> {
+    let sessions_dir = claude_config_dir()?.join("sessions");
+    if !sessions_dir.is_dir() {
+        return None;
+    }
+    let tree = processes.descendants_of(host_pids);
+    let mut nearest = HashMap::<u32, (usize, String)>::new();
+    for (pid, host, depth) in tree.descendants {
+        let Some(session_id) = claude_process_session(&sessions_dir, pid) else {
+            continue;
+        };
+        // A Claude started by another Claude (a hook, a tool) sits deeper in the
+        // tree; the one the user is talking to is the one nearest the pane.
+        if nearest
+            .get(&host)
+            .is_none_or(|(nearest_depth, _)| depth < *nearest_depth)
+        {
+            nearest.insert(host, (depth, session_id));
+        }
+    }
+    Some(LiveClaudeSessions {
+        by_host: nearest
+            .into_iter()
+            .map(|(host, (_, session_id))| (host, session_id))
+            .collect(),
+        running_hosts: tree.running_roots,
+    })
+}
+
+fn claude_process_session(sessions_dir: &Path, pid: u32) -> Option<String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ClaudeProcess {
+        pid: u32,
+        session_id: String,
+    }
+
+    let text = fs::read_to_string(sessions_dir.join(format!("{pid}.json"))).ok()?;
+    let process = serde_json::from_str::<ClaudeProcess>(&text).ok()?;
+    (process.pid == pid && looks_like_thread_id(&process.session_id)).then_some(process.session_id)
+}
+
+fn claude_config_dir() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| BaseDirs::new().map(|dirs| dirs.home_dir().join(".claude")))
+}
+
+fn claude_projects_dir() -> Option<PathBuf> {
+    Some(claude_config_dir()?.join("projects"))
 }
 
 /// Folder Claude keeps a directory's transcripts in: the path with everything
@@ -1247,7 +1716,18 @@ impl SavedPaneHistory {
         Self {
             input_history: pane.input_history().to_vec(),
             output_tail: pane.output_tail().to_string(),
+            mid_turn: pane.mid_turn(),
         }
+    }
+
+    /// True when the last thing this pane was asked was `prompt` and it has
+    /// finished answering, so sending `prompt` again would only repeat it.
+    pub fn settled_after(&self, prompt: &str) -> bool {
+        !self.mid_turn
+            && self
+                .input_history
+                .last()
+                .is_some_and(|line| line == prompt.trim())
     }
 }
 
@@ -1268,6 +1748,7 @@ impl SessionRecorder {
             path,
             session: SavedSession::new(id, title, plan),
             last_saved_digest: None,
+            pending_write: None,
         };
         recorder.save()?;
         prune_old_sessions()?;
@@ -1283,6 +1764,7 @@ impl SessionRecorder {
             path: record.path,
             session: record.session,
             last_saved_digest,
+            pending_write: None,
         }
     }
 
@@ -1295,6 +1777,11 @@ impl SessionRecorder {
     }
 
     pub fn save_if_changed(&mut self) -> Result<bool> {
+        self.save_with(SaveMode::Now)
+    }
+
+    pub fn save_with(&mut self, mode: SaveMode) -> Result<bool> {
+        self.wait_for_write()?;
         let raw = toml::to_string_pretty(&self.session).context("failed to serialize session")?;
         let unchanged = self.last_saved_digest == Some(session_digest(&raw));
         // Release the probe before serializing again; the two copies of a
@@ -1306,9 +1793,31 @@ impl SessionRecorder {
 
         self.session.updated_at = now_seconds();
         let raw = toml::to_string_pretty(&self.session).context("failed to serialize session")?;
-        write_session_raw(&self.path, raw.as_bytes())?;
-        self.last_saved_digest = Some(session_digest(&raw));
+        let digest = session_digest(&raw);
+        match mode {
+            SaveMode::Now => write_session_raw(&self.path, raw.as_bytes())?,
+            SaveMode::Background => {
+                let path = self.path.clone();
+                self.pending_write = Some(thread::spawn(move || {
+                    write_session_raw(&path, raw.as_bytes())
+                }));
+            }
+        }
+        self.last_saved_digest = Some(digest);
         Ok(true)
+    }
+
+    fn wait_for_write(&mut self) -> Result<()> {
+        let Some(write) = self.pending_write.take() else {
+            return Ok(());
+        };
+        let result = write
+            .join()
+            .unwrap_or_else(|_| Err(anyhow!("the session writer panicked")));
+        if result.is_err() {
+            self.last_saved_digest = None;
+        }
+        result
     }
 
     pub fn resume_command(&self) -> String {
@@ -1431,6 +1940,7 @@ fn is_interrupted_agent_session(record: &SessionRecord) -> bool {
 /// 2x3 grid into 3x3 and replaced grid names with folder names.
 fn build_interrupted_recovery(records: &[SessionRecord]) -> Option<InterruptedRecovery> {
     let mut tabs = Vec::new();
+    let mut parked: Option<SavedTab> = None;
     let mut background_panes = Vec::new();
     let mut used_titles = BTreeMap::<String, usize>::new();
     let mut active_tab = 0;
@@ -1444,6 +1954,16 @@ fn build_interrupted_recovery(records: &[SessionRecord]) -> Option<InterruptedRe
             // A grid with no panes cannot be rebuilt, so it is dropped without
             // moving the grid the user was looking at.
             if grid.panes.is_empty() {
+                continue;
+            }
+            if grid.is_parked() {
+                match parked.as_mut() {
+                    Some(merged) => {
+                        merged.panes.extend(grid.panes);
+                        merged.parked_from.extend(grid.parked_from);
+                    }
+                    None => parked = Some(grid),
+                }
                 continue;
             }
             if recovered_active.is_none() && index >= active {
@@ -1462,10 +1982,16 @@ fn build_interrupted_recovery(records: &[SessionRecord]) -> Option<InterruptedRe
         next_tab_number = next_tab_number.max(record.session.next_grid_number());
     }
 
-    let pane_count = tabs.iter().map(|tab| tab.panes.len()).sum::<usize>() + background_panes.len();
     if tabs.is_empty() {
         return None;
     }
+    // The Parked tab always sits last, and grids recovered from several
+    // workspaces share one.
+    if let Some(mut parked) = parked {
+        parked.grid = GridSize::from_count(parked.panes.len()).into();
+        tabs.push(parked);
+    }
+    let pane_count = tabs.iter().map(|tab| tab.panes.len()).sum::<usize>() + background_panes.len();
 
     Some(InterruptedRecovery {
         active_tab: active_tab.min(tabs.len().saturating_sub(1)),
@@ -2020,6 +2546,216 @@ mod tests {
 
     use super::*;
 
+    /// Writes transcripts holding `prompts`, named after `session_id`, the way
+    /// Claude lays them out: one JSON object per line with the user's text in it.
+    fn write_transcript(directory: &Path, session_id: &str, prompts: &[&str]) -> PathBuf {
+        fs::create_dir_all(directory).expect("transcript directory");
+        let path = directory.join(format!("{session_id}.jsonl"));
+        let body = prompts
+            .iter()
+            .map(|prompt| {
+                format!(r#"{{"type":"user","message":{{"role":"user","content":"{prompt}"}}}}"#)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&path, body).expect("write transcript");
+        path
+    }
+
+    fn transcript_dir(name: &str) -> PathBuf {
+        let directory = env::temp_dir().join(format!(
+            "gridbash-infer-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        directory
+    }
+
+    #[test]
+    fn infers_the_conversation_a_shell_pane_typed_into() {
+        let directory = transcript_dir("match");
+        let wanted = write_transcript(
+            &directory,
+            "abb140bc-0ae8-4ee6-8b13-a3b3091faeb9",
+            &["tell me the data schema for the suggestion cards"],
+        );
+        let other = write_transcript(
+            &directory,
+            "46e1cabe-bedb-4866-b9b5-ea774e3e3d8f",
+            &["something else entirely that was typed elsewhere"],
+        );
+
+        let probes = claude_probes(&[
+            "y".into(),
+            "tell me the data schema for the suggestion cards".into(),
+        ]);
+        assert_eq!(
+            probes,
+            vec!["tell me the data schema for the suggestion cards".to_string()],
+            "a two-character reply is not distinctive enough to be a probe"
+        );
+        assert_eq!(
+            pick_claude_transcript(&[wanted, other], &probes).as_deref(),
+            Some("abb140bc-0ae8-4ee6-8b13-a3b3091faeb9")
+        );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn prefers_the_conversation_that_got_the_latest_prompt() {
+        let directory = transcript_dir("recency");
+        let older = write_transcript(
+            &directory,
+            "66666666-6666-4666-8666-666666666666",
+            &["look into our suggestion cards and how their actions are generated"],
+        );
+        let current = write_transcript(
+            &directory,
+            "77777777-7777-4777-8777-777777777777",
+            &["find me the other claude session working on the design branch"],
+        );
+
+        // The pane ran `claude`, exited, and ran it again, so its history spans
+        // both conversations. It is in the second one now.
+        let probes = claude_probes(&[
+            "look into our suggestion cards and how their actions are generated".into(),
+            "claude --resume".into(),
+            "find me the other claude session working on the design branch".into(),
+        ]);
+        assert_eq!(
+            probes.first().map(String::as_str),
+            Some("find me the other claude session working on the design branch"),
+            "a prompt that merely says claude is still a prompt, not a command"
+        );
+        assert_eq!(
+            pick_claude_transcript(&[older, current], &probes).as_deref(),
+            Some("77777777-7777-4777-8777-777777777777")
+        );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_prompt_quoted_in_tool_output_does_not_claim_the_pane() {
+        let directory = transcript_dir("tool-output");
+        let real = write_transcript(
+            &directory,
+            "88888888-8888-4888-8888-888888888888",
+            &["the one distinctive thing this pane ever said"],
+        );
+        // A conversation that read a saved GridBash session, or grepped a log,
+        // ends up holding every other pane's prompts as tool results. Counting
+        // those would hand it all of their panes.
+        let quoting = directory.join("99999999-9999-4999-8999-999999999999.jsonl");
+        fs::write(
+            &quoting,
+            r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_01","type":"tool_result","content":"the one distinctive thing this pane ever said"}]}}"#,
+        )
+        .expect("write transcript");
+
+        assert_eq!(
+            pick_claude_transcript(
+                &[quoting, real],
+                &claude_probes(&["the one distinctive thing this pane ever said".into()]),
+            )
+            .as_deref(),
+            Some("88888888-8888-4888-8888-888888888888")
+        );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn shell_invocations_and_repeats_are_not_probes() {
+        assert!(
+            claude_probes(&["claude --resume 46e1cabe-bedb-4866-b9b5-ea774e3e3d8f".into()])
+                .is_empty(),
+            "a line that launches claude turns up in transcripts that merely discussed it"
+        );
+        assert_eq!(
+            claude_probes(&[
+                "summarize for me what you are doing".into(),
+                "summarize for me what you are doing".into(),
+            ])
+            .len(),
+            1,
+            "the same line typed twice is one piece of evidence"
+        );
+    }
+
+    #[test]
+    fn declines_to_guess_when_two_transcripts_match() {
+        let directory = transcript_dir("ambiguous");
+        let shared = "do all of these in atomic commits and i will try it out myself";
+        let first = write_transcript(
+            &directory,
+            "11111111-1111-4111-8111-111111111111",
+            &[shared],
+        );
+        let second = write_transcript(
+            &directory,
+            "22222222-2222-4222-8222-222222222222",
+            &[shared],
+        );
+
+        // Resuming the wrong conversation into a pane is worse than resuming
+        // none, so a tie has to come back empty and fall through to a shell.
+        assert_eq!(
+            pick_claude_transcript(&[first, second], &claude_probes(&[shared.into()])),
+            None
+        );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_lone_transcript_still_has_to_contain_the_prompt() {
+        let directory = transcript_dir("lonely");
+        let unrelated = write_transcript(
+            &directory,
+            "33333333-3333-4333-8333-333333333333",
+            &["a conversation this pane was never part of"],
+        );
+
+        assert_eq!(
+            pick_claude_transcript(
+                &[unrelated],
+                &claude_probes(&["a prompt that was never sent to any agent".into()]),
+            ),
+            None
+        );
+        let _ = fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn inferred_conversations_lose_to_pinned_ones_and_to_each_other() {
+        let session_id = "44444444-4444-4444-8444-444444444444";
+        let claims = vec![
+            ClaudeSessionClaim {
+                inferred: Some(session_id.into()),
+                ..ClaudeSessionClaim::default()
+            },
+            ClaudeSessionClaim {
+                pinned: Some(session_id.into()),
+                ..ClaudeSessionClaim::default()
+            },
+            ClaudeSessionClaim {
+                inferred: Some("55555555-5555-4555-8555-555555555555".into()),
+                ..ClaudeSessionClaim::default()
+            },
+        ];
+
+        // The pane that pinned the conversation owns it even though a pane
+        // earlier in grid order matched the same text; resuming it twice is
+        // what leaves a bare shell wearing the old agent's scrollback.
+        assert_eq!(
+            resolve_claude_sessions(&claims),
+            vec![
+                None,
+                Some(session_id.to_string()),
+                Some("55555555-5555-4555-8555-555555555555".to_string()),
+            ]
+        );
+    }
+
     #[test]
     fn saved_session_restores_launch_plan() {
         let cwd = env::current_dir().expect("cwd");
@@ -2340,6 +3076,7 @@ mod tests {
                 },
                 view: SavedView::default(),
                 panes: vec![background_pane],
+                parked_from: Vec::new(),
             }],
             running: false,
             owner_pid: None,
@@ -2556,6 +3293,7 @@ mod tests {
             path: path.clone(),
             session: recovery_session("dirty", vec![pane("alpha", "codex")]),
             last_saved_digest: None,
+            pending_write: None,
         };
 
         assert!(recorder.save_if_changed().expect("first save"));
@@ -2702,12 +3440,14 @@ mod tests {
                 grid: grid(1, 1),
                 view: SavedView::default(),
                 panes: vec![pane("first", "codex")],
+                parked_from: Vec::new(),
             },
             SavedTab {
                 title: "Last".into(),
                 grid: grid(1, 1),
                 view: SavedView::default(),
                 panes: vec![pane("last", "codex")],
+                parked_from: Vec::new(),
             },
         ];
 
@@ -2774,6 +3514,7 @@ mod tests {
             grid: grid(1, 2),
             view: SavedView::default(),
             panes: vec![pane("beta", "claude")],
+            parked_from: Vec::new(),
         }];
         let mut second = recovery_session("second", vec![pane("gamma", "codex")]);
         second.title = "Main".into();
@@ -2961,6 +3702,7 @@ mod tests {
         ClaudeSessionClaim {
             pinned: Some(session_id.into()),
             mentioned: Some(session_id.into()),
+            inferred: None,
         }
     }
 
@@ -2968,6 +3710,7 @@ mod tests {
         ClaudeSessionClaim {
             pinned: None,
             mentioned: Some(session_id.into()),
+            inferred: None,
         }
     }
 

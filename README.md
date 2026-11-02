@@ -43,8 +43,9 @@ use that release's matching native artifact until npm publication catches up.
 
 - **Precise input routing.** Type into the focused pane, a selected set, or the
   entire grid.
-- **Four-field launch.** Rows, columns, a grid name, and a project folder with
-  Tab completion. Worktrees and the shell profile are assumed for you.
+- **Named grids you can bring back.** Name a grid once and GridBash remembers
+  its shape and folder; type the name again and all three come back. Worktrees
+  and the shell profile are assumed for you.
 - **Real terminals underneath.** Run up to 100 PTY-backed panes across tabbed
   grids, with raw shell grids still available as a secondary path.
 - **Safer parallel work.** Give every pane an isolated repo-local git worktree.
@@ -74,6 +75,7 @@ use that release's matching native artifact until npm publication catches up.
 | `gridbash ctl list --json` | Discover running grids |
 | `gridbash ctl panes --session ID` | Inspect numbered and stable pane identities |
 | `gridbash --list-profiles` | Show detected profiles and resolved commands |
+| `gridbash doctor` | Check that this terminal can deliver the Alt shortcuts |
 | `gridbash --help` | Show every CLI option |
 
 `--worktrees` requires a git repository with at least one commit and no tracked
@@ -85,31 +87,32 @@ its folder, branch, and reuse behavior.
 GridBash shortcuts are modeless, so normal terminal keys continue to reach your
 agents and shells.
 
+On macOS, Option is spent on character composition by default, so `Option+C`
+types `ç` and no Alt chord reaches GridBash. Run `gridbash doctor` to turn
+Option into Alt, or press the `Ctrl+G` leader and then the shortcut key on its
+own — `Ctrl+G` `N` for a new tab. GridBash labels its shortcuts with whichever
+of the two your terminal can actually deliver.
+
 | Input | Action |
 | --- | --- |
 | Drag mouse | Select and copy text inside one pane |
 | Right-click pane | Add or remove the pane from the selected set |
 | Left-click grid tab | Switch directly to that grid |
 | Right-click grid tab | Add or remove the grid from the selected set |
-| `Alt+k` | Search and run GridBash commands |
-| `Alt` + arrow keys | Move focus between panes |
+| `Alt+n` | Open a new tab |
+| `Alt+r` / `Alt+Shift+r` | Rename the focused pane / the current tab |
 | `Alt+s` / `Alt+a` | Toggle the focused pane / select or clear all panes |
-| `Alt+Shift+s` / `Alt+x` | Select the current grid / swap two selected grids |
-| `Alt+c` | Open or close the per-grid BashBot Director command center |
-| `Alt+Shift+C` | Save bounded recent output from the target panes |
-| `Alt+Shift+L` | Start or stop continuous target-pane logging |
-| `Alt+n` / `Alt+t` | Open a new tab / switch tabs |
+| `Alt+x` | Swap the selected panes or grids |
+| `Alt+l` | Resize the grid |
 | `Alt+w` | Close the current grid after confirmation |
-| `Alt+p` | Open focused-pane activity |
-| `Ctrl+Alt+p` | Inspect and stop localhost ports launched by agents |
-| `Alt+Shift+A` | Manage auth profiles and assign one to the focused pane |
-| `Alt+f` | Zoom or restore the focused pane |
-| `Alt+b` | Search, select, and copy focused-pane scrollback |
-| `Alt+Shift+b` / `Alt+Ctrl+b` | Background selected panes / open background agents |
-| `Alt+Shift+V` | Dictate one prompt without submitting it |
-| `Alt+o` | Open settings |
-| `Alt+h` or `F1` | Open the full in-app shortcut guide |
+| `Alt+p` | Park the focused pane, with an optional "tell me when" in your words; on the Parked tab, send it back |
+| `Alt+j` | Focus the next pane that needs you, in any grid |
+| `Alt+g` | On the Parked tab, give the selected pane a new goal |
+| `Alt+k` | Move the focused Claude pane to another account, keeping its conversation |
+| `F1` | Open the in-app shortcut guide |
 | `Alt+q` | Show the quit confirmation and exact resume command |
+
+Every other action (zoom, settings, the command palette, focus by arrow, ports, background agents and the rest) has no default key. Bind any of them under `[keys]` in the config, using the action names in `docs/REFERENCE.md`.
 
 On macOS, Option is a character composer rather than Alt in Apple Terminal,
 iTerm2, and Ghostty, so GridBash adds a leader key: press `Ctrl+G`, release it,
@@ -120,8 +123,8 @@ as Meta setting makes the Alt shortcuts work directly instead.
 See the [full controls reference](docs/REFERENCE.md#controls) for resizing,
 renaming, sleeping, restarting, scrolling, settings, and recovery actions.
 
-To keep live terminals running after GridBash closes, open Settings with
-`Alt+o` and enable **Keep terminals running**. GridBash returns control to the
+To keep live terminals running after GridBash closes, open Settings and
+enable **Keep terminals running**. GridBash returns control to the
 launching shell when you quit; reconnect later with `gridbash resume --latest`
 or select the session with `gridbash resume`.
 
@@ -140,14 +143,16 @@ A plain `gridbash` always gives you a new, empty workspace. If the terminal or
 GridBash process closes unexpectedly, run `gridbash --recover` to reopen the
 unfinished agent sessions it left behind — each interrupted workspace comes back
 with its grids intact, and `Alt+t` moves between tabs. A plain launch says in the
-status bar when there is something to recover, and older snapshots remain
+tab strip note when there is something to recover, and older snapshots remain
 available through `gridbash resume`.
 
 ## Profiles and configuration
 
-A bare `gridbash`, or `Alt+n` in a running workspace, opens the new-grid screen.
-It asks for rows, columns, a grid name, and a project folder with Tab
-completion, then launches. Managed worktrees are on whenever the repository can
+A bare `gridbash`, or `Alt+n` in a running workspace, opens the new-grid screen:
+a centred dialog that asks for a grid name, a size, and a project folder, one
+step at a time. Naming a grid records its size and folder, so typing that name
+again recalls both — press `↑↓` on the first step to pick from the grids you
+have launched before. Managed worktrees are on whenever the repository can
 host them, and panes start in the platform shell (Git Bash on Windows). Choose
 agents per pane afterwards, or launch them straight from the CLI with
 `--profile`.
@@ -205,7 +210,7 @@ Configure an agent MCP server to run `gridbash --mcp`. It can request a
 lightweight grid snapshot, read bounded recent output from specific stable pane
 IDs, show local images, prompt explicit panes or every other pane, send commands,
 rename panes, capture or continuously log specific panes, and update the GridBash
-status bar.
+tab strip note.
 The purpose-named `gridbash_prompt_panes` tool is intended for manager and
 delegation workflows. Awareness is pull-based so agents can request peer context
 only at coordination points; returned summaries and output are explicitly

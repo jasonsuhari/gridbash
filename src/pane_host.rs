@@ -24,6 +24,7 @@ use vt100::Screen;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 use crate::{
+    agent_turn::{Turn, TurnReport},
     codex_sqlite::{CodexSqlitePool, PaneCodexSqlite},
     config::{PaneProcessPriority, PaneWorkloadPolicy},
     layout::PaneId,
@@ -221,6 +222,7 @@ pub struct PtyPane {
     /// exactly. Codex is discovered from its state DB after the fact; Claude is
     /// pinned at launch, so the snapshot can name it without guessing.
     agent_session_id: Option<String>,
+    turn_report: Option<TurnReport>,
     pub active: bool,
     pub exited: bool,
 }
@@ -481,6 +483,7 @@ impl PtyPane {
             view,
             keep_running,
             agent_session_id: None,
+            turn_report: None,
             active: !background_output.is_empty(),
             exited,
         })
@@ -559,6 +562,28 @@ impl PtyPane {
 
     pub fn output_quiet(&self) -> bool {
         !self.exited && self.view.output_quiet()
+    }
+
+    pub fn awaiting_input(&self) -> bool {
+        self.output_quiet()
+            || (!self.exited
+                && self.turn_report.as_ref().and_then(TurnReport::turn) == Some(Turn::Waiting))
+    }
+
+    pub fn mid_turn(&self) -> bool {
+        !self.exited
+            && match &self.turn_report {
+                Some(report) => report.turn() == Some(Turn::Working),
+                None => !self.output_quiet(),
+            }
+    }
+
+    pub fn set_turn_report(&mut self, report: Option<TurnReport>) {
+        self.turn_report = report;
+    }
+
+    pub fn refresh_turn(&mut self) -> bool {
+        self.turn_report.as_mut().is_some_and(TurnReport::refresh)
     }
 
     pub fn refresh_output_activity(&mut self, now: Instant, quiet_after: Duration) -> bool {

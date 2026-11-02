@@ -216,7 +216,15 @@ fn weighted_grid_rects(
     let mut y = area.y;
     for (row, row_height) in row_heights.into_iter().enumerate() {
         let mut x = area.x;
-        for (column, column_width) in column_widths.iter().copied().enumerate() {
+        let left = count.saturating_sub(rects.len());
+        let short_row;
+        let (widths, column_count) = if left > 0 && left < column_count {
+            short_row = weighted_lengths(area.width, &vec![1; left]);
+            (&short_row, left)
+        } else {
+            (&column_widths, column_count)
+        };
+        for (column, column_width) in widths.iter().copied().enumerate() {
             if rects.len() >= count {
                 break;
             }

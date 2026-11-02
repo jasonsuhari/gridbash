@@ -1,15 +1,15 @@
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     env,
     ffi::OsString,
-    io::{self, Stdout, Write},
+    io::{self, BufWriter, Stdout, Write},
     mem,
     path::{Path, PathBuf},
     process::Command,
     sync::mpsc as std_mpsc,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 #[cfg(target_os = "macos")]
@@ -28,14 +28,21 @@ use crossterm::{
 };
 use ratatui::{Frame, Terminal, backend::CrosstermBackend, layout::Rect, style::Color};
 use tokio::sync::mpsc;
+
+use crate::grid_presets::GridPresets;
+use crate::input_trace;
+use crate::keeper::{self, KeeperSnapshot};
+use crate::park_watch::{self, Judgment, ParkWatch, Verdict};
+use crate::shutdown;
 use vt100::{MouseProtocolEncoding, MouseProtocolMode, Screen};
 
 use crate::{
     actions::{fuzzy_match_score, palette_actions, palette_label},
     adopt::{self, ExternalTerminal},
+    agent_turn,
     auth::{self, AgentKind, AuthProfile},
     cli::{Cli, GridMode},
-    composer::{Composer, GridPicker, GridPickerAction},
+    composer::{Composer, GridPicker, GridPickerAction, TextField},
     config::{
         Config, MAX_SCROLLBACK_ROWS, MIN_SCROLLBACK_ROWS, PaletteColor, PaneWorkloadPolicy,
         UiConfig, UiPalette, clamp_scrollback_rows,
@@ -46,21 +53,25 @@ use crate::{
     },
     copy_mode::{CopyMode, CopyModeView},
     diagnostics,
+    doctor::{self},
     image_preview::{self, ImagePreview},
     keybindings::{Action, KeyBindings, is_help_recovery, is_quit_recovery, with_leader_alt},
     layout::{GridLayout, GridSize, PaneId, pane_at},
     manager::{self, ActivitySummary, AssistantReply, ManagerCommand, ManagerDecision, PaneUpdate},
     output_capture::{self, OutputLogs, PaneLogKey},
     pane_host::{PaneHostBusy, PaneHostIncompatible, PaneHostRejected, PtyHostRef, PtyPane},
-    ports::{self, AgentPort, AgentProcessRoot},
+    ports::{self, AgentPort, AgentProcessRoot, ProcessTable},
     process_priority::PaneWorkloadClass,
-    profiles::{default_profile_name, find_profile, is_terminal_profile, startup_profiles},
+    profiles::{
+        Profile, default_profile_name, find_profile, is_terminal_profile, startup_profiles,
+    },
     pty::{PtyEvent, PtyWriteToken, clamp_pane_size},
     session::{
-        InterruptedRecovery, InterruptedRecoveryClaim, LiveGrid, LiveWorkspace,
-        SavedBackgroundPane, SavedPane, SavedPaneHistory, SavedTab, SavedView, SessionRecord,
-        SessionRecorder, claude_session_in_command, complete_interrupted_recovery,
-        latest_claude_session, pin_claude_session,
+        InterruptedRecovery, InterruptedRecoveryClaim, LiveGrid, LiveWorkspace, SaveMode,
+        SavedBackgroundPane, SavedPane, SavedPaneHistory, SavedParkedFrom, SavedTab, SavedVerdict,
+        SavedView, SessionRecord, SessionRecorder, claude_session_in_command,
+        complete_interrupted_recovery, latest_claude_session, live_claude_sessions,
+        pin_claude_session, reopen_claude_conversation, without_conversation,
     },
     setup::{LaunchPlan, PaneLaunchSpec, folder_display_name, git_worktree_name},
     ui,
@@ -69,9 +80,20 @@ use crate::{
     worktrees::ManagedWorktreeOptions,
 };
 
-pub type Tui = Terminal<CrosstermBackend<Stdout>>;
+pub type Tui = Terminal<CrosstermBackend<BufWriter<Stdout>>>;
+/// Large enough that a full frame leaves in one write, so the terminal never
+/// paints half of one.
+const FRAME_BUFFER_BYTES: usize = 1 << 20;
 
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+/// Only stdin wakes the input poll, so a pane's echo of a key just typed waits
+/// out the poll. While the person is typing the poll is short and frames are
+/// not capped, so the echo shows within a few milliseconds.
+const TYPING_POLL_INTERVAL: Duration = Duration::from_millis(4);
+const TYPING_WINDOW: Duration = Duration::from_secs(1);
+const LOOP_STALL_TRACE: Duration = Duration::from_millis(250);
+const STATUS_LIFETIME: Duration = Duration::from_secs(6);
+const ACCOUNT_REFRESH_INTERVAL: Duration = Duration::from_secs(120);
 /// How many panics and errors one minute of the event loop may recover from
 /// before the session exits instead. Panics get the smaller allowance: an error
 /// is often a transient failure to reach the disk or a subprocess, while a panic
@@ -82,6 +104,14 @@ const MAX_RECOVERED_LOOP_ERRORS: u32 = 32;
 /// bracketed paste, so a burst has to be stitched back together by hand.
 const PASTE_BURST_GAP: Duration = Duration::from_millis(4);
 const PASTE_BURST_MAX_BYTES: usize = 256 * 1024;
+/// How long a lone Esc waits for the key it might be the Alt prefix of.
+///
+/// A terminal that sends Alt as a leading Esc writes `ESC ESC [ D` for
+/// Alt+Left, and crossterm reads the doubled Esc as the Esc key rather than as
+/// a prefix, so the shortcut arrives as Esc followed by a bare Left. Both
+/// bytes are already buffered by the time the Esc surfaces, so this window
+/// only has to cover a terminal that splits them across reads.
+const META_ESCAPE_GAP: Duration = Duration::from_millis(25);
 const LARGE_GRID_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 const PTY_EVENT_CHANNEL_CAPACITY: usize = 256;
 const PTY_DRAIN_MAX_EVENTS: usize = 64;
@@ -90,6 +120,7 @@ const PTY_DRAIN_MAX_TIME: Duration = Duration::from_millis(4);
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const PORT_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const SESSION_AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
+const CLOSE_PANES_WINDOW: Duration = Duration::from_secs(3);
 /// How often panes are checked for having moved onto a new agent conversation.
 /// Each check reads one directory per agent pane, so it is kept off the path of
 /// every keystroke-driven save.
@@ -144,6 +175,9 @@ const COMMAND_CENTER_MIN_HEIGHT: u16 = 7;
 struct PaneWarmup {
     started: Instant,
     saw_output: bool,
+    /// Reopened into an existing conversation by a resume, so the agent is told
+    /// to carry on once it has loaded.
+    continue_conversation: bool,
 }
 
 pub struct App {
@@ -200,6 +234,7 @@ pub struct App {
     leader_pending: bool,
     quit_confirmation_pending: bool,
     close_grid_confirmation_pending: bool,
+    close_panes_armed: Option<(Instant, Vec<usize>)>,
     settings: SettingsState,
     rename: RenamePaneState,
     tab_rename: RenameTabState,
@@ -207,14 +242,35 @@ pub struct App {
     adopt_picker: AdoptPickerState,
     background_jobs: Vec<BackgroundJob>,
     background_picker: BackgroundPickerState,
+    /// Grid id of the Parked tab, which is always the last tab.
+    parked_grid_id: u64,
+    /// Where each Parked pane came from, in the Parked tab's pane order.
+    parked_origins: Vec<ParkedOrigin>,
+    keeper_grid_id: Option<u64>,
+    keeper_snapshots: Option<std_mpsc::Receiver<KeeperSnapshot>>,
+    keeper_snapshot: Option<KeeperSnapshot>,
+    park_sheet: Option<ParkSheet>,
+    park_judgments_tx: std_mpsc::Sender<Judgment>,
+    park_judgments_rx: std_mpsc::Receiver<Judgment>,
+    park_watch_spend: WatchSpend,
+    park_toast: Option<PaneId>,
+    park_toast_rect: Option<Rect>,
+    shelf_rows: Vec<(usize, Rect)>,
+    /// The last ordinary grid on screen. A parked pane whose own grid is gone
+    /// goes back here.
+    last_grid_id: u64,
     port_inspector: PortInspectorState,
     port_scan_tx: std_mpsc::Sender<Result<Vec<AgentPort>, String>>,
     port_scan_rx: std_mpsc::Receiver<Result<Vec<AgentPort>, String>>,
     follow_up: Option<FollowUpPromptState>,
     auth_profiles: Vec<AuthProfile>,
     auth_refresh_rx: Option<std_mpsc::Receiver<Result<Vec<AuthProfile>, String>>>,
+    auth_refresh_quiet: bool,
+    next_account_refresh: Instant,
+    account_sheet: Option<AccountSheet>,
     pane_settings: PaneSettingsState,
     status: String,
+    status_since: Option<(String, Instant)>,
     restored: RestoredWorkspace,
     session_recorder: Option<SessionRecorder>,
     interrupted_recovery_claim: Option<InterruptedRecoveryClaim>,
@@ -223,19 +279,14 @@ pub struct App {
     next_background_job_id: u64,
     next_tab_number: usize,
     tab_rects: Vec<(usize, Rect)>,
-    previous_panes_button: Option<Rect>,
     previous_pane_rows: Vec<(usize, Rect)>,
-    summary_refresh_button: Option<Rect>,
-    pane_settings_button: Option<Rect>,
     pane_settings_rename_button: Option<Rect>,
     pane_settings_reload_button: Option<Rect>,
     pane_settings_sleep_button: Option<Rect>,
     pane_settings_deactivate_button: Option<Rect>,
     pane_settings_goal_button: Option<Rect>,
     pane_settings_stop_goal_button: Option<Rect>,
-    background_jobs_button: Option<Rect>,
     background_job_rows: Vec<(usize, Rect)>,
-    ports_button: Option<Rect>,
     port_rows: Vec<(usize, Rect)>,
     event_tx: mpsc::Sender<PtyEvent>,
     event_rx: mpsc::Receiver<PtyEvent>,
@@ -252,6 +303,8 @@ pub struct App {
     last_activity_decay: Instant,
     last_exit_poll: Instant,
     last_session_autosave: Instant,
+    autosave_processes: Option<std_mpsc::Receiver<ProcessScan>>,
+    pane_folders: HashMap<u32, PaneFolder>,
     last_agent_session_refresh: Instant,
 }
 
@@ -290,6 +343,8 @@ struct RestoredWorkspace {
     active_tab: usize,
     /// Number to hand the next new grid, or zero to derive it.
     next_tab_number: usize,
+    /// True while a saved workspace is being brought back.
+    resuming: bool,
 }
 
 impl RestoredWorkspace {
@@ -301,6 +356,7 @@ impl RestoredWorkspace {
             pane_names: grid.pane_names(),
             sleeping: grid.sleeping_panes(),
             view: grid.view.clone(),
+            resuming: true,
             ..Self::default()
         }
     }
@@ -334,6 +390,290 @@ struct BackgroundJob {
     host: Option<PtyHostRef>,
     history: SavedPaneHistory,
     idle: PaneIdleState,
+}
+
+const PARKED_TAB_TITLE: &str = "Parked";
+const KEEPER_TAB_TITLE: &str = "Keeper";
+const MAX_CONDITION_CHARS: usize = 300;
+
+#[derive(Debug, Clone)]
+struct ParkSheet {
+    field: TextField,
+    target: ParkSheetTarget,
+}
+
+struct AccountSheet {
+    pane_index: usize,
+    cursor: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParkSheetTarget {
+    Park,
+    Rewatch(usize),
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct WatchSpend {
+    checks: u32,
+    tokens: u64,
+}
+
+pub struct ParkSheetView {
+    pub pane_index: usize,
+    pub parking: bool,
+    pub value: String,
+    pub cursor: usize,
+}
+
+pub struct AccountMeterView {
+    pub name: String,
+    pub used_percent: Option<u8>,
+    pub resets_in_secs: Option<i64>,
+    pub signed_in: bool,
+    pub current: bool,
+}
+
+pub struct AccountSheetView {
+    pub pane_index: usize,
+    pub cursor: usize,
+    pub accounts: Vec<AccountMeterView>,
+}
+
+pub struct ParkToastView {
+    pub name: String,
+    pub reason: String,
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShelfState {
+    Done,
+    Checking,
+    Watching,
+    Parked,
+}
+
+pub struct ShelfRow {
+    pub name: String,
+    pub from: String,
+    pub condition: Option<String>,
+    pub state: ShelfState,
+    pub detail: String,
+    pub focused: bool,
+}
+
+pub struct ShelfView {
+    pub rows: Vec<ShelfRow>,
+    pub checks: u32,
+    pub tokens: u64,
+    pub return_key: String,
+    pub watch_key: Option<String>,
+}
+
+pub struct ShelfAreas {
+    pub list: Rect,
+    pub banner: Option<Rect>,
+    pub pane: Rect,
+}
+
+const SHELF_BANNER_HEIGHT: u16 = 3;
+
+pub struct KeeperView<'a> {
+    pub command: &'a str,
+    pub snapshot: Option<&'a KeeperSnapshot>,
+}
+
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    Command::new(opener)
+        .arg(url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|_| ())
+}
+
+pub fn shelf_areas(area: Rect, banner: bool) -> ShelfAreas {
+    let list_width = (area.width * 3 / 10).clamp(30, 64).min(area.width / 2);
+    let list = Rect {
+        width: list_width,
+        ..area
+    };
+    let right = Rect {
+        x: area.x + list_width,
+        width: area.width - list_width,
+        ..area
+    };
+    let banner_height = if banner && right.height > SHELF_BANNER_HEIGHT * 3 {
+        SHELF_BANNER_HEIGHT
+    } else {
+        0
+    };
+    ShelfAreas {
+        list,
+        banner: (banner_height > 0).then_some(Rect {
+            height: banner_height,
+            ..right
+        }),
+        pane: Rect {
+            y: right.y + banner_height,
+            height: right.height - banner_height,
+            ..right
+        },
+    }
+}
+
+/// The grid and cell a parked pane left, so sending it back puts it where it was.
+#[derive(Debug, Clone)]
+struct ParkedOrigin {
+    /// `None` when the grid could not be identified after a resume.
+    grid_id: Option<u64>,
+    grid_title: String,
+    slot: usize,
+    watch: Option<ParkWatch>,
+}
+
+impl ParkedOrigin {
+    fn unknown() -> Self {
+        Self {
+            grid_id: None,
+            grid_title: String::new(),
+            slot: 0,
+            watch: None,
+        }
+    }
+}
+
+struct MovingPane {
+    pane: PtyPane,
+    spec: PaneLaunchSpec,
+    name: Option<String>,
+    idle: PaneIdleState,
+    sleeping: bool,
+}
+
+impl GridTabSnapshot {
+    fn live_grid<'a>(&'a self, processes: Option<&'a ProcessTable>) -> Option<LiveGrid<'a>> {
+        Some(LiveGrid {
+            title: &self.title,
+            plan: self.launch_plan.as_ref()?,
+            panes: &self.panes,
+            pane_names: &self.pane_names,
+            sleeping: &self.sleeping,
+            view: SavedView {
+                focus: self.focus,
+                zoomed: self.zoomed,
+                row_weights: self.layout.row_weights().to_vec(),
+                column_weights: self.layout.column_weights().to_vec(),
+            },
+            processes,
+        })
+    }
+
+    fn push_pane(&mut self, moving: MovingPane) -> usize {
+        let plan = self.launch_plan.get_or_insert_with(|| LaunchPlan {
+            panes: Vec::new(),
+            grid: GridSize::from_count(1),
+        });
+        let index = self.panes.len();
+        plan.panes.push(moving.spec);
+        self.panes.push(moving.pane);
+        self.pane_idle.push(moving.idle);
+        self.pane_names.push(moving.name);
+        if moving.sleeping {
+            self.sleeping.insert(index);
+        }
+        self.fit_layout_to_panes();
+        index
+    }
+
+    fn remove_pane(&mut self, index: usize) -> Option<MovingPane> {
+        let plan = self.launch_plan.as_mut()?;
+        if index >= self.panes.len() || index >= plan.panes.len() {
+            return None;
+        }
+        let before = self.panes.len();
+        let spec = plan.panes.remove(index);
+        let pane = self.panes.remove(index);
+        let idle = if index < self.pane_idle.len() {
+            self.pane_idle.remove(index)
+        } else {
+            PaneIdleState::new(Instant::now())
+        };
+        let name = (index < self.pane_names.len())
+            .then(|| self.pane_names.remove(index))
+            .flatten();
+        let sleeping = self.sleeping.contains(&index);
+        let old_to_new = pane_index_map_after_removal(before, index);
+        self.sleeping = remap_index_set(&self.sleeping, &old_to_new);
+        self.selected = remap_index_set(&self.selected, &old_to_new);
+        self.focus = focused_index_after_removal(self.focus, index, before - 1);
+        self.text_selection = None;
+        self.zoomed &= before > 1;
+        self.fit_layout_to_panes();
+        Some(MovingPane {
+            pane,
+            spec,
+            name,
+            idle,
+            sleeping,
+        })
+    }
+
+    fn replace_pane(
+        &mut self,
+        slot: usize,
+        moving: MovingPane,
+    ) -> Result<MovingPane, Box<MovingPane>> {
+        let Some(spec) = self
+            .launch_plan
+            .as_mut()
+            .and_then(|plan| plan.panes.get_mut(slot))
+        else {
+            return Err(Box::new(moving));
+        };
+        if slot >= self.panes.len() {
+            return Err(Box::new(moving));
+        }
+        let spec = mem::replace(spec, moving.spec);
+        let pane = mem::replace(&mut self.panes[slot], moving.pane);
+        let idle = match self.pane_idle.get_mut(slot) {
+            Some(idle) => mem::replace(idle, moving.idle),
+            None => PaneIdleState::new(Instant::now()),
+        };
+        let name = self
+            .pane_names
+            .get_mut(slot)
+            .and_then(|name| mem::replace(name, moving.name));
+        let sleeping = if moving.sleeping {
+            !self.sleeping.insert(slot)
+        } else {
+            self.sleeping.remove(&slot)
+        };
+        Ok(MovingPane {
+            pane,
+            spec,
+            name,
+            idle,
+            sleeping,
+        })
+    }
+
+    fn fit_layout_to_panes(&mut self) {
+        let grid = GridSize::from_count(self.panes.len());
+        if self.layout.size() != grid {
+            self.layout = GridLayout::new(grid);
+        }
+        if let Some(plan) = self.launch_plan.as_mut() {
+            plan.grid = grid;
+        }
+        self.rects.clear();
+    }
 }
 
 /// Move the grid that opens first from the front of the strip into the slot it
@@ -407,6 +747,14 @@ fn retire_pane(pane: &mut PtyPane) -> Result<()> {
     }
 }
 
+fn submit_text(pane: &mut PtyPane, text: &str) {
+    let mut bytes = paste_bytes(text, pane.screen().bracketed_paste());
+    bytes.push(b'\r');
+    if pane.write(&bytes).is_ok() {
+        pane.record_input(&bytes);
+    }
+}
+
 fn retire_panes<'a>(panes: impl IntoIterator<Item = &'a mut PtyPane>) -> Result<()> {
     let mut first_error = None;
     for pane in panes {
@@ -463,9 +811,10 @@ pub struct TabLabel {
     pub title: String,
     pub active: bool,
     pub selected: bool,
-    pub waiting: bool,
-    pub activity: bool,
     pub exited: bool,
+    /// Kept apart at the right end of the strip instead of among the grids.
+    pub pinned: bool,
+    pub done: bool,
 }
 
 /// The picker that re-roots a pane at an outside terminal's folder.
@@ -511,32 +860,6 @@ pub struct AdoptTerminalView {
     pub target_label: String,
     pub rows: Vec<AdoptTerminalRow>,
     pub confirming: bool,
-}
-
-/// What the status bar prints in the middle: the focused pane, the summariser's
-/// one-line account of what it is doing, and how long that account is cached
-/// for.
-///
-/// The countdown is carried as a `Duration` rather than a formatted string so
-/// the bar can decide how much of it fits, and as a plain value rather than an
-/// `Instant` so the bar stays renderable without a live `App`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct FocusedPaneSummary {
-    pub title: String,
-    pub detail: String,
-    /// Time left on the cached summary. `None` once it is due for a refresh.
-    pub refresh_in: Option<Duration>,
-    /// A request for this pane is in flight right now.
-    pub refreshing: bool,
-    /// Whether refreshing is possible at all — false when summaries are off,
-    /// unconfigured, or suspended by a running goal.
-    pub refreshable: bool,
-}
-
-impl FocusedPaneSummary {
-    pub fn is_empty(&self) -> bool {
-        self.detail.is_empty()
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1011,7 +1334,7 @@ impl PaletteRole {
 }
 
 impl PaletteColor {
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::Cyan,
         Self::Sky,
         Self::Blue,
@@ -1020,6 +1343,7 @@ impl PaletteColor {
         Self::Yellow,
         Self::Amber,
         Self::Orange,
+        Self::Oxblood,
         Self::Red,
         Self::Magenta,
         Self::DarkGray,
@@ -1037,6 +1361,7 @@ impl PaletteColor {
             Self::Yellow => Color::Yellow,
             Self::Amber => Color::Rgb(245, 158, 11),
             Self::Orange => Color::Rgb(249, 115, 22),
+            Self::Oxblood => Color::Rgb(122, 30, 38),
             Self::Red => Color::Red,
             Self::Magenta => Color::Magenta,
             Self::DarkGray => Color::DarkGray,
@@ -1055,6 +1380,7 @@ impl PaletteColor {
             Self::Yellow => "yellow",
             Self::Amber => "amber",
             Self::Orange => "orange",
+            Self::Oxblood => "oxblood",
             Self::Red => "red",
             Self::Magenta => "magenta",
             Self::DarkGray => "dark gray",
@@ -1808,6 +2134,7 @@ struct SettingsState {
     refresh_ms: i32,
     pane_workload: PaneWorkloadPolicy,
     palette: GridPalette,
+    resume_prompt: String,
     manager_cursor: usize,
     manager_edit: Option<ManagerSettingEdit>,
 }
@@ -2082,6 +2409,7 @@ impl Default for SettingsState {
             refresh_ms: UiConfig::default_refresh_ms() as i32,
             pane_workload: PaneWorkloadPolicy::Adaptive,
             palette: GridPalette::default(),
+            resume_prompt: UiConfig::default_resume_prompt(),
             manager_cursor: 0,
             manager_edit: None,
         }
@@ -2105,6 +2433,7 @@ impl SettingsState {
             refresh_ms: config.ui.refresh_ms.clamp(8, 100) as i32,
             pane_workload: config.defaults.pane_workload,
             palette: GridPalette::from(config.ui.palette),
+            resume_prompt: config.ui.resume_prompt.clone(),
             ..Self::default()
         }
     }
@@ -2331,6 +2660,7 @@ impl SettingsState {
             scrollback_rows: clamp_scrollback_rows(self.scrollback.max(0) as usize),
             refresh_ms: self.refresh_ms.clamp(8, 100) as u64,
             palette: UiPalette::from(self.palette),
+            resume_prompt: self.resume_prompt.clone(),
         }
     }
 
@@ -2447,14 +2777,19 @@ impl SettingsState {
                         "API key",
                         format!(
                             "{}{}",
-                            if raw.is_empty() {
-                                "not set"
-                            } else {
+                            if !raw.is_empty() {
                                 "********"
+                            } else if config.resolved_api_key().is_some() {
+                                // Without this the row reads "not set" on a
+                                // machine where summaries are working, which
+                                // sends the user hunting for a broken setting.
+                                "from OPENAI_API_KEY"
+                            } else {
+                                "not set"
                             },
                             if editing { "_" } else { "" }
                         ),
-                        "stored in the local GridBash config",
+                        "stored in the local GridBash config, or OPENAI_API_KEY",
                     ),
                 };
                 SettingsRow {
@@ -2740,16 +3075,6 @@ fn switch_value(enabled: bool) -> String {
     if enabled { "on".into() } else { "off".into() }
 }
 
-fn default_status(mouse_enabled: bool) -> String {
-    if mouse_enabled {
-        "Drag copies within pane | Wheel scrolls selected panes locally | Alt+k commands | Alt+Shift+b background | Alt+Ctrl+b jobs | Ctrl+Alt+p ports | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+w close grid | Alt+Shift+t restart | Alt+c BashBot Director | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings | Alt+h help"
-            .into()
-    } else {
-        "Alt+k commands | Alt+Shift+b background | Alt+Ctrl+b jobs | Ctrl+Alt+p ports | Alt+arrows move | Alt+f zoom | Alt+l resize | Alt+Shift+A auth | Alt+n new tab | Alt+t tab | Alt+w close grid | Alt+Shift+t restart | Alt+s select | Alt+c BashBot Director | Alt+Shift+V voice | Alt+p pane summary | Alt+r rename | Alt+x swap | Alt+z sleep | Alt+o settings | Alt+h help"
-            .into()
-    }
-}
-
 fn start_agent_control(
     enabled: bool,
     port: u16,
@@ -2789,15 +3114,7 @@ impl App {
             });
         let (control_handle, control_rx) =
             start_agent_control(cli.agent_control_enabled(), cli.agent_api_port)?;
-        let base_status = if config.keys.is_empty() {
-            default_status(mouse_enabled)
-        } else {
-            "custom shortcuts active | F1 help | Alt+q quit fallback".into()
-        };
-        let status = control_handle
-            .as_ref()
-            .map(|_| format!("agent pane tools ready | {base_status}"))
-            .unwrap_or(base_status);
+        let status = "F1 help".to_string();
         let settings = SettingsState::from_config(&config);
 
         Self::from_parts(AppInit {
@@ -2972,7 +3289,15 @@ impl App {
             .saturating_add(1);
         let (activity_summary_tx, activity_summary_rx) = std_mpsc::channel();
         let (port_scan_tx, port_scan_rx) = std_mpsc::channel();
-        let keybindings = KeyBindings::from_overrides(&init.config.keys)?;
+        let (park_judgments_tx, park_judgments_rx) = std_mpsc::channel();
+        let mut keybindings = KeyBindings::from_overrides(&init.config.keys)?;
+        // A shortcut is only worth naming by a key the user can press. Where
+        // Option composes characters instead of sending Alt, every label
+        // switches to its leader form rather than advertising a chord this
+        // terminal will never deliver.
+        keybindings.set_alt_reachable(
+            doctor::meta_state(&doctor::HostTerminal::detect()) != doctor::MetaState::Composes,
+        );
         let (assistant_tx, assistant_rx) = std_mpsc::channel();
 
         Ok(Self {
@@ -3028,6 +3353,7 @@ impl App {
             leader_pending: false,
             quit_confirmation_pending: false,
             close_grid_confirmation_pending: false,
+            close_panes_armed: None,
             settings: init.settings,
             rename: RenamePaneState::default(),
             tab_rename: RenameTabState::default(),
@@ -3035,14 +3361,31 @@ impl App {
             adopt_picker: AdoptPickerState::default(),
             background_jobs,
             background_picker: BackgroundPickerState::default(),
+            parked_grid_id: 0,
+            parked_origins: Vec::new(),
+            keeper_grid_id: None,
+            keeper_snapshots: None,
+            keeper_snapshot: None,
+            park_sheet: None,
+            park_judgments_tx,
+            park_judgments_rx,
+            park_watch_spend: WatchSpend::default(),
+            park_toast: None,
+            park_toast_rect: None,
+            shelf_rows: Vec::new(),
+            last_grid_id: 1,
             port_inspector: PortInspectorState::default(),
             port_scan_tx,
             port_scan_rx,
             follow_up: None,
             auth_profiles: Vec::new(),
             auth_refresh_rx: None,
+            auth_refresh_quiet: false,
+            next_account_refresh: Instant::now(),
+            account_sheet: None,
             pane_settings: PaneSettingsState::default(),
             status: init.status,
+            status_since: None,
             restored: init.restored,
             session_recorder: init.session_recorder,
             interrupted_recovery_claim: init.interrupted_recovery_claim,
@@ -3051,19 +3394,14 @@ impl App {
             next_background_job_id,
             next_tab_number: 2,
             tab_rects: Vec::new(),
-            previous_panes_button: None,
             previous_pane_rows: Vec::new(),
-            summary_refresh_button: None,
-            pane_settings_button: None,
             pane_settings_rename_button: None,
             pane_settings_reload_button: None,
             pane_settings_sleep_button: None,
             pane_settings_deactivate_button: None,
             pane_settings_goal_button: None,
             pane_settings_stop_goal_button: None,
-            background_jobs_button: None,
             background_job_rows: Vec::new(),
-            ports_button: None,
             port_rows: Vec::new(),
             event_tx,
             event_rx,
@@ -3080,6 +3418,8 @@ impl App {
             last_activity_decay: Instant::now(),
             last_exit_poll: Instant::now(),
             last_session_autosave: Instant::now(),
+            autosave_processes: None,
+            pane_folders: HashMap::new(),
             last_agent_session_refresh: Instant::now(),
         })
     }
@@ -3089,7 +3429,11 @@ impl App {
         let mut restore_guard = TerminalRestoreGuard::new(self.mouse_enabled);
         let mut terminal = setup_terminal(self.mouse_enabled)?;
         let result = self.run_in_terminal(&mut terminal);
-        let teardown_result = teardown_terminal(&mut terminal, self.mouse_enabled);
+        let teardown_result = if shutdown::was_terminal_lost() {
+            Ok(())
+        } else {
+            teardown_terminal(&mut terminal, self.mouse_enabled)
+        };
         if teardown_result.is_ok() {
             restore_guard.disarm();
         }
@@ -3103,6 +3447,7 @@ impl App {
             };
         }
         if result.is_ok()
+            && !shutdown::was_terminal_lost()
             && let Some(command) = self.resume_command()
         {
             let terminals_still_running = self.settings.keep_terminals_running
@@ -3145,8 +3490,9 @@ impl App {
         }
         self.sync_initial_pane_sizes(terminal)?;
 
+        shutdown::listen();
         let run_result = self.run_loop(terminal);
-        let save_result = if run_result.is_ok() {
+        let save_result = if run_result.is_ok() && !shutdown::requested() {
             self.finish_session()
         } else {
             self.save_session_snapshot()
@@ -3207,7 +3553,12 @@ impl App {
         self.apply_restored_view();
         self.restored.histories.clear();
         self.restored.hosts.clear();
+        let mut parked = Vec::new();
         for saved_tab in mem::take(&mut self.restored.tabs) {
+            if saved_tab.is_parked() {
+                parked.push(saved_tab);
+                continue;
+            }
             match self.restore_saved_tab(saved_tab) {
                 Ok(snapshot) => self.tabs.push(Some(snapshot)),
                 Err(error) => {
@@ -3224,7 +3575,20 @@ impl App {
         self.restore_active_tab_position();
         self.restore_background_panes();
         self.next_tab_number = self.restored.next_tab_number.max(self.tabs.len() + 1);
+        if let Err(error) = self.open_keeper_tab() {
+            self.status = format!("Keeper tab did not start: {error:#}");
+        }
+        if let Err(error) = self.open_parked_tab(parked) {
+            let cleanup_error = self.retire_owned_panes().err();
+            return Err(match cleanup_error {
+                Some(cleanup_error) => error.context(format!(
+                    "initial workspace cleanup also failed: {cleanup_error:#}"
+                )),
+                None => error,
+            });
+        }
         self.start_usage_monitor(&plan);
+        self.restored.resuming = false;
 
         self.save_session_snapshot()
     }
@@ -3374,6 +3738,951 @@ impl App {
         })
     }
 
+    fn open_parked_tab(&mut self, saved: Vec<SavedTab>) -> Result<()> {
+        let grid = GridSize::from_count(1);
+        let mut parked = GridTabSnapshot {
+            grid_id: self.allocate_grid_id(),
+            title: PARKED_TAB_TITLE.into(),
+            launch_plan: Some(LaunchPlan {
+                panes: Vec::new(),
+                grid,
+            }),
+            layout: GridLayout::new(grid),
+            zoomed: false,
+            panes: Vec::new(),
+            pane_idle: Vec::new(),
+            focus: 0,
+            selected: BTreeSet::new(),
+            pane_names: Vec::new(),
+            text_selection: None,
+            sleeping: BTreeSet::new(),
+            manager_goal: None,
+            assistant: WorkspaceAssistantState::default(),
+            command_line: CommandLineState::new(self.command_line.cwd.clone()),
+            rects: Vec::new(),
+        };
+        self.parked_grid_id = parked.grid_id;
+        self.parked_origins.clear();
+        for saved_tab in saved {
+            let mut parked_from = saved_tab.parked_from.clone().into_iter();
+            let mut restored = self.restore_saved_tab(saved_tab)?;
+            while let Some(moving) = restored.remove_pane(0) {
+                let reports_done = moving.spec.command.agent_kind.is_some();
+                let origin = match parked_from.next() {
+                    Some(from) => ParkedOrigin {
+                        grid_id: self.grid_id_titled(&from.grid),
+                        watch: from.notify_when.map(|condition| {
+                            ParkWatch::restored(
+                                condition,
+                                from.met.map(|met| Verdict {
+                                    reason: met.reason,
+                                    at: SystemTime::UNIX_EPOCH + Duration::from_secs(met.at_unix),
+                                }),
+                                reports_done,
+                                from.briefed,
+                            )
+                        }),
+                        grid_title: from.grid,
+                        slot: from.slot,
+                    },
+                    None => ParkedOrigin::unknown(),
+                };
+                parked.push_pane(moving);
+                self.parked_origins.push(origin);
+            }
+        }
+        parked.focus = 0;
+        self.tabs.push(Some(parked));
+        Ok(())
+    }
+
+    fn on_parked_tab(&self) -> bool {
+        self.active_grid_id == self.parked_grid_id
+    }
+
+    fn parked_tab_index(&self) -> usize {
+        self.tabs.len().saturating_sub(1)
+    }
+
+    fn open_keeper_tab(&mut self) -> Result<()> {
+        let Some(keeper) = self.config.keeper.clone() else {
+            return Ok(());
+        };
+        let grid = GridSize::from_count(1);
+        let spec = PaneLaunchSpec {
+            profile_name: "keeper".into(),
+            command: Profile {
+                command: keeper.command.clone(),
+                args: keeper.args.clone(),
+                title: Some(KEEPER_TAB_TITLE.into()),
+                agent_kind: None,
+            },
+            env: BTreeMap::new(),
+            cwd: keeper.cwd.clone(),
+            folder_name: keeper
+                .cwd
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            worktree_name: None,
+            auth_name: None,
+            auth_kind: None,
+            auth_dir: None,
+        };
+        let pane = self.create_pane(&spec, 0, &SavedPaneHistory::default(), None)?;
+        let tab = GridTabSnapshot {
+            grid_id: self.allocate_grid_id(),
+            title: KEEPER_TAB_TITLE.into(),
+            launch_plan: Some(LaunchPlan {
+                panes: vec![spec],
+                grid,
+            }),
+            layout: GridLayout::new(grid),
+            zoomed: false,
+            panes: vec![pane],
+            pane_idle: vec![PaneIdleState::new(Instant::now())],
+            focus: 0,
+            selected: BTreeSet::new(),
+            pane_names: vec![Some(KEEPER_TAB_TITLE.into())],
+            text_selection: None,
+            sleeping: BTreeSet::new(),
+            manager_goal: None,
+            assistant: WorkspaceAssistantState::default(),
+            command_line: CommandLineState::new(keeper.cwd.clone()),
+            rects: Vec::new(),
+        };
+        self.keeper_grid_id = Some(tab.grid_id);
+        self.tabs.push(Some(tab));
+        let (results, snapshots) = std_mpsc::channel();
+        keeper::watch(keeper.cwd, keeper.board, results);
+        self.keeper_snapshots = Some(snapshots);
+        Ok(())
+    }
+
+    fn keeper_tab_label(&self) -> String {
+        match self.keeper_snapshot.as_ref().map(KeeperSnapshot::needs_you) {
+            Some(needs) if needs > 0 => format!("{KEEPER_TAB_TITLE} ! {needs}"),
+            _ => KEEPER_TAB_TITLE.into(),
+        }
+    }
+
+    fn on_keeper_tab(&self) -> bool {
+        self.keeper_grid_id == Some(self.active_grid_id)
+    }
+
+    fn on_pinned_tab(&self) -> bool {
+        self.on_parked_tab() || self.on_keeper_tab()
+    }
+
+    fn keeper_tab_index(&self) -> Option<usize> {
+        self.keeper_grid_id
+            .and_then(|grid_id| self.tab_index_of_grid(grid_id))
+    }
+
+    /// Ordinary grids sit before the pinned tabs: Keeper when configured, then Parked.
+    fn first_pinned_tab_index(&self) -> usize {
+        self.parked_tab_index() - usize::from(self.keeper_grid_id.is_some())
+    }
+
+    fn drain_keeper_snapshots(&mut self) -> bool {
+        let Some(snapshots) = self.keeper_snapshots.as_ref() else {
+            return false;
+        };
+        let mut changed = false;
+        while let Ok(snapshot) = snapshots.try_recv() {
+            self.keeper_snapshot = Some(snapshot);
+            changed = true;
+        }
+        changed
+    }
+
+    pub fn keeper_view(&self) -> Option<KeeperView<'_>> {
+        self.on_keeper_tab().then(|| KeeperView {
+            command: self
+                .config
+                .keeper
+                .as_ref()
+                .map_or("", |keeper| keeper.command.as_str()),
+            snapshot: self.keeper_snapshot.as_ref(),
+        })
+    }
+
+    fn click_keeper_row(&mut self, column: u16, row: u16) -> bool {
+        let Some(snapshot) = self.keeper_snapshot.as_ref() else {
+            return false;
+        };
+        let table = keeper::areas(self.grid_area).table;
+        let Some(hit) = keeper::row_at(table, snapshot.rows.len(), column, row) else {
+            return false;
+        };
+        match hit {
+            keeper::RowHit::Number(index) => {
+                let url = snapshot.rows[index].url.clone();
+                self.status = match open_in_browser(&url) {
+                    Ok(()) => format!("opened {url}"),
+                    Err(error) => format!("could not open {url}: {error}"),
+                };
+            }
+            keeper::RowHit::Row(index) => {
+                let mention = format!("#{} ", snapshot.rows[index].number);
+                self.command_line.focused = false;
+                self.focus = 0;
+                if let Some(pane) = self.panes.first()
+                    && let Err(error) = pane.write(mention.as_bytes())
+                {
+                    self.status = format!("could not type into Keeper: {error:#}");
+                }
+            }
+        }
+        true
+    }
+
+    fn tab_index_of_grid(&self, grid_id: u64) -> Option<usize> {
+        (0..self.tabs.len()).find(|index| {
+            if *index == self.active_tab {
+                self.active_grid_id == grid_id
+            } else {
+                self.tabs[*index]
+                    .as_ref()
+                    .is_some_and(|tab| tab.grid_id == grid_id)
+            }
+        })
+    }
+
+    fn grid_title_of(&self, grid_id: u64) -> Option<&str> {
+        if grid_id == self.active_grid_id {
+            return Some(&self.tab_title);
+        }
+        self.tabs
+            .iter()
+            .flatten()
+            .find(|tab| tab.grid_id == grid_id)
+            .map(|tab| tab.title.as_str())
+    }
+
+    /// First ordinary grid with this title. Grid ids are handed out afresh on
+    /// every launch, so a resumed parked pane finds its grid by name.
+    fn grid_id_titled(&self, title: &str) -> Option<u64> {
+        if !self.on_parked_tab() && self.tab_title == title {
+            return Some(self.active_grid_id);
+        }
+        self.tabs
+            .iter()
+            .flatten()
+            .find(|tab| tab.title == title && tab.grid_id != self.parked_grid_id)
+            .map(|tab| tab.grid_id)
+    }
+
+    fn parked_source_title<'a>(&'a self, origin: &'a ParkedOrigin) -> &'a str {
+        origin
+            .grid_id
+            .and_then(|grid_id| self.grid_title_of(grid_id))
+            .unwrap_or(&origin.grid_title)
+    }
+
+    /// Edit the Parked tab wherever it currently lives: in the live fields when
+    /// it is on screen, or in its stored snapshot when it is not.
+    fn with_parked_tab<R>(
+        &mut self,
+        edit: impl FnOnce(&mut GridTabSnapshot, &mut Vec<ParkedOrigin>) -> R,
+    ) -> Option<R> {
+        if self.on_parked_tab() {
+            let mut tab = self.take_current_tab_snapshot();
+            let result = edit(&mut tab, &mut self.parked_origins);
+            self.restore_tab_snapshot(tab);
+            return Some(result);
+        }
+        let parked_grid_id = self.parked_grid_id;
+        let index = self.parked_tab_index();
+        let tab = self
+            .tabs
+            .get_mut(index)?
+            .as_mut()
+            .filter(|tab| tab.grid_id == parked_grid_id)?;
+        Some(edit(tab, &mut self.parked_origins))
+    }
+
+    fn park_panes(&mut self, notify_when: Option<String>) -> Result<()> {
+        let targets = background_target_indices(self.focus, &self.selected, self.panes.len());
+        if targets.is_empty() {
+            self.status = "no pane to park".into();
+            return Ok(());
+        }
+        let parked_available = self
+            .tabs
+            .get(self.parked_tab_index())
+            .and_then(Option::as_ref)
+            .is_some_and(|tab| tab.grid_id == self.parked_grid_id);
+        if !parked_available {
+            self.status = "the Parked tab is unavailable".into();
+            return Ok(());
+        }
+        let Some(plan) = self.launch_plan.as_ref() else {
+            self.status = "cannot park panes without a launch plan".into();
+            return Ok(());
+        };
+        let specs = targets
+            .iter()
+            .filter_map(|index| plan.panes.get(*index).cloned().map(|spec| (*index, spec)))
+            .collect::<Vec<_>>();
+        if specs.len() != targets.len() {
+            self.status = "one or more pane configurations are unavailable".into();
+            return Ok(());
+        }
+
+        // Every replacement is running before any pane moves, so a launch that
+        // fails leaves the grid as it was.
+        let mut replacements = Vec::with_capacity(specs.len());
+        for (index, spec) in &specs {
+            let launched = match fresh_slot_spec(&self.config, spec) {
+                Ok(fresh) => self
+                    .spawn_pane_instance(&fresh, *index)
+                    .map(|pane| (fresh, pane)),
+                Err(error) => Err(error),
+            };
+            match launched {
+                Ok(replacement) => replacements.push(replacement),
+                Err(error) => {
+                    let _ = retire_panes(replacements.iter_mut().map(|(_, pane)| pane));
+                    self.status = format!(
+                        "park canceled; the pane to take {}'s place failed to launch: {error:#}",
+                        index + 1
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        let grid_id = self.active_grid_id;
+        let grid_title = self.tab_title.clone();
+        let mut moving = Vec::with_capacity(specs.len());
+        for ((index, spec), (fresh_spec, replacement)) in specs.into_iter().zip(replacements) {
+            let pane = mem::replace(&mut self.panes[index], replacement);
+            if let Some(slot) = self
+                .launch_plan
+                .as_mut()
+                .and_then(|plan| plan.panes.get_mut(index))
+            {
+                *slot = fresh_spec;
+            }
+            let idle = self
+                .pane_idle
+                .get_mut(index)
+                .map(|idle| mem::replace(idle, PaneIdleState::new(Instant::now())))
+                .unwrap_or_else(|| PaneIdleState::new(Instant::now()));
+            let name = self.pane_names.get_mut(index).and_then(Option::take);
+            let sleeping = self.sleeping.remove(&index);
+            let reports_done = spec.command.agent_kind.is_some();
+            let origin = ParkedOrigin {
+                grid_id: Some(grid_id),
+                grid_title: grid_title.clone(),
+                slot: index,
+                watch: notify_when
+                    .clone()
+                    .map(|condition| ParkWatch::new(condition, reports_done)),
+            };
+            moving.push((
+                origin,
+                MovingPane {
+                    pane,
+                    spec,
+                    name,
+                    idle,
+                    sleeping,
+                },
+            ));
+        }
+
+        let label = match moving.as_slice() {
+            [(origin, pane)] => pane
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("pane {}", origin.slot + 1)),
+            many => format!("{} panes", many.len()),
+        };
+        self.with_parked_tab(|tab, origins| {
+            for (origin, pane) in moving {
+                let index = tab.push_pane(pane);
+                origins.resize_with(index, ParkedOrigin::unknown);
+                origins.push(origin);
+                tab.focus = index;
+            }
+        });
+
+        self.selected.clear();
+        self.follow_up = self
+            .follow_up
+            .filter(|prompt| !targets.contains(&prompt.pane_index));
+        self.pane_settings.close();
+        self.sync_pane_sizes();
+        self.save_session_snapshot()?;
+        self.status = match notify_when {
+            Some(condition) => format!("parked {label}; you'll be told when {condition}"),
+            None => format!(
+                "parked {label}; {} on the Parked tab sends it back",
+                self.keybindings.label_for(Action::ParkPane)
+            ),
+        };
+        Ok(())
+    }
+
+    fn open_park_sheet(&mut self) {
+        if self.panes.is_empty() {
+            self.status = "no pane to park".into();
+            return;
+        }
+        self.park_sheet = Some(ParkSheet {
+            field: TextField::new("", Some(MAX_CONDITION_CHARS)),
+            target: ParkSheetTarget::Park,
+        });
+    }
+
+    fn open_watch_sheet(&mut self) {
+        if !self.on_parked_tab() || self.panes.is_empty() {
+            self.status = format!(
+                "{} on the Parked tab changes when a parked pane tells you it is done",
+                self.keybindings.label_for(Action::WatchParked)
+            );
+            return;
+        }
+        let index = self.focus.min(self.panes.len() - 1);
+        let current = self
+            .parked_origins
+            .get(index)
+            .and_then(|origin| origin.watch.as_ref())
+            .map(|watch| watch.condition.clone())
+            .unwrap_or_default();
+        self.park_sheet = Some(ParkSheet {
+            field: TextField::new(current, Some(MAX_CONDITION_CHARS)),
+            target: ParkSheetTarget::Rewatch(index),
+        });
+    }
+
+    fn handle_park_sheet_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        if key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char('q')) {
+            return Ok(KeyOutcome::Quit);
+        }
+        let Some(sheet) = self.park_sheet.as_mut() else {
+            return Ok(KeyOutcome::Continue);
+        };
+        let typing = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        match key.code {
+            KeyCode::Esc => {
+                self.park_sheet = None;
+                self.status = "nothing parked".into();
+            }
+            KeyCode::Enter => {
+                let target = sheet.target;
+                let condition = Some(sheet.field.value.trim().to_string())
+                    .filter(|condition| !condition.is_empty());
+                self.park_sheet = None;
+                match target {
+                    ParkSheetTarget::Park => self.park_panes(condition)?,
+                    ParkSheetTarget::Rewatch(index) => self.rewatch_parked(index, condition)?,
+                }
+            }
+            KeyCode::Backspace => {
+                sheet.field.backspace();
+            }
+            KeyCode::Delete => {
+                sheet.field.delete();
+            }
+            KeyCode::Left => sheet.field.move_cursor(-1),
+            KeyCode::Right => sheet.field.move_cursor(1),
+            KeyCode::Home => sheet.field.home(),
+            KeyCode::End => sheet.field.end(),
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                sheet.field.clear();
+            }
+            KeyCode::Char(ch) if typing => {
+                sheet.field.insert(ch);
+            }
+            _ => return Ok(KeyOutcome::Continue),
+        }
+        Ok(KeyOutcome::Render)
+    }
+
+    fn rewatch_parked(&mut self, index: usize, notify_when: Option<String>) -> Result<()> {
+        let reports_done = self
+            .launch_plan
+            .as_ref()
+            .and_then(|plan| plan.panes.get(index))
+            .is_some_and(|spec| spec.command.agent_kind.is_some());
+        let Some(origin) = self.parked_origins.get_mut(index) else {
+            self.status = "that parked pane is unavailable".into();
+            return Ok(());
+        };
+        origin.watch = notify_when
+            .clone()
+            .map(|condition| ParkWatch::new(condition, reports_done));
+        self.save_session_snapshot()?;
+        self.status = match notify_when {
+            Some(condition) => format!("you'll be told when {condition}"),
+            None => "no longer watched; it stays parked until you bring it back".into(),
+        };
+        Ok(())
+    }
+
+    fn tick_park_watches(&mut self) -> bool {
+        let mut changed = self.brief_parked_panes();
+        while let Ok(judgment) = self.park_judgments_rx.try_recv() {
+            self.park_watch_spend.checks += 1;
+            self.park_watch_spend.tokens += judgment.tokens;
+            changed = true;
+            let Some(index) = self.parked_index_of(judgment.pane) else {
+                continue;
+            };
+            if judgment.review
+                && let Some(pane) = self.parked_panes_mut().get_mut(index)
+            {
+                submit_text(pane, &park_watch::review_reply(&judgment.outcome));
+            }
+            let Some(watch) = self
+                .parked_origins
+                .get_mut(index)
+                .and_then(|origin| origin.watch.as_mut())
+            else {
+                continue;
+            };
+            if watch.record_verdict(judgment.outcome) {
+                self.park_toast = Some(judgment.pane);
+                let _ = self.save_session_snapshot();
+            }
+        }
+
+        let on_parked = self.on_parked_tab();
+        if on_parked
+            && let Some(watch) = self
+                .parked_origins
+                .get_mut(self.focus)
+                .and_then(|origin| origin.watch.as_mut())
+            && watch.unseen_done()
+        {
+            watch.seen = true;
+            changed = true;
+        }
+
+        let parked_grid_id = self.parked_grid_id;
+        let parked_tab = self.tabs.len().saturating_sub(1);
+        let panes: &[PtyPane] = if on_parked {
+            &self.panes
+        } else {
+            self.tabs
+                .get(parked_tab)
+                .and_then(Option::as_ref)
+                .filter(|tab| tab.grid_id == parked_grid_id)
+                .map_or(&[], |tab| tab.panes.as_slice())
+        };
+        let now = Instant::now();
+        for (pane, origin) in panes.iter().zip(self.parked_origins.iter_mut()) {
+            let Some(watch) = origin.watch.as_mut() else {
+                continue;
+            };
+            if watch.due(pane.screen_revision(), now) {
+                watch.start(now);
+                park_watch::judge(
+                    pane.id(),
+                    &watch.condition,
+                    park_watch::screen_text(pane.screen()),
+                    self.park_judgments_tx.clone(),
+                );
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn parked_panes(&self) -> &[PtyPane] {
+        if self.on_parked_tab() {
+            return &self.panes;
+        }
+        self.tabs
+            .get(self.parked_tab_index())
+            .and_then(Option::as_ref)
+            .filter(|tab| tab.grid_id == self.parked_grid_id)
+            .map_or(&[], |tab| tab.panes.as_slice())
+    }
+
+    /// Tells each parked agent that has a condition, once its agent is up,
+    /// that it is parked and how to report done. A pane restored by a resume
+    /// is covered the same way as one parked just now.
+    fn brief_parked_panes(&mut self) -> bool {
+        let due: Vec<(usize, String)> = self
+            .parked_origins
+            .iter()
+            .enumerate()
+            .filter_map(|(index, origin)| {
+                let watch = origin.watch.as_ref()?;
+                watch
+                    .needs_briefing()
+                    .then(|| (index, watch.condition.clone()))
+            })
+            .collect();
+        let mut briefed = false;
+        for (index, condition) in due {
+            let Some((id, exited)) = self
+                .parked_panes_mut()
+                .get(index)
+                .map(|pane| (pane.id(), pane.exited))
+            else {
+                continue;
+            };
+            if exited || self.pane_warmup.contains_key(&id) {
+                continue;
+            }
+            if let Some(pane) = self.parked_panes_mut().get_mut(index) {
+                submit_text(pane, &park_watch::briefing(&condition));
+            }
+            if let Some(watch) = self.parked_origins[index].watch.as_mut() {
+                watch.briefed = true;
+            }
+            briefed = true;
+        }
+        if briefed {
+            let _ = self.save_session_snapshot();
+        }
+        briefed
+    }
+
+    fn parked_panes_mut(&mut self) -> &mut [PtyPane] {
+        if self.on_parked_tab() {
+            return &mut self.panes;
+        }
+        let parked_grid_id = self.parked_grid_id;
+        let index = self.parked_tab_index();
+        self.tabs
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .filter(|tab| tab.grid_id == parked_grid_id)
+            .map_or(&mut [], |tab| tab.panes.as_mut_slice())
+    }
+
+    fn review_done_claim(&mut self, claim: &str, caller_pane_id: Option<usize>) -> ControlResponse {
+        let Some(caller_pane_id) = caller_pane_id else {
+            return ControlResponse::error("run this from inside the parked pane");
+        };
+        let Some(index) = self
+            .parked_panes()
+            .iter()
+            .position(|pane| stable_control_pane_id(pane.id()) == caller_pane_id)
+        else {
+            return ControlResponse::error(
+                "this pane is not parked, so there is nothing to review",
+            );
+        };
+        let pane = &self.parked_panes()[index];
+        let (id, screen, cwd) = (
+            pane.id(),
+            park_watch::screen_text(pane.screen()),
+            pane.cwd().to_path_buf(),
+        );
+        let Some(watch) = self
+            .parked_origins
+            .get_mut(index)
+            .and_then(|origin| origin.watch.as_mut())
+        else {
+            return ControlResponse::error(
+                "this pane is parked without a condition, so there is nothing to review",
+            );
+        };
+        if watch.met.is_some() {
+            return ControlResponse::ok("the reviewer already accepted this pane's work");
+        }
+        if watch.judging() {
+            return ControlResponse::error(
+                "a review is already running; its verdict will be typed into this pane",
+            );
+        }
+        watch.start(Instant::now());
+        park_watch::review(
+            id,
+            &watch.condition,
+            claim,
+            screen,
+            cwd,
+            self.park_judgments_tx.clone(),
+        );
+        ControlResponse::ok(
+            "the reviewer is checking your claim against the repository; its verdict will be typed into this pane",
+        )
+    }
+
+    fn parked_index_of(&self, pane: PaneId) -> Option<usize> {
+        self.parked_panes()
+            .iter()
+            .position(|parked| parked.id() == pane)
+    }
+
+    fn parked_pane_name(&self, index: usize) -> String {
+        let names = if self.on_parked_tab() {
+            Some(&self.pane_names)
+        } else {
+            self.tabs
+                .get(self.parked_tab_index())
+                .and_then(Option::as_ref)
+                .map(|tab| &tab.pane_names)
+        };
+        names
+            .and_then(|names| names.get(index))
+            .and_then(Clone::clone)
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| {
+                let slot = self
+                    .parked_origins
+                    .get(index)
+                    .map_or(index, |origin| origin.slot);
+                format!("pane {}", slot + 1)
+            })
+    }
+
+    fn parked_has_unseen_done(&self) -> bool {
+        self.parked_origins
+            .iter()
+            .any(|origin| origin.watch.as_ref().is_some_and(ParkWatch::unseen_done))
+    }
+
+    pub fn park_sheet_view(&self) -> Option<ParkSheetView> {
+        let sheet = self.park_sheet.as_ref()?;
+        Some(ParkSheetView {
+            pane_index: match sheet.target {
+                ParkSheetTarget::Park => self.focus,
+                ParkSheetTarget::Rewatch(index) => index,
+            },
+            parking: sheet.target == ParkSheetTarget::Park,
+            value: sheet.field.value.clone(),
+            cursor: sheet.field.cursor,
+        })
+    }
+
+    pub fn park_toast_view(&self) -> Option<ParkToastView> {
+        if self.on_parked_tab() {
+            return None;
+        }
+        let index = self.parked_index_of(self.park_toast?)?;
+        let watch = self.parked_origins.get(index)?.watch.as_ref()?;
+        let met = watch.met.as_ref().filter(|_| !watch.seen)?;
+        Some(ParkToastView {
+            name: self.parked_pane_name(index),
+            reason: met.reason.clone(),
+            key: self.keybindings.label_for(Action::NextWaiting),
+        })
+    }
+
+    fn view_park_toast(&mut self) {
+        let Some(index) = self.park_toast.and_then(|pane| self.parked_index_of(pane)) else {
+            return;
+        };
+        self.switch_to_tab(self.parked_tab_index());
+        self.command_line.focused = false;
+        self.focus = index.min(self.panes.len().saturating_sub(1));
+    }
+
+    pub fn shelf_view(&self) -> Option<ShelfView> {
+        if !self.on_parked_tab() || self.panes.is_empty() {
+            return None;
+        }
+        let rows = (0..self.panes.len())
+            .map(|index| {
+                let origin = self.parked_origins.get(index);
+                let watch = origin.and_then(|origin| origin.watch.as_ref());
+                let (state, detail) = match watch {
+                    None => (
+                        ShelfState::Parked,
+                        "stays here until you bring it back".to_string(),
+                    ),
+                    Some(watch) => match (&watch.met, &watch.last, &watch.error) {
+                        (Some(met), _, _) => (
+                            ShelfState::Done,
+                            format!("Met {}: {}", park_watch::age_label(met.at), met.reason),
+                        ),
+                        (None, _, Some(error)) => {
+                            (ShelfState::Watching, format!("Could not check: {error}"))
+                        }
+                        (None, Some(last), None) => (
+                            if watch.judging() {
+                                ShelfState::Checking
+                            } else {
+                                ShelfState::Watching
+                            },
+                            format!(
+                                "Checked {}: not yet. {}",
+                                park_watch::age_label(last.at),
+                                last.reason
+                            ),
+                        ),
+                        (None, None, None) => (
+                            if watch.judging() {
+                                ShelfState::Checking
+                            } else {
+                                ShelfState::Watching
+                            },
+                            "Not checked yet.".to_string(),
+                        ),
+                    },
+                };
+                ShelfRow {
+                    name: self.parked_pane_name(index),
+                    from: origin
+                        .map(|origin| self.parked_source_title(origin).to_string())
+                        .unwrap_or_default(),
+                    condition: watch.map(|watch| watch.condition.clone()),
+                    state,
+                    detail,
+                    focused: index == self.focus,
+                }
+            })
+            .collect();
+        Some(ShelfView {
+            rows,
+            checks: self.park_watch_spend.checks,
+            tokens: self.park_watch_spend.tokens,
+            return_key: self.keybindings.label_for(Action::ParkPane),
+            watch_key: self.keybindings.bound_label(Action::WatchParked),
+        })
+    }
+
+    pub fn shelf_banner(&self) -> Option<(String, String)> {
+        if !self.on_parked_tab() {
+            return None;
+        }
+        let watch = self.parked_origins.get(self.focus)?.watch.as_ref()?;
+        let met = watch.met.as_ref()?;
+        Some((watch.condition.clone(), met.reason.clone()))
+    }
+
+    /// Send the focused parked pane back to the cell it left. Whatever holds
+    /// that cell now is parked in its place, unless nothing was ever typed into
+    /// it, in which case it is closed.
+    fn return_parked_pane(&mut self) -> Result<()> {
+        if self.panes.is_empty() {
+            self.status = "nothing is parked".into();
+            return Ok(());
+        }
+        let index = self.focus.min(self.panes.len() - 1);
+        let origin = self
+            .parked_origins
+            .get(index)
+            .cloned()
+            .unwrap_or_else(ParkedOrigin::unknown);
+        let parked_index = self.parked_tab_index();
+        let home = origin
+            .grid_id
+            .and_then(|grid_id| self.tab_index_of_grid(grid_id))
+            .filter(|tab| *tab != parked_index);
+        let Some(destination) = home
+            .or_else(|| self.tab_index_of_grid(self.last_grid_id))
+            .filter(|tab| *tab != parked_index)
+            .or_else(|| (parked_index > 0).then_some(0))
+        else {
+            self.status = "no grid to send this pane back to".into();
+            return Ok(());
+        };
+        let Some(target) = self.tabs.get(destination).and_then(Option::as_ref) else {
+            self.status = format!("grid {} is unavailable", destination + 1);
+            return Ok(());
+        };
+        if target.panes.is_empty() {
+            self.status = format!("{} has no cell to take this pane", target.title);
+            return Ok(());
+        }
+        let last_slot = target.panes.len() - 1;
+        let slot = if home.is_some() {
+            origin.slot.min(last_slot)
+        } else {
+            target.focus.min(last_slot)
+        };
+
+        self.follow_up = None;
+        self.pane_settings.close();
+        self.rename.close();
+        self.copy_mode = None;
+        let Some(moving) = self
+            .with_parked_tab(|tab, origins| {
+                let moving = tab.remove_pane(index)?;
+                if index < origins.len() {
+                    origins.remove(index);
+                }
+                Some(moving)
+            })
+            .flatten()
+        else {
+            self.status = "that parked pane is unavailable".into();
+            return Ok(());
+        };
+        let label = moving
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("pane {}", origin.slot + 1));
+
+        let Some(target) = self.tabs.get_mut(destination).and_then(Option::as_mut) else {
+            self.repark(index, origin, moving);
+            self.status = format!("grid {} is unavailable", destination + 1);
+            return Ok(());
+        };
+        let target_title = target.title.clone();
+        let target_grid_id = target.grid_id;
+        let occupant = match target.replace_pane(slot, moving) {
+            Ok(occupant) => {
+                target.focus = slot;
+                occupant
+            }
+            Err(moving) => {
+                self.repark(index, origin, *moving);
+                self.status = format!("{target_title} pane {} is unavailable", slot + 1);
+                return Ok(());
+            }
+        };
+
+        let note = if occupant.pane.input_history().is_empty() && !occupant.sleeping {
+            self.discard_pane(occupant.pane);
+            "closed the unused pane that held its place"
+        } else {
+            self.with_parked_tab(|tab, origins| {
+                let index = tab.push_pane(occupant);
+                origins.resize_with(index, ParkedOrigin::unknown);
+                origins.push(ParkedOrigin {
+                    grid_id: Some(target_grid_id),
+                    grid_title: target_title.clone(),
+                    slot,
+                    watch: None,
+                });
+            });
+            "the pane that held its place is parked now"
+        };
+
+        self.switch_to_tab(destination);
+        self.save_session_snapshot()?;
+        self.status = format!(
+            "sent {label} back to {target_title} pane {}; {note}",
+            slot + 1
+        );
+        Ok(())
+    }
+
+    fn repark(&mut self, index: usize, origin: ParkedOrigin, moving: MovingPane) {
+        self.with_parked_tab(|tab, origins| {
+            let last = tab.push_pane(moving);
+            origins.resize_with(last, ParkedOrigin::unknown);
+            origins.push(origin);
+            tab.focus = index.min(last);
+        });
+    }
+
+    fn discard_pane(&mut self, mut pane: PtyPane) {
+        let pane_id = pane.id();
+        let _ = self
+            .output_logs
+            .stop(PaneLogKey::new(pane_id, pane.generation()));
+        self.pane_render_cache.borrow_mut().remove(&pane_id);
+        self.applied_workloads.remove(&pane_id);
+        self.activity_summary_states.remove(&pane_id);
+        if let Err(error) = retire_pane(&mut pane) {
+            self.status = format!("failed to close pane: {error:#}");
+        }
+    }
+
     fn take_current_tab_snapshot(&mut self) -> GridTabSnapshot {
         let placeholder_layout = GridLayout::new(self.layout.size());
         GridTabSnapshot {
@@ -3441,6 +4750,8 @@ impl App {
         self.command_line.focused = false;
         self.assistant.open = false;
         self.grid_resizer = None;
+        self.park_sheet = None;
+        self.account_sheet = None;
     }
 
     fn activate_plan_as_tab(&mut self, title: String, mut plan: LaunchPlan) -> Result<()> {
@@ -3483,8 +4794,19 @@ impl App {
 
     fn add_tab_from_plan(&mut self, title: Option<String>, plan: LaunchPlan) -> Result<()> {
         self.save_current_tab();
-        self.tabs.push(None);
-        self.active_tab = self.tabs.len() - 1;
+        let slot = self.first_pinned_tab_index();
+        self.tabs.insert(slot, None);
+        self.selected_grids = self
+            .selected_grids
+            .iter()
+            .map(|index| if *index >= slot { index + 1 } else { *index })
+            .collect();
+        if let Some(VoiceDestination::Panes { tab, .. }) = self.voice_destination.as_mut()
+            && *tab >= slot
+        {
+            *tab += 1;
+        }
+        self.active_tab = slot;
         // The number is consumed either way so later tabs never reuse it.
         let fallback = self.next_tab_title();
         let title = title
@@ -3529,6 +4851,22 @@ impl App {
     }
 
     fn create_pane(
+        &mut self,
+        spec: &PaneLaunchSpec,
+        index: usize,
+        history: &SavedPaneHistory,
+        host: Option<PtyHostRef>,
+    ) -> Result<PtyPane> {
+        let pane = self.open_pane(spec, index, history, host)?;
+        if history.settled_after(&self.config.ui.resume_prompt)
+            && let Some(warmup) = self.pane_warmup.get_mut(&pane.id())
+        {
+            warmup.continue_conversation = false;
+        }
+        Ok(pane)
+    }
+
+    fn open_pane(
         &mut self,
         spec: &PaneLaunchSpec,
         index: usize,
@@ -3605,9 +4943,10 @@ impl App {
         // several Claude panes in a folder wrote which transcript.
         let mut spec = spec.clone();
         let claude_session_id = pin_claude_session(&mut spec.command);
-        let launch = spec.resolved_command()?;
         let id = PaneId(self.next_pane_id);
         self.next_pane_id += 1;
+        let turn_report = agent_turn::report_claude_turns(&mut spec.command, id);
+        let launch = spec.resolved_command()?;
         let extra_env = self.pane_env(pane_index, id);
         let mut pane = PtyPane::spawn(
             &spec.profile_name,
@@ -3625,6 +4964,7 @@ impl App {
             self.event_tx.clone(),
         )?;
         pane.set_agent_session_id(claude_session_id);
+        pane.set_turn_report(turn_report);
         // Only a freshly spawned process pays startup cost. A pane that attached
         // to a terminal that kept running is already up and is left alone.
         self.pane_warmup.insert(
@@ -3632,6 +4972,8 @@ impl App {
             PaneWarmup {
                 started: Instant::now(),
                 saw_output: false,
+                continue_conversation: self.restored.resuming
+                    && reopens_conversation(&launch.command, &launch.args),
             },
         );
         Ok(pane)
@@ -3687,19 +5029,33 @@ impl App {
             output_render: false,
             last_render: Instant::now(),
             mouse_capture_enabled: self.mouse_enabled,
+            traced_input_state: String::new(),
+            last_input: None,
         };
         let mut panic_budget = FailureBudget::new(MAX_RECOVERED_PANICS);
         let mut error_budget = FailureBudget::new(MAX_RECOVERED_LOOP_ERRORS);
 
         loop {
+            if shutdown::requested() {
+                break;
+            }
+            let started = Instant::now();
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _shield = diagnostics::PanicShield::new();
                 self.run_loop_iteration(terminal, &mut state)
             }));
+            let took = started.elapsed();
+            if took >= LOOP_STALL_TRACE {
+                input_trace::record(format_args!("loop iteration took {}ms", took.as_millis()));
+            }
 
             match outcome {
                 Ok(Ok(LoopStep::Quit)) => break,
                 Ok(Ok(LoopStep::Continue)) => {}
+                Ok(Err(error)) if terminal_closed(&error) => {
+                    shutdown::terminal_lost();
+                    break;
+                }
                 Ok(Err(error)) => {
                     let detail = format!("{error:#}");
                     diagnostics::record_recovered("tui", "event loop iteration", &detail);
@@ -3736,7 +5092,7 @@ impl App {
             }
         }
 
-        if state.mouse_capture_enabled {
+        if state.mouse_capture_enabled && !shutdown::was_terminal_lost() {
             execute!(terminal.backend_mut(), DisableMouseCapture)?;
         }
 
@@ -3748,17 +5104,28 @@ impl App {
         terminal: &mut Tui,
         state: &mut LoopState,
     ) -> Result<LoopStep> {
-        let frame_interval = self.output_frame_interval();
+        let typing = state
+            .last_input
+            .is_some_and(|at| at.elapsed() < TYPING_WINDOW);
+        let (frame_interval, poll_interval) = if typing {
+            (
+                Duration::from_millis(self.settings.refresh_ms.max(1) as u64),
+                TYPING_POLL_INTERVAL,
+            )
+        } else {
+            (self.output_frame_interval(), INPUT_POLL_INTERVAL)
+        };
         let until_frame = frame_interval.saturating_sub(state.last_render.elapsed());
         let wait = if state.immediate_render || !self.event_rx.is_empty() {
             Duration::ZERO
         } else if state.output_render {
-            until_frame.min(INPUT_POLL_INTERVAL)
+            until_frame.min(poll_interval)
         } else {
-            INPUT_POLL_INTERVAL
+            poll_interval
         };
 
         if event::poll(wait)? {
+            state.last_input = Some(Instant::now());
             for event in self.read_input_events()? {
                 if self.handle_terminal_event(
                     terminal,
@@ -3775,6 +5142,7 @@ impl App {
         state.immediate_render |= self.flush_output_logs_if_due();
         state.immediate_render |= self.drain_usage_events();
         state.immediate_render |= self.drain_auth_refresh();
+        self.schedule_account_refresh();
         state.immediate_render |= self.drain_command_events();
         state.immediate_render |= self.drain_port_scan();
         state.immediate_render |= self.drain_goal_reviews();
@@ -3783,6 +5151,9 @@ impl App {
         state.immediate_render |= self.drain_voice_events()?;
         state.immediate_render |= self.drain_control_events();
         state.immediate_render |= self.decay_activity();
+        state.immediate_render |= self.expire_status();
+        state.immediate_render |= self.tick_park_watches();
+        state.immediate_render |= self.drain_keeper_snapshots();
         state.immediate_render |= self.update_follow_up_prompt();
         state.immediate_render |= self.schedule_goal_reviews();
         state.immediate_render |= self.schedule_activity_summaries();
@@ -3802,20 +5173,17 @@ impl App {
                 self.grid_area = draw_state.grid_area;
                 self.rects = draw_state.pane_rects;
                 self.tab_rects = draw_state.tab_rects;
-                self.previous_panes_button = draw_state.previous_panes_button;
                 self.previous_pane_rows = draw_state.previous_pane_rows;
-                self.summary_refresh_button = draw_state.summary_refresh_button;
-                self.pane_settings_button = draw_state.pane_settings_button;
                 self.pane_settings_rename_button = draw_state.pane_settings_rename_button;
                 self.pane_settings_reload_button = draw_state.pane_settings_reload_button;
                 self.pane_settings_sleep_button = draw_state.pane_settings_sleep_button;
                 self.pane_settings_deactivate_button = draw_state.pane_settings_deactivate_button;
                 self.pane_settings_goal_button = draw_state.pane_settings_goal_button;
                 self.pane_settings_stop_goal_button = draw_state.pane_settings_stop_goal_button;
-                self.background_jobs_button = draw_state.background_jobs_button;
                 self.background_job_rows = draw_state.background_job_rows;
-                self.ports_button = draw_state.ports_button;
                 self.port_rows = draw_state.port_rows;
+                self.shelf_rows = draw_state.shelf_rows;
+                self.park_toast_rect = draw_state.park_toast_rect;
             })?;
             self.sync_pane_sizes();
             state.immediate_render = false;
@@ -3823,6 +5191,18 @@ impl App {
             state.last_render = Instant::now();
         }
         self.sync_mouse_capture(terminal, &mut state.mouse_capture_enabled)?;
+        let input_state = format!(
+            "keyboard={} leader_pending={} mouse_capture={} terminal_focused={} tab={}",
+            self.keyboard_owner(),
+            self.leader_pending,
+            state.mouse_capture_enabled,
+            self.terminal_focused,
+            self.active_tab,
+        );
+        if input_state != state.traced_input_state {
+            input_trace::record(format_args!("state {input_state}"));
+            state.traced_input_state = input_state;
+        }
 
         Ok(LoopStep::Continue)
     }
@@ -3839,7 +5219,7 @@ impl App {
     fn read_input_events(&self) -> Result<Vec<Event>> {
         let first = event::read()?;
         if !cfg!(windows) || !self.input_reaches_pane() {
-            return Ok(vec![first]);
+            return fold_meta_escape(first);
         }
         let Some(first_char) = paste_burst_char(&first) else {
             return Ok(vec![first]);
@@ -3885,6 +5265,39 @@ impl App {
         Ok(keys)
     }
 
+    /// The overlay `handle_key` hands a key to before any shortcut, in the same
+    /// order it checks them.
+    fn keyboard_owner(&self) -> &'static str {
+        [
+            (
+                self.close_grid_confirmation_pending,
+                "close-grid-confirmation",
+            ),
+            (self.quit_confirmation_pending, "quit-confirmation"),
+            (self.copy_mode.is_some(), "copy-mode"),
+            (self.command_palette.open, "command-palette"),
+            (self.assistant.open, "assistant"),
+            (self.help_open, "help"),
+            (self.grid_resizer.is_some(), "grid-resizer"),
+            (self.image_overlay.is_some(), "image-overlay"),
+            (self.tab_rename.open, "tab-rename"),
+            (self.rename.open, "rename"),
+            (self.park_sheet.is_some(), "park-sheet"),
+            (self.account_sheet.is_some(), "account-sheet"),
+            (self.background_picker.open, "background-picker"),
+            (self.adopt_picker.open, "adopt-picker"),
+            (self.previous_panes.open, "previous-panes"),
+            (self.pane_settings.open, "pane-settings"),
+            (self.port_inspector.open, "port-inspector"),
+            (self.follow_up.is_some(), "follow-up"),
+            (self.settings.open, "settings"),
+            (self.command_line.focused, "command-line"),
+        ]
+        .into_iter()
+        .find_map(|(open, name)| open.then_some(name))
+        .unwrap_or("panes")
+    }
+
     /// True when plain keystrokes are forwarded to a pane rather than consumed
     /// by an overlay, modal, or the command line.
     fn input_reaches_pane(&self) -> bool {
@@ -3915,6 +5328,7 @@ impl App {
         needs_render: &mut bool,
         mouse_capture_enabled: &mut bool,
     ) -> Result<bool> {
+        self.trace_input_event(&event);
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 match self.handle_key(terminal, key)? {
@@ -3922,6 +5336,7 @@ impl App {
                     KeyOutcome::Render => *needs_render = true,
                     KeyOutcome::AuthLogin(profile) => {
                         self.run_auth_login(terminal, profile)?;
+                        input_trace::record("mouse capture off: auth login suspended the terminal");
                         *mouse_capture_enabled = false;
                         *needs_render = true;
                     }
@@ -3931,6 +5346,8 @@ impl App {
             Event::Resize(_, _) => *needs_render = true,
             Event::FocusGained => {
                 self.terminal_focused = true;
+                execute!(terminal.backend_mut(), EnableBracketedPaste)?;
+                *mouse_capture_enabled = false;
                 *needs_render = true;
             }
             Event::FocusLost => {
@@ -3951,6 +5368,12 @@ impl App {
             }
             Event::Paste(text) if self.rename.open => {
                 self.rename.insert_text(&text);
+                *needs_render = true;
+            }
+            Event::Paste(text) if self.park_sheet.is_some() => {
+                if let Some(sheet) = self.park_sheet.as_mut() {
+                    sheet.field.insert_str(&text);
+                }
                 *needs_render = true;
             }
             Event::Paste(text) if self.settings.editing_manager() => {
@@ -3993,9 +5416,51 @@ impl App {
             {
                 *needs_render |= self.handle_mouse(mouse, terminal)?;
             }
+            Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(_)) => {
+                input_trace::record(format_args!(
+                    "mouse {:?} dropped keyboard={}",
+                    mouse.kind,
+                    self.keyboard_owner()
+                ));
+            }
             _ => {}
         }
         Ok(false)
+    }
+
+    fn trace_input_event(&self, event: &Event) {
+        match event {
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press
+                    && (key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::ALT)) =>
+            {
+                input_trace::record(format_args!(
+                    "key {:?} {:?} action={:?} keyboard={} leader_pending={}",
+                    key.modifiers,
+                    key.code,
+                    self.keybindings.action_for(key),
+                    self.keyboard_owner(),
+                    self.leader_pending
+                ));
+            }
+            Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Down(_)) => {
+                input_trace::record(format_args!(
+                    "mouse {:?} at {},{}",
+                    mouse.kind, mouse.column, mouse.row
+                ));
+            }
+            Event::Paste(text) => {
+                input_trace::record(format_args!(
+                    "paste {} bytes keyboard={}",
+                    text.len(),
+                    self.keyboard_owner()
+                ));
+            }
+            Event::FocusGained | Event::FocusLost => {
+                input_trace::record(format_args!("{event:?}"));
+            }
+            _ => {}
+        }
     }
 
     fn output_frame_interval(&self) -> Duration {
@@ -4038,18 +5503,47 @@ impl App {
             .collect::<Vec<_>>();
 
         let mut seen = BTreeSet::new();
+        let mut ready_to_continue = Vec::new();
         for (id, active, quiet, exited) in live {
             seen.insert(id);
             let mut started = false;
             if let Some(warmup) = self.pane_warmup.get_mut(&id) {
                 warmup.saw_output |= active;
                 started = pane_finished_warmup(warmup, now, quiet, exited);
+                if started && warmup.continue_conversation && !exited {
+                    ready_to_continue.push(id);
+                }
             }
             if started {
                 self.pane_warmup.remove(&id);
             }
         }
         self.pane_warmup.retain(|id, _| seen.contains(id));
+        self.send_resume_prompt(&ready_to_continue);
+    }
+
+    fn send_resume_prompt(&mut self, ids: &[PaneId]) {
+        let prompt = self.config.ui.resume_prompt.trim().to_string();
+        if ids.is_empty() || prompt.is_empty() {
+            return;
+        }
+        let panes = self
+            .panes
+            .iter_mut()
+            .chain(
+                self.tabs
+                    .iter_mut()
+                    .filter_map(Option::as_mut)
+                    .flat_map(|tab| tab.panes.iter_mut()),
+            )
+            .chain(
+                self.background_jobs
+                    .iter_mut()
+                    .filter_map(|job| job.pane.as_mut()),
+            );
+        for pane in panes.filter(|pane| ids.contains(&pane.id())) {
+            submit_text(pane, &prompt);
+        }
     }
 
     fn refresh_workload_classes(&mut self) -> bool {
@@ -4151,6 +5645,7 @@ impl App {
         } else {
             execute!(terminal.backend_mut(), DisableMouseCapture)?;
         }
+        input_trace::record(format_args!("mouse capture set to {should_enable}"));
         *enabled = should_enable;
         Ok(())
     }
@@ -4634,7 +6129,7 @@ impl App {
         if !self.config.manager.is_configured() {
             self.assistant.push_message(
                 AssistantRole::BashBot,
-                "I need Manager API settings before I can read this grid. Open Alt+O, choose Manager, and set the endpoint, model, and API key.",
+                "I need Manager API settings before I can read this grid. Open Settings, choose Manager, and set the endpoint, model, and API key.",
             );
             self.status = "configure Manager API settings for BashBot Director".into();
             return;
@@ -5508,6 +7003,7 @@ impl App {
             ControlCommand::RenamePane { pane, name } => {
                 self.rename_control_pane(pane.as_ref(), name.as_deref(), caller_pane_id)
             }
+            ControlCommand::ReportDone { claim } => self.review_done_claim(&claim, caller_pane_id),
         }
     }
 
@@ -6139,6 +7635,27 @@ impl App {
         Ok(targets)
     }
 
+    fn expire_status(&mut self) -> bool {
+        if self.status.is_empty() {
+            self.status_since = None;
+            return false;
+        }
+        match &self.status_since {
+            Some((shown, since)) if *shown == self.status => {
+                if since.elapsed() < STATUS_LIFETIME {
+                    return false;
+                }
+                self.status.clear();
+                self.status_since = None;
+                true
+            }
+            _ => {
+                self.status_since = Some((self.status.clone(), Instant::now()));
+                false
+            }
+        }
+    }
+
     fn decay_activity(&mut self) -> bool {
         if self.last_activity_decay.elapsed() < ACTIVITY_DECAY_INTERVAL {
             return false;
@@ -6147,6 +7664,7 @@ impl App {
         let now = Instant::now();
         let mut changed = false;
         for (index, pane) in self.panes.iter_mut().enumerate() {
+            changed |= pane.refresh_turn();
             let became_quiet = pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER);
             if became_quiet {
                 pane.active = false;
@@ -6155,6 +7673,7 @@ impl App {
         }
         for tab in self.tabs.iter_mut().filter_map(Option::as_mut) {
             for pane in &mut tab.panes {
+                changed |= pane.refresh_turn();
                 if pane.refresh_output_activity(now, OUTPUT_QUIET_AFTER) {
                     pane.active = false;
                     changed = true;
@@ -6233,6 +7752,9 @@ impl App {
             LeaderOutcome::Key(key) => key,
         };
         let action = self.keybindings.action_for(&key);
+        if action != Some(Action::ClosePane) {
+            self.close_panes_armed = None;
+        }
         if self.close_grid_confirmation_pending {
             return self.handle_close_grid_confirmation_key(key);
         }
@@ -6319,6 +7841,14 @@ impl App {
 
         if self.rename.open {
             return self.handle_rename_key(key);
+        }
+
+        if self.park_sheet.is_some() {
+            return self.handle_park_sheet_key(key);
+        }
+
+        if self.account_sheet.is_some() {
+            return self.handle_account_sheet_key(key);
         }
 
         let selection_cleared = self.clear_text_selection();
@@ -6889,6 +8419,9 @@ impl App {
             Action::CloseGrid => {
                 self.request_close_current_grid()?;
             }
+            Action::ClosePane => {
+                self.close_panes_on_second_press();
+            }
             Action::ToggleOutputLogging => {
                 self.toggle_target_output_logging();
             }
@@ -6936,11 +8469,27 @@ impl App {
             Action::BackgroundPanes => {
                 self.background_targets()?;
             }
+            Action::ParkPane => {
+                if self.on_parked_tab() {
+                    self.return_parked_pane()?;
+                } else {
+                    self.open_park_sheet();
+                }
+            }
+            Action::WatchParked => {
+                self.open_watch_sheet();
+            }
+            Action::NextWaiting => {
+                self.focus_next_waiting_pane();
+            }
             Action::BackgroundJobs => {
                 self.open_background_jobs();
             }
             Action::AuthProfiles => {
                 self.open_auth_profiles();
+            }
+            Action::SwapAccount => {
+                self.open_account_sheet();
             }
             Action::RenameTab => {
                 self.begin_tab_rename();
@@ -6970,6 +8519,10 @@ impl App {
     }
 
     fn open_grid_resizer(&mut self) {
+        if self.on_pinned_tab() {
+            self.status = format!("the {} tab sizes itself", self.tab_title);
+            return;
+        }
         self.close_tab_modals();
         let pane_summaries = (0..self.panes.len())
             .map(|index| Some(self.pane_activity_headline(index)))
@@ -7040,7 +8593,10 @@ impl App {
     }
 
     fn open_new_tab(&mut self, terminal: &mut Tui) -> Result<()> {
-        let current_dir = self.active_pane_cwd().unwrap_or(resolved_current_dir()?);
+        let current_dir = self
+            .new_grid_folder()
+            .or_else(|| self.active_pane_cwd())
+            .unwrap_or(resolved_current_dir()?);
         let default_name = self.peek_tab_title();
         let mut composer = Composer::new(
             current_dir,
@@ -7071,7 +8627,14 @@ impl App {
     }
 
     fn request_close_current_grid(&mut self) -> Result<()> {
-        if self.tabs.len() <= 1 {
+        if self.on_parked_tab() {
+            self.status = format!(
+                "the Parked tab stays open; {} sends the focused pane back",
+                self.keybindings.label_for(Action::ParkPane)
+            );
+            return Ok(());
+        }
+        if self.tabs.len() <= 2 {
             self.close_grid_confirmation_pending = false;
             self.status = "the only grid cannot be closed; use Alt+q to quit GridBash".into();
             return Ok(());
@@ -7101,7 +8664,11 @@ impl App {
     fn close_current_grid(&mut self) -> Result<()> {
         let closing_title = self.tab_title.clone();
         let closing_index = self.active_tab;
-        let Some(next_index) = tab_index_after_close(closing_index, self.tabs.len()) else {
+        if self.on_pinned_tab() {
+            return Ok(());
+        }
+        let Some(next_index) = tab_index_after_close(closing_index, self.first_pinned_tab_index())
+        else {
             self.status = "the only grid cannot be closed; use Alt+q to quit GridBash".into();
             return Ok(());
         };
@@ -7199,6 +8766,9 @@ impl App {
         self.close_tab_modals();
         self.assistant.open = chat_open;
         self.command_line.focused = shell_open;
+        if !self.on_pinned_tab() {
+            self.last_grid_id = self.active_grid_id;
+        }
         self.save_current_tab();
         let Some(snapshot) = self.tabs[index].take() else {
             self.status = format!("tab {} is not available", index + 1);
@@ -7217,6 +8787,10 @@ impl App {
     }
 
     fn begin_tab_rename(&mut self) {
+        if self.on_pinned_tab() {
+            self.status = format!("the {} tab cannot be renamed", self.tab_title);
+            return;
+        }
         self.rename.close();
         self.tab_rename.begin(&self.tab_title);
         self.status = format!("renaming tab {}", self.tab_title);
@@ -7787,8 +9361,12 @@ impl App {
 
         let mut replacements = Vec::with_capacity(specs.len());
         for (index, spec) in &specs {
-            match self.spawn_pane_instance(spec, *index) {
-                Ok(pane) => replacements.push((*index, pane)),
+            let fresh = PaneLaunchSpec {
+                command: without_conversation(&spec.command),
+                ..spec.clone()
+            };
+            match self.spawn_pane_instance(&fresh, *index) {
+                Ok(pane) => replacements.push((fresh, pane)),
                 Err(error) => {
                     self.status = format!(
                         "background canceled; fresh pane {} failed to launch: {error:#}",
@@ -7801,8 +9379,15 @@ impl App {
 
         let source_tab = self.tab_title.clone();
         let mut jobs = Vec::with_capacity(replacements.len());
-        for ((index, spec), (_, replacement)) in specs.into_iter().zip(replacements) {
+        for ((index, spec), (fresh, replacement)) in specs.into_iter().zip(replacements) {
             let pane = mem::replace(&mut self.panes[index], replacement);
+            if let Some(slot) = self
+                .launch_plan
+                .as_mut()
+                .and_then(|plan| plan.panes.get_mut(index))
+            {
+                *slot = fresh;
+            }
             let idle = self
                 .pane_idle
                 .get_mut(index)
@@ -8336,6 +9921,16 @@ impl App {
             .cloned()
             .ok_or_else(|| anyhow!("pane {} has no launch settings", pane_index + 1))?;
         set_spec_auth(&mut spec, auth_env);
+        let previous_args = spec.command.args.clone();
+        if let Some(session_id) = self.panes[pane_index].agent_session_id() {
+            spec.command = reopen_claude_conversation(&spec.command, &spec.cwd, session_id);
+        }
+        let kept_conversation = spec.command.args != previous_args
+            && spec
+                .command
+                .args
+                .iter()
+                .any(|argument| argument == "--resume");
         let mut pane = self.spawn_pane_instance(&spec, pane_index)?;
 
         if let Err(error) = retire_pane(&mut self.panes[pane_index]) {
@@ -8363,10 +9958,14 @@ impl App {
         self.start_usage_for_active_tab();
         self.save_session_snapshot()?;
         self.status = format!(
-            "pane {} restarted with {} auth {}",
+            "pane {} now on {}{}",
             pane_index + 1,
-            profile.kind.display_name(),
-            profile.name
+            profile.name,
+            if kept_conversation {
+                ", same conversation"
+            } else {
+                ", new conversation"
+            }
         );
         Ok(())
     }
@@ -8378,19 +9977,6 @@ impl App {
             self.status = format!("pane {} is no longer available", index + 1);
             return;
         }
-        self.refresh_activity_summary(index);
-    }
-
-    /// Forces the focused pane's summary to refresh now, skipping the cache.
-    ///
-    /// The automatic interval is deliberately slow, so the one thing the user
-    /// must always be able to do is ask for an answer about the pane in front of
-    /// them without waiting for it.
-    pub fn refresh_focused_pane_summary(&mut self) {
-        let Some(index) = self.focused_pane() else {
-            self.status = "focus a pane to refresh its AI summary".into();
-            return;
-        };
         self.refresh_activity_summary(index);
     }
 
@@ -8561,6 +10147,12 @@ impl App {
         if first < self.pane_idle.len() && second < self.pane_idle.len() {
             self.pane_idle.swap(first, second);
         }
+        if self.on_parked_tab()
+            && first < self.parked_origins.len()
+            && second < self.parked_origins.len()
+        {
+            self.parked_origins.swap(first, second);
+        }
         if let Some(selection) = self.text_selection {
             self.text_selection = Some(MouseSelection {
                 pane: swapped_index(selection.pane, first, second),
@@ -8599,6 +10191,11 @@ impl App {
 
         if first >= self.tabs.len() || second >= self.tabs.len() {
             self.status = "select two available grids to swap".into();
+            return;
+        }
+        let pinned_from = self.first_pinned_tab_index();
+        if first >= pinned_from || second >= pinned_from {
+            self.status = "the Keeper and Parked tabs stay where they are".into();
             return;
         }
 
@@ -8948,6 +10545,26 @@ impl App {
             return Ok(false);
         }
 
+        if self.mouse_enabled && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if self
+                .park_toast_rect
+                .is_some_and(|rect| rect_contains(rect, mouse.column, mouse.row))
+            {
+                self.view_park_toast();
+                return Ok(true);
+            }
+            if let Some(index) = self.shelf_rows.iter().find_map(|(index, rect)| {
+                rect_contains(*rect, mouse.column, mouse.row).then_some(*index)
+            }) {
+                self.command_line.focused = false;
+                self.focus = index.min(self.panes.len().saturating_sub(1));
+                return Ok(true);
+            }
+            if self.on_keeper_tab() && self.click_keeper_row(mouse.column, mouse.row) {
+                return Ok(true);
+            }
+        }
+
         if self.mouse_enabled
             && matches!(
                 mouse.kind,
@@ -8967,58 +10584,6 @@ impl App {
             let changed = index != self.active_tab;
             self.switch_to_tab(index);
             return Ok(changed);
-        }
-
-        if self.mouse_enabled
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && self.ports_button_at(mouse.column, mouse.row)
-        {
-            if self.port_inspector.open {
-                self.close_port_inspector();
-            } else {
-                self.open_port_inspector();
-            }
-            return Ok(true);
-        }
-
-        if self.mouse_enabled
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && self.background_jobs_button_at(mouse.column, mouse.row)
-        {
-            if self.background_picker.open {
-                self.close_background_jobs();
-            } else {
-                self.open_background_jobs();
-            }
-            return Ok(true);
-        }
-
-        if self.mouse_enabled
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && self.summary_refresh_button_at(mouse.column, mouse.row)
-        {
-            self.refresh_focused_pane_summary();
-            return Ok(true);
-        }
-
-        if self.mouse_enabled
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && self.previous_panes_button_at(mouse.column, mouse.row)
-        {
-            if self.previous_panes.open {
-                self.close_previous_panes();
-            } else {
-                self.open_previous_panes();
-            }
-            return Ok(true);
-        }
-
-        if self.mouse_enabled
-            && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && self.pane_settings_button_at(mouse.column, mouse.row)
-        {
-            self.toggle_pane_settings();
-            return Ok(true);
         }
 
         if self.background_picker.open {
@@ -9257,16 +10822,6 @@ impl App {
         false
     }
 
-    fn previous_panes_button_at(&self, x: u16, y: u16) -> bool {
-        self.previous_panes_button
-            .is_some_and(|rect| rect_contains(rect, x, y))
-    }
-
-    fn summary_refresh_button_at(&self, x: u16, y: u16) -> bool {
-        self.summary_refresh_button
-            .is_some_and(|rect| rect_contains(rect, x, y))
-    }
-
     fn tab_at(&self, x: u16, y: u16) -> Option<usize> {
         self.tab_rects
             .iter()
@@ -9277,11 +10832,6 @@ impl App {
         self.previous_pane_rows
             .iter()
             .find_map(|(index, rect)| rect_contains(*rect, x, y).then_some(*index))
-    }
-
-    fn pane_settings_button_at(&self, x: u16, y: u16) -> bool {
-        self.pane_settings_button
-            .is_some_and(|rect| rect_contains(rect, x, y))
     }
 
     fn pane_settings_reload_button_at(&self, x: u16, y: u16) -> bool {
@@ -9441,6 +10991,10 @@ impl App {
     }
 
     fn apply_grid_resize(&mut self, next: GridSize) -> Result<()> {
+        if self.on_pinned_tab() {
+            self.status = format!("the {} tab sizes itself", self.tab_title);
+            return Ok(());
+        }
         let current = self.layout.size();
         if next == current && self.panes.len() == next.count() {
             self.status = format!("grid remains {}x{}", next.rows, next.columns);
@@ -9488,8 +11042,11 @@ impl App {
                         .and_then(|old_index| plan.panes.get(old_index))
                         .cloned()
                         .unwrap_or_else(|| templates[new_index % templates.len()].clone());
-                    if old_index.is_none() && self.config.auth.auto_cycle {
-                        clear_spec_auth(&mut spec);
+                    if old_index.is_none() {
+                        spec.command = without_conversation(&spec.command);
+                        if self.config.auth.auto_cycle {
+                            clear_spec_auth(&mut spec);
+                        }
                     }
                     spec
                 })
@@ -9605,9 +11162,37 @@ impl App {
         Ok(())
     }
 
+    fn close_panes_on_second_press(&mut self) {
+        let mut targets = background_target_indices(self.focus, &self.selected, self.panes.len());
+        if targets.is_empty() {
+            self.status = "no pane to close".into();
+            return;
+        }
+        let armed = self.close_panes_armed.take();
+        if armed.is_none_or(|(at, armed)| at.elapsed() > CLOSE_PANES_WINDOW || armed != targets) {
+            let label = match targets.as_slice() {
+                [index] => self.pane_names.get(*index).cloned().flatten().map_or_else(
+                    || format!("pane {}", index + 1),
+                    |name| format!("pane {} ({name})", index + 1),
+                ),
+                many => format!("{} panes", many.len()),
+            };
+            self.status = format!(
+                "{} again to close {label}",
+                self.keybindings.label_for(Action::ClosePane)
+            );
+            self.close_panes_armed = Some((Instant::now(), targets));
+            return;
+        }
+        targets.sort_unstable_by(|a, b| b.cmp(a));
+        for index in targets {
+            self.deactivate_pane(index);
+        }
+    }
+
     fn deactivate_pane(&mut self, pane_index: usize) {
         let before = self.panes.len();
-        if before <= 1 {
+        if before <= 1 && !self.on_parked_tab() {
             self.status = "the only pane cannot be deactivated".into();
             return;
         }
@@ -9624,7 +11209,11 @@ impl App {
 
         let current = self.layout.size();
         let remaining = before - 1;
-        let next = current.compact_for_count(remaining);
+        let next = if self.on_parked_tab() {
+            GridSize::from_count(remaining)
+        } else {
+            current.compact_for_count(remaining)
+        };
         let old_to_new = pane_index_map_after_removal(before, pane_index);
         let removed_pane = self.panes.remove(pane_index);
         let removed_id = removed_pane.id();
@@ -9634,6 +11223,9 @@ impl App {
         }
         if pane_index < self.pane_names.len() {
             self.pane_names.remove(pane_index);
+        }
+        if self.on_parked_tab() && pane_index < self.parked_origins.len() {
+            self.parked_origins.remove(pane_index);
         }
         self.focus = focused_index_after_removal(self.focus, pane_index, remaining);
         self.selected = remap_index_set(&self.selected, &old_to_new);
@@ -9656,7 +11248,7 @@ impl App {
         self.previous_panes.cursor = old_to_new
             .get(&self.previous_panes.cursor)
             .copied()
-            .unwrap_or_else(|| pane_index.min(remaining - 1));
+            .unwrap_or_else(|| pane_index.min(remaining.saturating_sub(1)));
         self.pane_settings.close();
         self.rects.clear();
         self.layout.set_size(next);
@@ -10447,10 +12039,15 @@ impl App {
             return;
         }
 
+        let columns = if self.on_parked_tab() {
+            1
+        } else {
+            self.layout.size().columns
+        };
         if let Some(candidate) = wrapped_column_focus_target(
             self.focus,
             self.panes.len(),
-            self.layout.size().columns,
+            columns,
             row_delta,
             &self.sleeping,
         ) {
@@ -10477,15 +12074,16 @@ impl App {
     }
 
     pub fn pane_rects(&self, area: Rect) -> Vec<Rect> {
-        if self.zoomed {
+        if self.on_parked_tab() && !self.panes.is_empty() {
+            let shelf = shelf_areas(area, self.shelf_banner().is_some());
+            zoomed_pane_rects(shelf.pane, self.panes.len(), self.focus)
+        } else if self.on_keeper_tab() {
+            zoomed_pane_rects(keeper::areas(area).pane, self.panes.len(), self.focus)
+        } else if self.zoomed {
             zoomed_pane_rects(area, self.panes.len(), self.focus)
         } else {
             self.layout.rects(area, self.panes.len())
         }
-    }
-
-    pub fn zoomed(&self) -> bool {
-        self.zoomed
     }
 
     pub fn panes(&self) -> &[PtyPane] {
@@ -10551,10 +12149,6 @@ impl App {
         &self.selected
     }
 
-    pub fn selected_grid_count(&self) -> usize {
-        self.selected_grids.len()
-    }
-
     pub fn selection_for_pane(&self, index: usize) -> Option<PaneSelection> {
         self.text_selection
             .filter(|selection| selection.pane == index)
@@ -10565,8 +12159,6 @@ impl App {
         self.sleeping.contains(&index)
     }
 
-    /// True when an agent pane has gone quiet, which is how an agent signals it
-    /// is waiting on the user.
     pub fn pane_needs_input(&self, index: usize) -> bool {
         let Some(pane) = self.panes.get(index) else {
             return false;
@@ -10578,7 +12170,7 @@ impl App {
                 .is_some_and(PaneLaunchSpec::is_agent),
             self.sleeping.contains(&index),
             pane.exited,
-            pane.output_quiet(),
+            pane.awaiting_input(),
         )
     }
 
@@ -10587,10 +12179,6 @@ impl App {
             self.output_logs
                 .is_active(PaneLogKey::new(pane.id(), pane.generation()))
         })
-    }
-
-    pub fn status(&self) -> &str {
-        &self.status
     }
 
     /// Seeds the status bar before the first frame, for things the launcher
@@ -10621,14 +12209,6 @@ impl App {
 
     pub fn settings_open(&self) -> bool {
         self.settings.open
-    }
-
-    pub fn pane_settings_open(&self) -> bool {
-        self.pane_settings.open
-    }
-
-    pub fn previous_panes_open(&self) -> bool {
-        self.previous_panes.open
     }
 
     pub fn image_overlay_view(&self) -> Option<&ImagePreview> {
@@ -10744,17 +12324,138 @@ impl App {
         self.keybindings.help_entries()
     }
 
+    /// The chords the tab strip advertises, named the way this terminal can
+    /// actually be pressed.
+    /// Every agent pane waiting on the user, as `(tab, pane)` in tab order.
+    /// Parked panes are left out: they are parked because they are silent.
+    fn panes_needing_you(&self) -> Vec<(usize, usize)> {
+        let parked = self.parked_tab_index();
+        let keeper = self.keeper_tab_index();
+        (0..self.tabs.len())
+            .filter(|tab| *tab != parked && Some(*tab) != keeper)
+            .flat_map(|tab| {
+                let waiting = if tab == self.active_tab {
+                    waiting_agent_indices(&self.panes, &self.sleeping, self.launch_plan.as_ref())
+                } else {
+                    self.tabs
+                        .get(tab)
+                        .and_then(Option::as_ref)
+                        .map(|snapshot| {
+                            waiting_agent_indices(
+                                &snapshot.panes,
+                                &snapshot.sleeping,
+                                snapshot.launch_plan.as_ref(),
+                            )
+                        })
+                        .unwrap_or_default()
+                };
+                waiting.into_iter().map(move |pane| (tab, pane))
+            })
+            .chain(
+                self.parked_origins
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, origin)| origin.watch.as_ref().is_some_and(ParkWatch::unseen_done))
+                    .map(|(pane, _)| (parked, pane)),
+            )
+            .collect()
+    }
+
+    fn focus_next_waiting_pane(&mut self) {
+        let waiting = self.panes_needing_you();
+        let here = (self.active_tab, self.focus);
+        let Some(&(tab, pane)) = waiting
+            .iter()
+            .find(|place| **place > here)
+            .or_else(|| waiting.first())
+        else {
+            self.status = "no pane needs you".to_string();
+            return;
+        };
+        self.switch_to_tab(tab);
+        self.command_line.focused = false;
+        self.focus = pane.min(self.panes.len().saturating_sub(1));
+        let name = self
+            .pane_names
+            .get(self.focus)
+            .and_then(|name| name.as_deref())
+            .filter(|name| !name.is_empty())
+            .map_or_else(|| format!("pane {}", self.focus + 1), str::to_string);
+        self.status = if self.on_parked_tab() {
+            format!("{name} is done")
+        } else {
+            format!("{name} needs you")
+        };
+    }
+
+    pub fn tab_strip_note(&self) -> Option<String> {
+        if !self.status.is_empty() {
+            return Some(self.status.clone());
+        }
+        let here = (self.active_tab, self.focus);
+        let elsewhere = self
+            .panes_needing_you()
+            .into_iter()
+            .filter(|place| *place != here)
+            .count();
+        let mut parts = Vec::new();
+        if self.voice.is_listening() {
+            parts.push("MIC".to_string());
+        }
+        if self.zoomed {
+            parts.push("ZOOM".to_string());
+        }
+        match (self.selected.len(), self.selected_grids.len()) {
+            (0, 0) => {}
+            (panes, 0) => parts.push(format!("{panes} selected")),
+            (0, grids) => parts.push(format!("{grids} grids selected")),
+            (panes, grids) => parts.push(format!("{panes} panes, {grids} grids selected")),
+        }
+        let background = self.background_jobs.len();
+        if background > 0 {
+            parts.push(format!("{background} in background"));
+        }
+        if elsewhere > 0 {
+            parts.push(format!(
+                "{elsewhere} need you · {} next",
+                self.keybindings.label_for(Action::NextWaiting)
+            ));
+        }
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    }
+
     pub fn palette(&self) -> &GridPalette {
         &self.settings.palette
     }
 
+    pub fn empty_parked_hint(&self) -> Option<String> {
+        (self.on_parked_tab() && self.panes.is_empty()).then(|| {
+            format!(
+                "Nothing parked. Press {} on a pane in any grid to park it here.",
+                self.keybindings.label_for(Action::ParkPane)
+            )
+        })
+    }
+
     pub fn pane_label(&self, index: usize) -> String {
-        self.pane_names
+        let name = self
+            .pane_names
             .get(index)
             .and_then(|name| name.as_deref())
             .filter(|name| !name.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| (index + 1).to_string())
+            .map(str::to_string);
+        let origin = self
+            .on_parked_tab()
+            .then(|| self.parked_origins.get(index))
+            .flatten();
+        let Some(origin) = origin else {
+            return name.unwrap_or_else(|| (index + 1).to_string());
+        };
+        let name = name.unwrap_or_else(|| format!("pane {}", origin.slot + 1));
+        match self.parked_source_title(origin) {
+            "" => name,
+            grid => format!("{name} ({grid})"),
+        }
     }
 
     pub fn rename_pane_view(&self) -> Option<RenamePaneView> {
@@ -10779,16 +12480,18 @@ impl App {
             .map(|index| {
                 if index == self.active_tab {
                     return TabLabel {
-                        title: self.tab_title.clone(),
+                        title: if self.on_parked_tab() {
+                            parked_tab_label(self.panes.len())
+                        } else if self.on_keeper_tab() {
+                            self.keeper_tab_label()
+                        } else {
+                            self.tab_title.clone()
+                        },
                         active: true,
                         selected: self.selected_grids.contains(&index),
-                        waiting: tab_has_waiting_agent(
-                            &self.panes,
-                            &self.sleeping,
-                            self.launch_plan.as_ref(),
-                        ),
-                        activity: self.panes.iter().any(|pane| pane.active),
                         exited: !self.panes.is_empty() && self.panes.iter().all(|pane| pane.exited),
+                        pinned: self.on_pinned_tab(),
+                        done: false,
                     };
                 }
 
@@ -10797,23 +12500,26 @@ impl App {
                         title: format!("Grid {}", index + 1),
                         active: false,
                         selected: self.selected_grids.contains(&index),
-                        waiting: false,
-                        activity: false,
                         exited: false,
+                        pinned: false,
+                        done: false,
                     };
                 };
 
                 TabLabel {
-                    title: tab.title.clone(),
+                    title: if tab.grid_id == self.parked_grid_id {
+                        parked_tab_label(tab.panes.len())
+                    } else if Some(tab.grid_id) == self.keeper_grid_id {
+                        self.keeper_tab_label()
+                    } else {
+                        tab.title.clone()
+                    },
                     active: false,
                     selected: self.selected_grids.contains(&index),
-                    waiting: tab_has_waiting_agent(
-                        &tab.panes,
-                        &tab.sleeping,
-                        tab.launch_plan.as_ref(),
-                    ),
-                    activity: tab.assistant.unread || tab.panes.iter().any(|pane| pane.active),
                     exited: !tab.panes.is_empty() && tab.panes.iter().all(|pane| pane.exited),
+                    pinned: tab.grid_id == self.parked_grid_id
+                        || Some(tab.grid_id) == self.keeper_grid_id,
+                    done: tab.grid_id == self.parked_grid_id && self.parked_has_unseen_done(),
                 }
             })
             .collect()
@@ -10915,20 +12621,10 @@ impl App {
         })
     }
 
-    fn background_jobs_button_at(&self, x: u16, y: u16) -> bool {
-        self.background_jobs_button
-            .is_some_and(|rect| rect_contains(rect, x, y))
-    }
-
     fn background_job_row_at(&self, x: u16, y: u16) -> Option<usize> {
         self.background_job_rows
             .iter()
             .find_map(|(index, rect)| rect_contains(*rect, x, y).then_some(*index))
-    }
-
-    fn ports_button_at(&self, x: u16, y: u16) -> bool {
-        self.ports_button
-            .is_some_and(|rect| rect_contains(rect, x, y))
     }
 
     fn port_row_at(&self, x: u16, y: u16) -> Option<usize> {
@@ -10958,14 +12654,6 @@ impl App {
             refreshing: self.port_inspector.refreshing,
             error: self.port_inspector.error.clone(),
         })
-    }
-
-    pub fn agent_port_count(&self) -> usize {
-        self.port_inspector.ports.len()
-    }
-
-    pub fn port_inspector_open(&self) -> bool {
-        self.port_inspector.open
     }
 
     pub fn background_jobs_view(&self) -> Option<BackgroundJobsView> {
@@ -11012,14 +12700,6 @@ impl App {
                 })
                 .collect(),
         })
-    }
-
-    pub fn background_jobs_open(&self) -> bool {
-        self.background_picker.open
-    }
-
-    pub fn background_job_count(&self) -> usize {
-        self.background_jobs.len()
     }
 
     pub fn follow_up_dialog(&self) -> Option<FollowUpDialog> {
@@ -11103,10 +12783,6 @@ impl App {
         self.command_line.running
     }
 
-    pub fn voice_listening(&self) -> bool {
-        self.voice.is_listening()
-    }
-
     pub fn input_scope_label(&self) -> &'static str {
         if self.assistant.open {
             "director chat"
@@ -11131,65 +12807,6 @@ impl App {
             .as_ref()
             .and_then(|plan| plan.panes.get(index))
             .and_then(|pane| pane.worktree_name.as_deref())
-    }
-
-    /// The status bar's centre line: which pane has the keyboard, and what the
-    /// summariser says it is doing.
-    ///
-    /// This is the one place a summary is the point rather than a garnish, so it
-    /// never falls back to a guess made from the shape of the output. When there
-    /// is no model answer it says why, because "quiet" reads as an answer and
-    /// isn't one.
-    pub fn focused_pane_summary(&self) -> FocusedPaneSummary {
-        let Some(index) = self.focused_pane() else {
-            return FocusedPaneSummary::default();
-        };
-        let Some(pane) = self.panes.get(index) else {
-            return FocusedPaneSummary::default();
-        };
-        let state = self
-            .activity_summary_states
-            .get(&pane.id())
-            .filter(|state| state.generation == pane.generation());
-
-        let suspended = self.manager_goal.is_some();
-        let detail = if let Some(goal) = self.manager_goal.as_ref() {
-            // A running goal owns the summariser, and its objective is the better
-            // answer to "what is this pane doing" anyway.
-            goal.objective.clone()
-        } else if let Some(summary) = state.and_then(|state| state.summary.as_deref()) {
-            summary.to_string()
-        } else if pane.exited {
-            "exited".into()
-        } else if self.sleeping.contains(&index) {
-            "asleep".into()
-        } else if !self.config.manager.activity_summaries {
-            "turn on AI activity summaries in Settings > Manager".into()
-        } else if !self.config.manager.is_configured() {
-            "AI activity summaries need an API key in Settings > Manager".into()
-        } else if state.is_some_and(|state| state.last_error.is_some()) {
-            "summary unavailable".into()
-        } else {
-            "summarizing…".into()
-        };
-
-        let refreshable = !suspended
-            && self.config.manager.activity_summaries
-            && self.config.manager.is_configured()
-            && !pane.exited
-            && !self.sleeping.contains(&index);
-
-        FocusedPaneSummary {
-            title: format!("{} {}", index + 1, self.pane_label(index)),
-            detail,
-            // The countdown only means anything while the cache it belongs to is
-            // the thing on screen.
-            refresh_in: refreshable
-                .then(|| activity_summary_refresh_in(state, Instant::now()))
-                .flatten(),
-            refreshing: state.is_some_and(|state| state.in_flight),
-            refreshable,
-        }
     }
 
     pub fn pane_header_summary(&self, index: usize, max_chars: usize) -> String {
@@ -11284,7 +12901,11 @@ impl App {
     pub fn pane_usage_label(&self, index: usize) -> Option<String> {
         let mut parts = Vec::new();
 
-        if let Some(usage_key) = self
+        if let Some(account) = self.pane_account(index) {
+            if self.claude_accounts().nth(1).is_some() {
+                parts.push(account.name.clone());
+            }
+        } else if let Some(usage_key) = self
             .launch_plan
             .as_ref()
             .and_then(|plan| plan.panes.get(index))
@@ -11304,6 +12925,137 @@ impl App {
         }
 
         (!parts.is_empty()).then(|| parts.join(" | "))
+    }
+
+    fn claude_accounts(&self) -> impl Iterator<Item = &AuthProfile> {
+        self.auth_profiles
+            .iter()
+            .filter(|profile| profile.kind == AgentKind::Claude)
+    }
+
+    fn pane_account(&self, index: usize) -> Option<&AuthProfile> {
+        let spec = self.launch_plan.as_ref()?.panes.get(index)?;
+        if spec.command.agent_kind != Some(AgentKind::Claude) {
+            return None;
+        }
+        match spec.auth_name.as_deref() {
+            Some(name) => self.claude_accounts().find(|profile| profile.name == name),
+            None => self.claude_accounts().find(|profile| profile.regular_login),
+        }
+    }
+
+    fn new_pane_account(&self) -> Option<&AuthProfile> {
+        match self.config.auth.defaults.get(AgentKind::Claude) {
+            Some(name) => self.claude_accounts().find(|profile| profile.name == name),
+            None => self.claude_accounts().find(|profile| profile.regular_login),
+        }
+    }
+
+    pub fn account_meters(&self) -> Vec<AccountMeterView> {
+        let current = self
+            .pane_account(self.focus)
+            .or_else(|| self.new_pane_account())
+            .map(|profile| profile.name.clone());
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX))
+            .unwrap_or_default();
+        self.claude_accounts()
+            .map(|profile| {
+                let week = profile
+                    .usage
+                    .as_ref()
+                    .and_then(|usage| usage.seven_day.as_ref());
+                AccountMeterView {
+                    name: profile.name.clone(),
+                    used_percent: week.map(|week| week.used_percent_at(now)),
+                    resets_in_secs: week
+                        .and_then(|week| week.resets_at_unix())
+                        .map(|reset| reset - now)
+                        .filter(|left| *left > 0),
+                    signed_in: profile.ready,
+                    current: current.as_deref() == Some(profile.name.as_str()),
+                }
+            })
+            .collect()
+    }
+
+    fn open_account_sheet(&mut self) {
+        if self.claude_accounts().next().is_none() {
+            self.status = format!(
+                "no Claude accounts yet; add one under {}",
+                self.auth_home_label()
+            );
+            return;
+        }
+        let Some(current) = self
+            .pane_account(self.focus)
+            .map(|profile| profile.name.clone())
+        else {
+            self.status = "the focused pane is not a Claude pane".into();
+            return;
+        };
+        let cursor = self
+            .claude_accounts()
+            .position(|profile| profile.name == current)
+            .unwrap_or(0);
+        self.account_sheet = Some(AccountSheet {
+            pane_index: self.focus,
+            cursor,
+        });
+    }
+
+    pub fn account_sheet_view(&self) -> Option<AccountSheetView> {
+        let sheet = self.account_sheet.as_ref()?;
+        Some(AccountSheetView {
+            pane_index: sheet.pane_index,
+            cursor: sheet.cursor,
+            accounts: self.account_meters(),
+        })
+    }
+
+    fn handle_account_sheet_key(&mut self, key: KeyEvent) -> Result<KeyOutcome> {
+        let Some(sheet) = self.account_sheet.as_mut() else {
+            return Ok(KeyOutcome::Continue);
+        };
+        let count = self
+            .auth_profiles
+            .iter()
+            .filter(|profile| profile.kind == AgentKind::Claude)
+            .count();
+        let chosen = match key.code {
+            KeyCode::Esc => {
+                self.account_sheet = None;
+                return Ok(KeyOutcome::Render);
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                sheet.cursor = (sheet.cursor + count - 1) % count.max(1);
+                return Ok(KeyOutcome::Render);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                sheet.cursor = (sheet.cursor + 1) % count.max(1);
+                return Ok(KeyOutcome::Render);
+            }
+            KeyCode::Enter => sheet.cursor,
+            KeyCode::Char(digit @ '1'..='9') => digit as usize - '1' as usize,
+            _ => return Ok(KeyOutcome::Continue),
+        };
+        let pane_index = sheet.pane_index;
+        self.account_sheet = None;
+        let Some(profile) = self.claude_accounts().nth(chosen).cloned() else {
+            return Ok(KeyOutcome::Render);
+        };
+        if !profile.ready {
+            self.status = format!("{} is not signed in", profile.name);
+        } else if self
+            .pane_account(pane_index)
+            .is_some_and(|current| current.name == profile.name)
+        {
+            self.status = format!("pane {} is already on {}", pane_index + 1, profile.name);
+        } else {
+            self.apply_auth_profile_to_pane(pane_index, profile)?;
+        }
+        Ok(KeyOutcome::Render)
     }
 
     pub fn sync_pane_sizes(&mut self) {
@@ -11369,16 +13121,34 @@ impl App {
     }
 
     fn start_auth_refresh(&mut self) {
-        if self.settings.auth_refreshing {
-            self.status = "auth refresh already running".into();
+        self.spawn_auth_refresh(false);
+    }
+
+    fn schedule_account_refresh(&mut self) {
+        let now = Instant::now();
+        if now < self.next_account_refresh || self.auth_refresh_rx.is_some() {
+            return;
+        }
+        self.next_account_refresh = now + ACCOUNT_REFRESH_INTERVAL;
+        self.spawn_auth_refresh(true);
+    }
+
+    fn spawn_auth_refresh(&mut self, quiet: bool) {
+        if self.auth_refresh_rx.is_some() {
+            if !quiet {
+                self.status = "auth refresh already running".into();
+            }
             return;
         }
 
         let auth_config = self.config.auth.clone();
         let (tx, rx) = std_mpsc::channel();
         self.auth_refresh_rx = Some(rx);
-        self.settings.auth_refreshing = true;
-        self.status = "refreshing auth profiles".into();
+        self.auth_refresh_quiet = quiet;
+        if !quiet {
+            self.settings.auth_refreshing = true;
+            self.status = "refreshing auth profiles".into();
+        }
 
         thread::spawn(move || {
             let result = diagnostics::recovering("the auth profile refresh", || {
@@ -11426,9 +13196,14 @@ impl App {
                         .position(|profile| Some(profile.name.as_str()) == current_auth)
                         .unwrap_or(0);
                 }
-                self.status = format!("loaded {} auth profiles", self.auth_profiles.len());
+                if !self.auth_refresh_quiet {
+                    self.status = format!("loaded {} auth profiles", self.auth_profiles.len());
+                }
             }
-            Err(error) => self.status = format!("auth refresh failed: {error}"),
+            Err(error) if !self.auth_refresh_quiet => {
+                self.status = format!("auth refresh failed: {error}")
+            }
+            Err(_) => {}
         }
         true
     }
@@ -11598,12 +13373,58 @@ impl App {
     /// Clearing a conversation inside a pane begins a new one in the same
     /// terminal. The snapshot has to name what each pane is talking to now, not
     /// what it opened with, or resuming reopens the abandoned conversation.
-    fn refresh_agent_sessions(&mut self) {
+    fn refresh_agent_sessions(&mut self, processes: Option<&ProcessTable>) {
         if self.last_agent_session_refresh.elapsed() < AGENT_SESSION_REFRESH_INTERVAL {
             return;
         }
         self.last_agent_session_refresh = Instant::now();
 
+        let hosts = self
+            .panes
+            .iter()
+            .chain(
+                self.tabs
+                    .iter()
+                    .filter_map(Option::as_ref)
+                    .flat_map(|tab| tab.panes.iter()),
+            )
+            .chain(
+                self.background_jobs
+                    .iter()
+                    .filter_map(|job| job.pane.as_ref()),
+            )
+            .filter_map(PtyPane::host_process_id)
+            .collect::<Vec<_>>();
+        if let Some(running) =
+            processes.and_then(|processes| live_claude_sessions(processes, &hosts))
+        {
+            let panes = self
+                .panes
+                .iter_mut()
+                .chain(
+                    self.tabs
+                        .iter_mut()
+                        .filter_map(Option::as_mut)
+                        .flat_map(|tab| tab.panes.iter_mut()),
+                )
+                .chain(
+                    self.background_jobs
+                        .iter_mut()
+                        .filter_map(|job| job.pane.as_mut()),
+                );
+            for pane in panes {
+                if let Some(session_id) = pane
+                    .host_process_id()
+                    .and_then(|host| running.by_host.get(&host))
+                {
+                    pane.set_agent_session_id(Some(session_id.clone()));
+                }
+            }
+            return;
+        }
+
+        // This Claude Code does not say which conversation a process has open,
+        // so the newest transcript in the pane's folder is the best guess.
         // Conversations already spoken for, so two panes in one folder cannot end
         // up following the same one.
         let mut followed = self
@@ -11639,81 +13460,255 @@ impl App {
     }
 
     fn save_session_snapshot(&mut self) -> Result<()> {
-        self.refresh_agent_sessions();
-        let Some(plan) = self.launch_plan.clone() else {
+        let processes = ProcessTable::capture().ok();
+        self.save_session_with(processes.as_ref(), SaveMode::Now)
+    }
+
+    fn save_session_with(
+        &mut self,
+        processes: Option<&ProcessTable>,
+        mode: SaveMode,
+    ) -> Result<()> {
+        self.refresh_agent_sessions(processes);
+        if self.session_recorder.is_none() {
             return Ok(());
+        }
+        let on_parked = self.on_parked_tab();
+        let on_pinned = self.on_pinned_tab();
+        // A resume reopens on the saved active grid, and a pinned tab is not
+        // one, so while it is on screen the grid the user came from stands in.
+        let saved_active = if on_pinned {
+            let pinned_from = self.first_pinned_tab_index();
+            self.tab_index_of_grid(self.last_grid_id)
+                .filter(|index| *index < pinned_from)
+                .unwrap_or(0)
+        } else {
+            self.active_tab
         };
         let mut tabs = Vec::new();
+        let mut parked = None;
         // Counted rather than taken from `active_tab` directly: grids that hold
         // no live state are skipped here, and the active grid has to land back
         // among the ones that are written.
         let mut active_tab = 0;
         for (index, tab) in self.tabs.iter().enumerate() {
-            if index == self.active_tab {
+            if index == saved_active {
                 active_tab = tabs.len();
                 continue;
             }
             let Some(tab) = tab.as_ref() else {
                 continue;
             };
-            let Some(plan) = tab.launch_plan.as_ref() else {
+            if Some(tab.grid_id) == self.keeper_grid_id {
+                continue;
+            }
+            let Some(grid) = tab.live_grid(processes) else {
                 continue;
             };
-            tabs.push(SavedTab::from_live(&LiveGrid {
-                title: &tab.title,
-                plan,
-                panes: &tab.panes,
-                pane_names: &tab.pane_names,
-                sleeping: &tab.sleeping,
-                view: SavedView {
-                    focus: tab.focus,
-                    zoomed: tab.zoomed,
-                    row_weights: tab.layout.row_weights().to_vec(),
-                    column_weights: tab.layout.column_weights().to_vec(),
-                },
-            }));
+            if tab.grid_id == self.parked_grid_id {
+                parked = self.saved_parked_tab(&grid);
+            } else {
+                tabs.push(SavedTab::from_live(&grid));
+            }
         }
-        let Some(recorder) = self.session_recorder.as_mut() else {
-            return Ok(());
-        };
 
+        let live_active = LiveGrid {
+            title: &self.tab_title,
+            plan: match self.launch_plan.as_ref() {
+                Some(plan) => plan,
+                None => return Ok(()),
+            },
+            panes: &self.panes,
+            pane_names: &self.pane_names,
+            sleeping: &self.sleeping,
+            view: SavedView {
+                focus: self.focus,
+                zoomed: self.zoomed,
+                row_weights: self.layout.row_weights().to_vec(),
+                column_weights: self.layout.column_weights().to_vec(),
+            },
+            processes,
+        };
+        let active = if on_pinned {
+            if on_parked {
+                parked = self.saved_parked_tab(&live_active);
+            }
+            let Some(grid) = self
+                .tabs
+                .get(saved_active)
+                .and_then(Option::as_ref)
+                .and_then(|tab| tab.live_grid(processes))
+            else {
+                return Ok(());
+            };
+            grid
+        } else {
+            live_active
+        };
+        tabs.extend(parked);
         let background_panes = self
             .background_jobs
             .iter()
             .map(BackgroundJob::saved)
             .collect();
+        let Some(recorder) = self.session_recorder.as_mut() else {
+            return Ok(());
+        };
         recorder.update(LiveWorkspace {
-            active: LiveGrid {
-                title: &self.tab_title,
-                plan: &plan,
-                panes: &self.panes,
-                pane_names: &self.pane_names,
-                sleeping: &self.sleeping,
-                view: SavedView {
-                    focus: self.focus,
-                    zoomed: self.zoomed,
-                    row_weights: self.layout.row_weights().to_vec(),
-                    column_weights: self.layout.column_weights().to_vec(),
-                },
-            },
+            active,
             tabs,
             background_panes,
             active_tab,
             next_tab_number: self.next_tab_number,
         });
-        recorder.save()
+        recorder.save_with(mode).map(|_| ())
+    }
+
+    fn saved_parked_tab(&self, grid: &LiveGrid<'_>) -> Option<SavedTab> {
+        if grid.panes.is_empty() {
+            return None;
+        }
+        let mut saved = SavedTab::from_live(grid);
+        saved.parked_from = (0..saved.panes.len())
+            .map(|index| {
+                let origin = self.parked_origins.get(index);
+                let watch = origin.and_then(|origin| origin.watch.as_ref());
+                SavedParkedFrom {
+                    grid: origin
+                        .map(|origin| self.parked_source_title(origin).to_string())
+                        .unwrap_or_default(),
+                    slot: origin.map_or(0, |origin| origin.slot),
+                    notify_when: watch.map(|watch| watch.condition.clone()),
+                    briefed: watch.is_some_and(|watch| watch.briefed),
+                    met: watch
+                        .and_then(|watch| watch.met.as_ref())
+                        .map(|met| SavedVerdict {
+                            reason: met.reason.clone(),
+                            at_unix: met
+                                .at
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                        }),
+                }
+            })
+            .collect();
+        Some(saved)
     }
 
     fn autosave_session_if_due(&mut self) -> bool {
+        if let Some(receiver) = &self.autosave_processes {
+            let scan = match receiver.try_recv() {
+                Ok(scan) => scan,
+                Err(std_mpsc::TryRecvError::Empty) => return false,
+                Err(std_mpsc::TryRecvError::Disconnected) => ProcessScan::default(),
+            };
+            self.autosave_processes = None;
+            let live: HashSet<u32> = scan.folders.iter().map(|(host, ..)| *host).collect();
+            self.pane_folders.retain(|host, _| live.contains(host));
+            self.observe_pane_folders(scan.folders);
+            self.remember_grid_folders();
+            if let Err(error) =
+                self.save_session_with(scan.processes.as_ref(), SaveMode::Background)
+            {
+                self.status = format!("session autosave failed: {error:#}");
+                return true;
+            }
+            return false;
+        }
         if self.last_session_autosave.elapsed() < SESSION_AUTOSAVE_INTERVAL {
             return false;
         }
         self.last_session_autosave = Instant::now();
-        if let Err(error) = self.save_session_snapshot() {
-            self.status = format!("session autosave failed: {error:#}");
-            return true;
-        }
+        let targets = self.pane_folder_targets(true);
+        let (sender, receiver) = std_mpsc::channel();
+        thread::spawn(move || {
+            let processes = ProcessTable::capture().ok();
+            let folders = processes
+                .as_ref()
+                .map(|table| read_pane_folders(table, &targets))
+                .unwrap_or_default();
+            let _ = sender.send(ProcessScan { processes, folders });
+        });
+        self.autosave_processes = Some(receiver);
         false
+    }
+
+    /// Each pane's host process and the folder it was started in, for the
+    /// current grid or for every grid.
+    fn pane_folder_targets(&self, every_grid: bool) -> Vec<(u32, PathBuf)> {
+        let other_grids = self
+            .tabs
+            .iter()
+            .filter(|_| every_grid)
+            .filter_map(Option::as_ref)
+            .flat_map(|tab| tab.panes.iter());
+        self.panes
+            .iter()
+            .chain(other_grids)
+            .filter_map(|pane| Some((pane.host_process_id()?, pane.cwd().to_path_buf())))
+            .collect()
+    }
+
+    fn observe_pane_folders(&mut self, folders: Vec<(u32, PathBuf, PathBuf)>) {
+        let now = Instant::now();
+        for (host, path, started_in) in folders {
+            let moved_at = match self.pane_folders.get(&host) {
+                Some(previous) if previous.path == path => previous.moved_at,
+                Some(_) => Some(now),
+                None => (path != started_in).then_some(now),
+            };
+            self.pane_folders
+                .insert(host, PaneFolder { path, moved_at });
+        }
+    }
+
+    /// Where a new grid should start: the folder a pane on this grid most
+    /// recently moved to, else the focused pane's current folder.
+    fn new_grid_folder(&mut self) -> Option<PathBuf> {
+        let targets = self.pane_folder_targets(false);
+        if let Ok(table) = ProcessTable::capture() {
+            self.observe_pane_folders(read_pane_folders(&table, &targets));
+        }
+        self.latest_moved_folder(&self.panes)
+            .or_else(|| {
+                let focused = self.panes.get(self.focus)?;
+                self.pane_folders.get(&focused.host_process_id()?)
+            })
+            .map(|folder| folder.path.clone())
+    }
+
+    fn latest_moved_folder(&self, panes: &[PtyPane]) -> Option<&PaneFolder> {
+        panes
+            .iter()
+            .filter_map(|pane| self.pane_folders.get(&pane.host_process_id()?))
+            .filter(|folder| folder.moved_at.is_some())
+            .max_by_key(|folder| folder.moved_at)
+    }
+
+    fn remember_grid_folders(&self) {
+        let grids = std::iter::once((self.tab_title.as_str(), self.panes.as_slice())).chain(
+            self.tabs
+                .iter()
+                .flatten()
+                .map(|tab| (tab.title.as_str(), tab.panes.as_slice())),
+        );
+        let moved: Vec<(&str, &Path)> = grids
+            .filter_map(|(title, panes)| {
+                Some((title, self.latest_moved_folder(panes)?.path.as_path()))
+            })
+            .collect();
+        if moved.is_empty() {
+            return;
+        }
+        let mut presets = GridPresets::load();
+        let mut changed = false;
+        for (title, path) in moved {
+            changed |= presets.relocate(title, path);
+        }
+        if changed {
+            presets.save();
+        }
     }
 
     /// Persist a change to the workspace's shape right away.
@@ -11759,6 +13754,13 @@ impl Drop for App {
             let _ = self.save_session_snapshot();
         }
     }
+}
+
+/// What fills a cell whose pane was parked. A shell in the same folder cannot
+/// reopen the parked agent's conversation, which a copy of its command would.
+fn fresh_slot_spec(config: &Config, spec: &PaneLaunchSpec) -> Result<PaneLaunchSpec> {
+    Ok(agent_shell_fallback_spec(config, spec, &spec.cwd)?
+        .map_or_else(|| spec.clone(), |(shell, _, _)| shell))
 }
 
 fn agent_shell_fallback_spec(
@@ -12024,25 +14026,30 @@ fn pane_awareness_state(
     }
 }
 
-fn tab_has_waiting_agent(
+/// Limited to known agent launch specs so ordinary idle shells do not count as
+/// waiting.
+fn waiting_agent_indices(
     panes: &[PtyPane],
     sleeping: &BTreeSet<usize>,
     launch_plan: Option<&LaunchPlan>,
-) -> bool {
-    // Quiet output is the local attention signal; limiting it to known agent
-    // launch specs keeps ordinary idle shells from lighting up their tabs.
+) -> Vec<usize> {
     let Some(plan) = launch_plan else {
-        return false;
+        return Vec::new();
     };
 
-    panes.iter().enumerate().any(|(index, pane)| {
-        pane_needs_user_input(
-            plan.panes.get(index).is_some_and(PaneLaunchSpec::is_agent),
-            sleeping.contains(&index),
-            pane.exited,
-            pane.output_quiet(),
-        )
-    })
+    panes
+        .iter()
+        .enumerate()
+        .filter(|(index, pane)| {
+            pane_needs_user_input(
+                plan.panes.get(*index).is_some_and(PaneLaunchSpec::is_agent),
+                sleeping.contains(index),
+                pane.exited,
+                pane.awaiting_input(),
+            )
+        })
+        .map(|(index, _)| index)
+        .collect()
 }
 
 /// Whether a starting pane is up: its agent has printed something and gone
@@ -12068,8 +14075,25 @@ fn warmup_workload(
     }
 }
 
-fn pane_needs_user_input(is_agent: bool, sleeping: bool, exited: bool, output_quiet: bool) -> bool {
-    is_agent && !sleeping && !exited && output_quiet
+/// Whether a launch puts an agent back into a conversation that already
+/// exists, as a resumed Claude or Codex pane is.
+fn reopens_conversation(command: &Path, args: &[String]) -> bool {
+    match command.file_stem().and_then(|name| name.to_str()) {
+        Some("claude") => args
+            .iter()
+            .any(|argument| matches!(argument.as_str(), "--resume" | "-r" | "--continue" | "-c")),
+        Some("codex") => args.first().is_some_and(|argument| argument == "resume"),
+        _ => false,
+    }
+}
+
+fn pane_needs_user_input(
+    is_agent: bool,
+    sleeping: bool,
+    exited: bool,
+    awaiting_input: bool,
+) -> bool {
+    is_agent && !sleeping && !exited && awaiting_input
 }
 
 fn bounded_tail_chars(value: &str, max_chars: usize) -> (String, bool) {
@@ -12419,16 +14443,6 @@ fn activity_summary_retry_delay(failure_count: u8) -> Duration {
         .saturating_mul(1_u64 << exponent)
         .min(ACTIVITY_SUMMARY_MAX_RETRY_DELAY.as_secs());
     Duration::from_secs(seconds)
-}
-
-/// How long the pane's cached summary has left before the summariser may spend
-/// another request on it. `None` means the cache is already stale.
-fn activity_summary_refresh_in(
-    state: Option<&ActivitySummaryState>,
-    now: Instant,
-) -> Option<Duration> {
-    let last_request = state?.last_request_at?;
-    ACTIVITY_SUMMARY_COOLDOWN.checked_sub(now.saturating_duration_since(last_request))
 }
 
 fn activity_summary_request_eligible(
@@ -12980,6 +14994,154 @@ fn paste_and_enter_bytes(text: &str) -> Vec<u8> {
     bytes
 }
 
+/// Whether this key is an Esc that could be standing in for a held Alt.
+fn is_bare_escape(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Key(key)
+            if key.code == KeyCode::Esc
+                && key.kind == KeyEventKind::Press
+                && key.modifiers.is_empty()
+    )
+}
+
+/// The most parameter bytes a key sequence needs after its introducer, as in
+/// the `1;10` of `ESC [ 1;10 D`.
+const META_ESCAPE_MAX_PARAMS: usize = 12;
+
+/// Rejoins an Alt shortcut that a terminal split across an Esc and a bare CSI.
+///
+/// Terminals that send Alt as a leading Esc write Alt+Left as `ESC ESC [ D`.
+/// crossterm reads a doubled Esc as the Esc key and clears its parse buffer, so
+/// the `[` and `D` that follow are no longer an escape sequence to it and
+/// arrive as two typed characters. Every Alt+arrow shortcut is lost that way,
+/// and the focused pane is handed a stray Esc — which an agent reads as an
+/// interrupt.
+///
+/// So the sequence is reassembled here from the pieces crossterm hands over.
+/// Anything that does not resolve to a key is replayed exactly as it arrived,
+/// which keeps a real Esc followed by typing intact. Windows consoles report
+/// Alt as a modifier and never need this.
+fn fold_meta_escape(first: Event) -> Result<Vec<Event>> {
+    if cfg!(windows) || !is_bare_escape(&first) {
+        return Ok(vec![first]);
+    }
+
+    let mut consumed = vec![first];
+    let Some(introducer @ ('[' | 'O')) = read_meta_escape_char(&mut consumed)? else {
+        return Ok(consumed);
+    };
+
+    let mut params = String::new();
+    loop {
+        let Some(byte) = read_meta_escape_char(&mut consumed)? else {
+            return Ok(consumed);
+        };
+        if byte.is_ascii_digit() || byte == ';' {
+            if params.len() >= META_ESCAPE_MAX_PARAMS {
+                return Ok(consumed);
+            }
+            params.push(byte);
+            continue;
+        }
+        return Ok(match meta_escape_key(introducer, byte, &params) {
+            Some(key) => {
+                input_trace::record(format_args!(
+                    "meta escape folded into {:?} {:?}",
+                    key.modifiers, key.code
+                ));
+                vec![Event::Key(key)]
+            }
+            None => {
+                input_trace::record(format_args!(
+                    "meta escape replayed {} events unfolded",
+                    consumed.len()
+                ));
+                consumed
+            }
+        });
+    }
+}
+
+/// Reads the next character of a split escape sequence.
+///
+/// Every event it takes is recorded so an unrecognized sequence can be replayed
+/// in the order it arrived rather than being swallowed.
+fn read_meta_escape_char(consumed: &mut Vec<Event>) -> Result<Option<char>> {
+    if !event::poll(META_ESCAPE_GAP)? {
+        return Ok(None);
+    }
+
+    let event = event::read()?;
+    // Shift rides along with every uppercase character crossterm reports, so
+    // only Ctrl and Alt rule a character out as sequence text.
+    let byte = match &event {
+        Event::Key(key)
+            if key.kind == KeyEventKind::Press
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            match key.code {
+                KeyCode::Char(byte) if byte.is_ascii() => Some(byte),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    consumed.push(event);
+    Ok(byte)
+}
+
+/// Rebuilds the key a CSI or SS3 sequence encodes, with Alt held.
+pub fn meta_escape_key(introducer: char, final_byte: char, params: &str) -> Option<KeyEvent> {
+    let mut fields = params.split(';');
+    let first = fields.next().unwrap_or_default();
+    let encoded_modifiers = fields.next().and_then(|field| field.parse::<u8>().ok());
+
+    let code = match final_byte {
+        'A' => KeyCode::Up,
+        'B' => KeyCode::Down,
+        'C' => KeyCode::Right,
+        'D' => KeyCode::Left,
+        'H' => KeyCode::Home,
+        'F' => KeyCode::End,
+        // `CSI P` and `CSI R` are an editing control and a cursor report, so
+        // F1-F4 are only read from the keypad's own introducer.
+        byte @ 'P'..='S' if introducer == 'O' => KeyCode::F(1 + byte as u8 - b'P'),
+        '~' => match first.parse::<u8>().ok()? {
+            1 | 7 => KeyCode::Home,
+            2 => KeyCode::Insert,
+            3 => KeyCode::Delete,
+            4 | 8 => KeyCode::End,
+            5 => KeyCode::PageUp,
+            6 => KeyCode::PageDown,
+            number @ 11..=15 => KeyCode::F(number - 10),
+            number @ 17..=21 => KeyCode::F(number - 11),
+            number @ 23..=26 => KeyCode::F(number - 12),
+            _ => return None,
+        },
+        _ => return None,
+    };
+
+    // The doubled Esc is the Alt the terminal could not report as a modifier;
+    // any modifier the sequence carries itself is added on top of it.
+    let mut modifiers = KeyModifiers::ALT;
+    if let Some(encoded) = encoded_modifiers.and_then(|encoded| encoded.checked_sub(1)) {
+        if encoded & 0b001 != 0 {
+            modifiers |= KeyModifiers::SHIFT;
+        }
+        if encoded & 0b010 != 0 {
+            modifiers |= KeyModifiers::ALT;
+        }
+        if encoded & 0b100 != 0 {
+            modifiers |= KeyModifiers::CONTROL;
+        }
+    }
+
+    Some(KeyEvent::new(code, modifiers))
+}
+
 fn paste_burst_char(event: &Event) -> Option<char> {
     let Event::Key(key) = event else {
         return None;
@@ -13406,6 +15568,13 @@ fn swapped_index(index: usize, first: usize, second: usize) -> usize {
         first
     } else {
         index
+    }
+}
+
+fn parked_tab_label(count: usize) -> String {
+    match count {
+        0 => PARKED_TAB_TITLE.to_string(),
+        count => format!("{PARKED_TAB_TITLE} ({count})"),
     }
 }
 
@@ -14039,6 +16208,98 @@ mod tests {
     use crate::profiles::Profile;
     use vt100::Parser;
 
+    /// A terminal that cannot report Alt sends it as a leading Esc, so
+    /// Alt+Left arrives as `ESC ESC [ D`. crossterm reads the doubled Esc as
+    /// the Esc key and hands the rest over as typed characters, and these are
+    /// the pieces that have to add back up to one Alt keypress.
+    #[test]
+    fn meta_escape_sequences_rebuild_alt_shortcuts() {
+        for (introducer, final_byte, code) in [
+            ('[', 'A', KeyCode::Up),
+            ('[', 'B', KeyCode::Down),
+            ('[', 'C', KeyCode::Right),
+            ('[', 'D', KeyCode::Left),
+            ('[', 'H', KeyCode::Home),
+            ('[', 'F', KeyCode::End),
+            ('O', 'C', KeyCode::Right),
+        ] {
+            assert_eq!(
+                meta_escape_key(introducer, final_byte, ""),
+                Some(KeyEvent::new(code, KeyModifiers::ALT)),
+                "{introducer}{final_byte}"
+            );
+        }
+
+        for (parameter, code) in [
+            ("3", KeyCode::Delete),
+            ("5", KeyCode::PageUp),
+            ("6", KeyCode::PageDown),
+            ("15", KeyCode::F(5)),
+        ] {
+            assert_eq!(
+                meta_escape_key('[', '~', parameter),
+                Some(KeyEvent::new(code, KeyModifiers::ALT)),
+                "{parameter}~"
+            );
+        }
+    }
+
+    /// A modifier the sequence carries itself joins the Alt the doubled Esc
+    /// stands for, so Alt+Shift+Right still reaches its own binding.
+    #[test]
+    fn meta_escape_sequences_keep_their_own_modifiers() {
+        assert_eq!(
+            meta_escape_key('[', 'C', "1;2"),
+            Some(KeyEvent::new(
+                KeyCode::Right,
+                KeyModifiers::ALT | KeyModifiers::SHIFT
+            ))
+        );
+        assert_eq!(
+            meta_escape_key('[', 'D', "1;5"),
+            Some(KeyEvent::new(
+                KeyCode::Left,
+                KeyModifiers::ALT | KeyModifiers::CONTROL
+            ))
+        );
+    }
+
+    /// Anything that is not a key sequence has to be replayed as typed text
+    /// rather than folded, so a real Esc followed by typing survives.
+    #[test]
+    fn meta_escape_rejects_sequences_that_are_not_keys() {
+        // `CSI P` is an editing control and `CSI R` a cursor report; only the
+        // keypad introducer means F1-F4.
+        assert_eq!(meta_escape_key('[', 'P', ""), None);
+        assert_eq!(meta_escape_key('[', 'R', ""), None);
+        assert_eq!(
+            meta_escape_key('O', 'P', ""),
+            Some(KeyEvent::new(KeyCode::F(1), KeyModifiers::ALT))
+        );
+
+        assert_eq!(meta_escape_key('[', 'x', ""), None);
+        assert_eq!(meta_escape_key('[', '~', ""), None);
+        assert_eq!(meta_escape_key('[', '~', "99"), None);
+    }
+
+    /// Only an unmodified Esc press can be standing in for a held Alt.
+    #[test]
+    fn only_a_bare_escape_starts_a_fold() {
+        assert!(is_bare_escape(&Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE
+        ))));
+        assert!(!is_bare_escape(&Event::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::ALT
+        ))));
+        assert!(!is_bare_escape(&Event::Key(KeyEvent::new(
+            KeyCode::Char('['),
+            KeyModifiers::NONE
+        ))));
+        assert!(!is_bare_escape(&Event::Resize(80, 24)));
+    }
+
     struct TempHome {
         path: PathBuf,
     }
@@ -14256,14 +16517,11 @@ mod tests {
 
         // That key then resolves as though Alt had been held.
         let resolved =
-            match app.resolve_leader(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)) {
+            match app.resolve_leader(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)) {
                 LeaderOutcome::Key(key) => key,
                 LeaderOutcome::Handled(_) => panic!("the leader swallowed a bound shortcut"),
             };
-        assert_eq!(
-            app.keybindings.action_for(&resolved),
-            Some(Action::CommandLine)
-        );
+        assert_eq!(app.keybindings.action_for(&resolved), Some(Action::NewTab));
         assert!(!app.leader_pending);
 
         // Pressed twice it goes to the pane, so the leader costs it nothing.
@@ -14288,19 +16546,6 @@ mod tests {
             KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE)
         ));
         assert!(app.status.contains("not a shortcut"), "{}", app.status);
-    }
-
-    #[test]
-    fn director_uses_alt_c_and_frees_alt_d_by_default() {
-        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
-        assert_eq!(
-            bindings.action_for(&KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT)),
-            Some(Action::CommandLine)
-        );
-        assert_eq!(
-            bindings.action_for(&KeyEvent::new(KeyCode::Char('d'), KeyModifiers::ALT)),
-            None
-        );
     }
 
     #[test]
@@ -15066,21 +17311,11 @@ mod tests {
         let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
         assert_eq!(bindings.action_for(&image_paste), None);
         assert_eq!(terminal_key_bytes(image_paste), Some(b"\x1bv".to_vec()));
-
-        let voice_modifiers = KeyModifiers::ALT | KeyModifiers::SHIFT;
-        assert_eq!(
-            bindings.action_for(&KeyEvent::new(KeyCode::Char('V'), voice_modifiers)),
-            Some(Action::VoiceInput)
-        );
     }
 
     #[test]
     fn help_shortcuts_are_modeless_and_plain_h_passes_through() {
         let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
-        assert_eq!(
-            bindings.action_for(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT,)),
-            Some(Action::Help)
-        );
         assert!(is_help_recovery(&KeyEvent::new(
             KeyCode::F(1),
             KeyModifiers::NONE
@@ -15402,6 +17637,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 }
 
 fn setup_terminal(enable_mouse: bool) -> Result<Tui> {
+    input_trace::record(format_args!("terminal setup mouse_capture={enable_mouse}"));
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     if let Err(error) = execute!(
@@ -15417,7 +17653,7 @@ fn setup_terminal(enable_mouse: bool) -> Result<Tui> {
         let _ = restore_terminal_output(&mut stdout, enable_mouse);
         return Err(error).context("failed to enable terminal mouse capture");
     }
-    let backend = CrosstermBackend::new(stdout);
+    let backend = CrosstermBackend::new(BufWriter::with_capacity(FRAME_BUFFER_BYTES, stdout));
     match Terminal::new(backend) {
         Ok(terminal) => Ok(terminal),
         Err(error) => {
@@ -15487,11 +17723,45 @@ fn restore_terminal_output(output: &mut impl Write, enable_mouse: bool) -> Resul
 ///
 /// It lives in a struct rather than in locals so the loop body can be a method
 /// that `run_loop` calls behind `catch_unwind`.
+fn terminal_closed(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .is_some_and(|error| error.kind() == io::ErrorKind::UnexpectedEof)
+    })
+}
+
+#[derive(Default)]
+struct ProcessScan {
+    processes: Option<ProcessTable>,
+    folders: Vec<(u32, PathBuf, PathBuf)>,
+}
+
+struct PaneFolder {
+    path: PathBuf,
+    moved_at: Option<Instant>,
+}
+
+fn read_pane_folders(
+    table: &ProcessTable,
+    targets: &[(u32, PathBuf)],
+) -> Vec<(u32, PathBuf, PathBuf)> {
+    targets
+        .iter()
+        .filter_map(|(host, started_in)| {
+            let leader = table.children_of(*host).next()?;
+            Some((*host, ports::foreground_cwd(leader)?, started_in.clone()))
+        })
+        .collect()
+}
+
 struct LoopState {
     immediate_render: bool,
     output_render: bool,
     last_render: Instant,
     mouse_capture_enabled: bool,
+    traced_input_state: String,
+    last_input: Option<Instant>,
 }
 
 enum LoopStep {
@@ -15657,6 +17927,7 @@ mod selection_tests {
         let mut warmup = PaneWarmup {
             started: now,
             saw_output: false,
+            continue_conversation: false,
         };
 
         // Quiet before any output is the pane waiting on its agent to print, not
@@ -15671,6 +17942,7 @@ mod selection_tests {
         let capped = PaneWarmup {
             started: now - PANE_WARMUP_MAX,
             saw_output: false,
+            continue_conversation: false,
         };
         assert!(pane_finished_warmup(&capped, now, false, false));
         assert!(pane_finished_warmup(&warmup, now, false, true));
@@ -16480,22 +18752,6 @@ mod selection_tests {
             &targets,
             &after_forwarded_mouse_input
         ));
-    }
-
-    #[test]
-    fn auth_profiles_shortcut_keeps_plain_alt_a_available() {
-        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
-        assert_eq!(
-            bindings.action_for(&KeyEvent::new(
-                KeyCode::Char('A'),
-                KeyModifiers::ALT | KeyModifiers::SHIFT,
-            )),
-            Some(Action::AuthProfiles)
-        );
-        assert_eq!(
-            bindings.action_for(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)),
-            Some(Action::SelectAll)
-        );
     }
 
     #[test]

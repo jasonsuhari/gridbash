@@ -1,6 +1,5 @@
 use std::{
     env, fs,
-    io::Stdout,
     path::{Path, PathBuf},
     sync::mpsc::{self as std_mpsc, Receiver, Sender},
     thread,
@@ -10,8 +9,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
-    Frame, Terminal,
-    backend::CrosstermBackend,
+    Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -21,6 +19,7 @@ use ratatui::{
 use crate::{
     config::Config,
     diagnostics,
+    grid_presets::GridPresets,
     layout::{GridSize, MAX_PANES},
     profiles::{Profile, find_profile, is_agent_profile, is_terminal_profile, startup_profiles},
     setup::LaunchPlan,
@@ -29,7 +28,7 @@ use crate::{
     },
 };
 
-type ComposerTerminal = Terminal<CrosstermBackend<Stdout>>;
+type ComposerTerminal = crate::app::Tui;
 
 const DEFAULT_ROWS: usize = 2;
 const DEFAULT_COLUMNS: usize = 3;
@@ -110,6 +109,19 @@ pub struct Composer {
     notice: Option<Notice>,
     started: Instant,
     shape_changed: Instant,
+    /// Grids that have been launched by name before, so one can be recalled
+    /// instead of re-described.
+    presets: GridPresets,
+    /// Which remembered grid the name step has highlighted, as an index into
+    /// the currently matching subset.
+    preset_index: Option<usize>,
+    /// The text the user actually typed into the name field.
+    ///
+    /// Kept apart from the field itself because walking the list writes the
+    /// highlighted name into it. Filtering on the field would then narrow the
+    /// list to the row just landed on, and the next arrow press would have
+    /// nowhere to go.
+    preset_filter: String,
 }
 
 /// One question at a time.
@@ -120,13 +132,17 @@ pub struct Composer {
 /// grid — on moving between fields instead. Each step now owns the arrows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    Shape,
     Name,
+    Shape,
     Project,
 }
 
 impl Step {
-    pub const ALL: [Self; 3] = [Self::Shape, Self::Name, Self::Project];
+    /// The name is asked first because a name is how a grid is recalled: typing
+    /// one that has been launched before fills in the shape and the folder it
+    /// was launched with, and the remaining steps become a confirmation rather
+    /// than a re-entry.
+    pub const ALL: [Self; 3] = [Self::Name, Self::Shape, Self::Project];
 
     fn index(self) -> usize {
         Self::ALL
@@ -149,6 +165,24 @@ impl Step {
             Self::Shape => "SHAPE",
             Self::Name => "NAME",
             Self::Project => "PROJECT",
+        }
+    }
+
+    /// The number the step card wears. Derived from the order rather than
+    /// written into each card, so moving a step renumbers it.
+    fn ordinal(self) -> String {
+        format!("{:02}", self.index() + 1)
+    }
+
+    fn is_first(self) -> bool {
+        self.index() == 0
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Name => "CALL IT WHAT?",
+            Self::Shape => "HOW BIG?",
+            Self::Project => "WHERE?",
         }
     }
 }
@@ -175,9 +209,9 @@ enum NoticeLevel {
 
 /// A single-line editor: value plus a character-indexed cursor.
 #[derive(Debug, Clone, Default)]
-struct TextField {
-    value: String,
-    cursor: usize,
+pub(crate) struct TextField {
+    pub(crate) value: String,
+    pub(crate) cursor: usize,
     limit: Option<usize>,
 }
 
@@ -230,12 +264,12 @@ impl Composer {
             project: TextField::new(display_path(&base_dir), None),
             project_dir: Some(base_dir.clone()),
             project_touched: false,
-            name: TextField::new(default_name, Some(MAX_NAME_CHARS)),
+            name: TextField::new("", Some(MAX_NAME_CHARS)),
             default_name: default_name.to_string(),
             base_dir,
             rows: DEFAULT_ROWS,
             columns: DEFAULT_COLUMNS,
-            step: Step::Shape,
+            step: Step::ALL[0],
             suggestions: Suggestions::default(),
             profile_title: profile.display_name(&profile_name),
             profile_name,
@@ -249,6 +283,9 @@ impl Composer {
             notice: None,
             started: Instant::now(),
             shape_changed: Instant::now(),
+            presets: GridPresets::load(),
+            preset_index: None,
+            preset_filter: String::new(),
         };
         composer.refresh_suggestions();
         composer.request_probe(true);
@@ -302,11 +339,21 @@ impl Composer {
         // launches once there is nothing left to ask.
         if is_enter_key(key) {
             if !self.step.is_last() {
+                if self.step == Step::Name {
+                    self.recall_typed_name();
+                }
                 self.move_step(1);
                 return ComposerEvent::Continue;
             }
             return match self.build_outcome(config) {
-                Ok(outcome) => ComposerEvent::Launch(Box::new(outcome)),
+                Ok(outcome) => {
+                    // Only a launch that named something writes the store, so
+                    // an unnamed grid leaves it exactly as it was.
+                    if self.remember_grid() {
+                        self.presets.save();
+                    }
+                    ComposerEvent::Launch(Box::new(outcome))
+                }
                 Err(error) => {
                     self.notice = Some(Notice {
                         text: format!("{error:#}"),
@@ -331,6 +378,14 @@ impl Composer {
                 self.complete_project();
                 return ComposerEvent::Continue;
             }
+            // Tab completes a remembered name the same way it completes a
+            // folder. With nothing to complete it walks the wizard, so the key
+            // never stops doing something.
+            KeyCode::Tab if self.step == Step::Name && !self.matching_presets().is_empty() => {
+                self.cycle_preset(1);
+                self.apply_highlighted_preset();
+                return ComposerEvent::Continue;
+            }
             KeyCode::Tab => {
                 self.move_step(1);
                 return ComposerEvent::Continue;
@@ -344,10 +399,51 @@ impl Composer {
 
         match self.step {
             Step::Shape => self.handle_shape_key(key),
-            Step::Name => self.handle_text_key(key, ctrl, TextTarget::Name),
+            Step::Name => self.handle_name_key(key, ctrl),
             Step::Project => self.handle_text_key(key, ctrl, TextTarget::Project),
         }
         ComposerEvent::Continue
+    }
+
+    /// The name step edits text and, when there are remembered grids, walks
+    /// them with up and down.
+    fn handle_name_key(&mut self, key: KeyEvent, ctrl: bool) {
+        match key.code {
+            KeyCode::Up if !self.matching_presets().is_empty() => {
+                self.cycle_preset(-1);
+                self.apply_highlighted_preset();
+            }
+            KeyCode::Down if !self.matching_presets().is_empty() => {
+                self.cycle_preset(1);
+                self.apply_highlighted_preset();
+            }
+            _ => {
+                self.handle_text_key(key, ctrl, TextTarget::Name);
+                // Typing is what narrows the list, and it starts the walk over:
+                // a row highlighted in the old list would point at something
+                // else entirely in the new one.
+                self.preset_filter = self.name.value.clone();
+                self.preset_index = None;
+            }
+        }
+    }
+
+    /// Moves the highlight through the remembered names, wrapping at both ends.
+    fn cycle_preset(&mut self, delta: isize) {
+        let total = self.matching_presets().len();
+        if total == 0 {
+            self.preset_index = None;
+            return;
+        }
+        let next = match self.preset_index {
+            None if delta < 0 => total - 1,
+            None => 0,
+            Some(current) => {
+                let total = total as isize;
+                ((current as isize + delta) % total + total) as usize % total as usize
+            }
+        };
+        self.preset_index = Some(next);
     }
 
     /// The shape step owns all four arrows, mapped to the thing they point at:
@@ -662,6 +758,84 @@ impl Composer {
         }
     }
 
+    /// The remembered grids the typed name currently narrows to.
+    fn matching_presets(&self) -> Vec<&crate::grid_presets::GridPreset> {
+        self.presets.matching(&self.preset_filter)
+    }
+
+    /// The remembered grid the name step has highlighted, if any.
+    fn highlighted_preset(&self) -> Option<crate::grid_presets::GridPreset> {
+        let matches = self.matching_presets();
+        let index = self.preset_index?;
+        matches.get(index).map(|preset| (*preset).clone())
+    }
+
+    /// Fills the name in from the highlighted row and recalls what it meant.
+    fn apply_highlighted_preset(&mut self) {
+        let Some(preset) = self.highlighted_preset() else {
+            return;
+        };
+        self.name = TextField::new(&preset.name, Some(MAX_NAME_CHARS));
+        self.recall(&preset);
+    }
+
+    /// Recalls a name that has been launched before.
+    ///
+    /// A folder the user has already typed by hand is left alone: they said
+    /// where this grid goes after they said what it is called, so the later
+    /// answer is the one they meant.
+    fn recall(&mut self, preset: &crate::grid_presets::GridPreset) {
+        self.rows = preset.rows.clamp(1, MAX_DIMENSION);
+        self.columns = preset.columns.clamp(1, MAX_DIMENSION);
+        self.shape_changed = Instant::now();
+
+        let mut recalled = format!("{}×{}", self.rows, self.columns);
+        if !self.project_touched && preset.path.is_dir() {
+            self.project = TextField::new(display_path(&preset.path), None);
+            self.project_dir = Some(preset.path.clone());
+            self.refresh_suggestions();
+            self.request_probe(true);
+            recalled.push_str(&format!(" in {}", display_path(&preset.path)));
+        }
+
+        self.notice = Some(Notice {
+            text: format!("recalled {} — {recalled}", preset.name),
+            level: NoticeLevel::Info,
+        });
+    }
+
+    /// Recalls the typed name if it exactly names a remembered grid.
+    ///
+    /// Only an exact name counts. Recalling on a prefix would rewrite the shape
+    /// under the user while they were still typing the name they meant.
+    fn recall_typed_name(&mut self) {
+        let Some(preset) = self.presets.get(&self.name.value).cloned() else {
+            return;
+        };
+        self.recall(&preset);
+    }
+
+    /// Records what this name meant, so typing it again brings it back.
+    ///
+    /// Only a name the user typed is worth keeping. The fallback title is
+    /// generated from the tab number, and remembering `Grid 4` would fill the
+    /// list with names that mean nothing to anyone.
+    ///
+    /// Writing the store is left to the caller so that remembering stays a
+    /// change to this composer and nothing else — a test that exercises it must
+    /// not reach into the user's own data directory.
+    fn remember_grid(&mut self) -> bool {
+        let name = self.name.value.trim();
+        if name.is_empty() {
+            return false;
+        }
+        let Some(path) = self.project_dir.clone() else {
+            return false;
+        };
+        self.presets.remember(name, self.rows, self.columns, &path);
+        true
+    }
+
     fn build_outcome(&self, config: &Config) -> Result<ComposerOutcome> {
         let Some(cwd) = self.project_dir.clone() else {
             return Err(resolve_project_path(&self.project.value, &self.base_dir)
@@ -701,11 +875,7 @@ impl Composer {
         );
         let tick = self.frame_tick();
 
-        let panel = if area.width >= 90 && area.height >= 26 {
-            inset(area, 2, 1)
-        } else {
-            area
-        };
+        let panel = dialog_rect(area);
         if panel.width < 10 || panel.height < 6 {
             return;
         }
@@ -864,16 +1034,24 @@ impl Composer {
         }
 
         // One step at a time, sized to what it actually asks. The two short
-        // steps keep their box tight and let the rail sit under them instead of
-        // floating at the bottom of a mostly empty panel; the project step wants
-        // everything left over for its folder browser.
+        // steps keep their box tight; the project step wants everything left
+        // over for its folder browser.
         let rail = 2u16.min(area.height.saturating_sub(4));
         let body = area.height.saturating_sub(rail);
         let step_height = match self.step {
             Step::Shape => 5.min(body),
-            Step::Name => 4.min(body),
+            // The name card grows to fit the grids it can offer: the field, its
+            // hint, the list header, and a row each for up to six of them.
+            Step::Name => match self.matching_presets().len() {
+                0 => 4.min(body),
+                offered => (5 + offered.min(6) as u16).min(body),
+            },
             Step::Project => body,
         };
+        // The card and its rail are centred together in the column. Pinned to
+        // the top, a four-row card left the rest of a tall panel empty and the
+        // question the user is answering sat off in a corner of the screen.
+        let column = centered_rows(area, step_height.saturating_add(rail));
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -881,7 +1059,7 @@ impl Composer {
                 Constraint::Length(rail),
                 Constraint::Min(0),
             ])
-            .split(area);
+            .split(column);
 
         match self.step {
             Step::Shape => self.draw_shape(frame, chunks[0], tick),
@@ -933,7 +1111,7 @@ impl Composer {
         if area.height < 4 {
             return;
         }
-        let block = section_block("01", "HOW BIG?", true);
+        let block = section_block(&Step::Shape.ordinal(), Step::Shape.title(), true);
         let inner = inset(block.inner(area), 1, 0);
         frame.render_widget(block, area);
         if inner.width == 0 || inner.height == 0 {
@@ -962,7 +1140,7 @@ impl Composer {
         if area.height < 4 {
             return;
         }
-        let block = section_block("02", "CALL IT WHAT?", true);
+        let block = section_block(&Step::Name.ordinal(), Step::Name.title(), true);
         let inner = inset(block.inner(area), 1, 0);
         frame.render_widget(block, area);
         if inner.width == 0 || inner.height == 0 {
@@ -971,12 +1149,28 @@ impl Composer {
 
         let value_width = (inner.width as usize).saturating_sub(13).max(6);
         let hint_width = (inner.width as usize).saturating_sub(11).max(6);
+        let matches = self.matching_presets();
         let mut lines = vec![
-            text_row("NAME", &self.name, true, tick, value_width, None, DIM_GREEN),
+            text_row(
+                "NAME",
+                &self.name,
+                true,
+                tick,
+                value_width,
+                // The default only stands in while nothing has been typed, so
+                // it is shown where the value would be rather than described.
+                self.name
+                    .value
+                    .is_empty()
+                    .then_some(self.default_name.as_str()),
+                DIM_GREEN,
+            ),
             hint_row(Span::styled(
                 truncate(
                     &if self.name.value.trim().is_empty() {
                         format!("defaults to {}", self.default_name)
+                    } else if self.presets.get(&self.name.value).is_some() {
+                        "a grid you have launched before".into()
                     } else {
                         "tab name for this grid".into()
                     },
@@ -985,6 +1179,7 @@ impl Composer {
                 Style::default().fg(MUTED),
             )),
         ];
+        lines.extend(self.remembered_rows(&matches, inner));
         lines.truncate(inner.height as usize);
         frame.render_widget(
             Paragraph::new(lines).style(Style::default().bg(RAISED_BG)),
@@ -992,11 +1187,87 @@ impl Composer {
         );
     }
 
+    /// The remembered grids under the name field, so a name that already means
+    /// something can be picked rather than recalled from memory.
+    ///
+    /// Each row says what the name meant — its shape and its folder — because a
+    /// list of bare names would ask the user to remember the very thing this is
+    /// for.
+    fn remembered_rows(
+        &self,
+        matches: &[&crate::grid_presets::GridPreset],
+        inner: Rect,
+    ) -> Vec<Line<'static>> {
+        // Two rows are already spent on the field and its hint.
+        let capacity = (inner.height as usize).saturating_sub(3);
+        if matches.is_empty() || capacity == 0 {
+            return Vec::new();
+        }
+
+        let mut lines = vec![Line::from(vec![
+            Span::styled("╌╌ ", Style::default().fg(HAIRLINE)),
+            Span::styled(
+                format!(
+                    "{} REMEMBERED {} · ↑↓ PICKS",
+                    matches.len(),
+                    plural("GRID", matches.len())
+                ),
+                Style::default().fg(HAIRLINE_HI),
+            ),
+        ])];
+
+        // Keep the highlighted row on screen once the list outgrows the card.
+        let anchor = self.preset_index.unwrap_or(0);
+        let start = if matches.len() > capacity && anchor + 1 > capacity {
+            anchor + 1 - capacity
+        } else {
+            0
+        };
+        let mut room = capacity;
+        let mut hidden = matches.len().saturating_sub(start + room);
+        if hidden > 0 {
+            room = capacity.saturating_sub(1);
+            hidden = matches.len().saturating_sub(start + room);
+        }
+
+        let width = inner.width as usize;
+        for (offset, preset) in matches.iter().enumerate().skip(start).take(room) {
+            let selected = self.preset_index == Some(offset);
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(TERMINAL_GREEN)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(TEXT)
+            };
+            let shape = format!("{}×{}", preset.rows, preset.columns);
+            let where_ = display_path(&preset.path);
+            let label = format!("{}  {shape}  {where_}", preset.name);
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if selected { " ▸ " } else { "   " },
+                    Style::default().fg(TERMINAL_GREEN),
+                ),
+                Span::styled(truncate(&label, width.saturating_sub(3)), style),
+            ]));
+        }
+
+        if hidden > 0 {
+            lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(format!("+{hidden} more"), Style::default().fg(MUTED)),
+            ]));
+        }
+
+        lines
+    }
+
     fn draw_project(&self, frame: &mut Frame<'_>, area: Rect, tick: u64) {
         if area.height < 4 {
             return;
         }
-        let block = section_block("03", "WHERE?", true);
+        let block = section_block(&Step::Project.ordinal(), Step::Project.title(), true);
         let inner = inset(block.inner(area), 1, 0);
         frame.render_widget(block, area);
         if inner.width == 0 || inner.height == 0 {
@@ -1340,6 +1611,11 @@ impl Composer {
     fn hint_notice(&self) -> Notice {
         let text = match self.step {
             Step::Shape => "how many panes? arrows size the grid, Enter moves on",
+            // A name that has been launched before brings its shape and folder
+            // back, so the step is worth more than a label once there is a list.
+            Step::Name if !self.matching_presets().is_empty() => {
+                "name it, or press ↑↓ to bring back a grid you have launched before"
+            }
             Step::Name => "name this grid so its tab is easy to find, or leave it",
             Step::Project => "Tab completes folders · Enter launches",
         };
@@ -1353,11 +1629,13 @@ impl Composer {
         // Each step advertises only the keys that do something on it. The old
         // line promised UP/DOWN FIELD everywhere, which was the whole habit this
         // screen is trying to drop.
+        let remembered = !self.matching_presets().is_empty();
         let mut spans = match self.step {
             Step::Shape => vec![keycap("↑↓←→"), label("SIZE")],
+            Step::Name if remembered => vec![keycap("↑↓"), label("RECALL")],
             Step::Name | Step::Project => vec![keycap("←→"), label("CURSOR")],
         };
-        if self.step == Step::Project {
+        if self.step == Step::Project || (self.step == Step::Name && remembered) {
             spans.push(keycap("TAB"));
             spans.push(label("COMPLETE"));
         }
@@ -1367,7 +1645,7 @@ impl Composer {
         } else {
             "NEXT"
         }));
-        if self.step != Step::Shape {
+        if !self.step.is_first() {
             spans.push(keycap("SHIFT+TAB"));
             spans.push(label("BACK"));
         }
@@ -1406,7 +1684,7 @@ impl Suggestions {
 }
 
 impl TextField {
-    fn new(value: impl Into<String>, limit: Option<usize>) -> Self {
+    pub(crate) fn new(value: impl Into<String>, limit: Option<usize>) -> Self {
         let value = value.into();
         let cursor = value.chars().count();
         Self {
@@ -1428,7 +1706,7 @@ impl TextField {
             .unwrap_or(self.value.len())
     }
 
-    fn insert(&mut self, ch: char) -> bool {
+    pub(crate) fn insert(&mut self, ch: char) -> bool {
         if ch.is_control() || self.limit.is_some_and(|limit| self.len() >= limit) {
             return false;
         }
@@ -1438,7 +1716,7 @@ impl TextField {
         true
     }
 
-    fn insert_str(&mut self, text: &str) -> bool {
+    pub(crate) fn insert_str(&mut self, text: &str) -> bool {
         let mut inserted = false;
         for ch in text.chars() {
             inserted |= self.insert(ch);
@@ -1446,7 +1724,7 @@ impl TextField {
         inserted
     }
 
-    fn backspace(&mut self) -> bool {
+    pub(crate) fn backspace(&mut self) -> bool {
         if self.cursor == 0 {
             return false;
         }
@@ -1454,7 +1732,7 @@ impl TextField {
         self.remove_char_at(self.cursor)
     }
 
-    fn delete(&mut self) -> bool {
+    pub(crate) fn delete(&mut self) -> bool {
         if self.cursor >= self.len() {
             return false;
         }
@@ -1489,7 +1767,7 @@ impl TextField {
         self.value.chars().nth(self.cursor.checked_sub(1)?)
     }
 
-    fn clear(&mut self) -> bool {
+    pub(crate) fn clear(&mut self) -> bool {
         if self.value.is_empty() {
             return false;
         }
@@ -1503,15 +1781,15 @@ impl TextField {
         self.cursor = self.len();
     }
 
-    fn move_cursor(&mut self, delta: isize) {
+    pub(crate) fn move_cursor(&mut self, delta: isize) {
         self.cursor = (self.cursor as isize + delta).clamp(0, self.len() as isize) as usize;
     }
 
-    fn home(&mut self) {
+    pub(crate) fn home(&mut self) {
         self.cursor = 0;
     }
 
-    fn end(&mut self) {
+    pub(crate) fn end(&mut self) {
         self.cursor = self.len();
     }
 }
@@ -1543,7 +1821,7 @@ fn chrome_footer_title(profile: &str) -> Line<'static> {
     .alignment(Alignment::Right)
 }
 
-fn section_block(index: &'static str, label: &'static str, active: bool) -> Block<'static> {
+fn section_block(index: &str, label: &str, active: bool) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Plain)
@@ -2243,6 +2521,48 @@ fn panel_style() -> Style {
     Style::default().fg(TEXT).bg(PANEL_BG)
 }
 
+/// The widest and tallest the composer is allowed to be.
+///
+/// Past this it stops reading as a dialog and starts reading as a screen that
+/// happens to have a form in one corner: the eye has nowhere to land, and the
+/// gap between the form and the preview grows until they look like two
+/// unrelated panels.
+const DIALOG_MAX_WIDTH: u16 = 104;
+const DIALOG_MAX_HEIGHT: u16 = 34;
+/// Below this the dialog gives up its margin and uses the whole terminal, since
+/// a border costs more than it explains when there is nothing to spare.
+const DIALOG_MIN_WIDTH: u16 = 64;
+const DIALOG_MIN_HEIGHT: u16 = 18;
+
+/// Centres the composer in the terminal as a dialog.
+///
+/// It used to inset the full screen by a couple of cells, which on a large
+/// terminal is not a dialog at all — it is the whole screen with a hairline
+/// around it, and the step card ends up marooned in one corner of it.
+fn dialog_rect(area: Rect) -> Rect {
+    if area.width < DIALOG_MIN_WIDTH || area.height < DIALOG_MIN_HEIGHT {
+        return area;
+    }
+    let width = area.width.saturating_sub(4).min(DIALOG_MAX_WIDTH);
+    let height = area.height.saturating_sub(2).min(DIALOG_MAX_HEIGHT);
+    Rect {
+        x: area.x + (area.width.saturating_sub(width)) / 2,
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
+/// Centres a block of `height` rows inside `area`, keeping it whole.
+fn centered_rows(area: Rect, height: u16) -> Rect {
+    let height = height.min(area.height);
+    Rect {
+        y: area.y + (area.height.saturating_sub(height)) / 2,
+        height,
+        ..area
+    }
+}
+
 fn inset(area: Rect, x: u16, y: u16) -> Rect {
     Rect {
         x: area.x.saturating_add(x),
@@ -2625,7 +2945,7 @@ fn control_box(active: bool, value: usize) -> Span<'static> {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::backend::TestBackend;
+    use ratatui::{Terminal, backend::TestBackend};
 
     use crate::auth::AgentKind;
 
@@ -2674,9 +2994,27 @@ mod tests {
 
     /// Build a composer with a fixed profile so ambient `GRIDBASH_PROFILE` /
     /// `GRIDBASH_INVOKING_PROFILE` values cannot change what the test sees.
+    ///
+    /// The remembered grids are cleared for the same reason: they are loaded
+    /// from the user's own store, and a test that read it would pass or fail
+    /// depending on what the developer had launched that morning.
     fn composer_in(dir: PathBuf) -> Composer {
-        Composer::with_profile(dir, None, "Grid 2", TEST_PROFILE.into(), test_profile())
-            .expect("composer")
+        let mut composer =
+            Composer::with_profile(dir, None, "Grid 2", TEST_PROFILE.into(), test_profile())
+                .expect("composer");
+        composer.presets = GridPresets::default();
+        composer
+    }
+
+    /// A composer that already remembers some grids.
+    fn composer_remembering(names: &[(&str, usize, usize)]) -> Composer {
+        let mut composer = composer();
+        for (name, rows, columns) in names {
+            composer
+                .presets
+                .remember(name, *rows, *columns, &env::temp_dir());
+        }
+        composer
     }
 
     fn composer() -> Composer {
@@ -2834,10 +3172,10 @@ mod tests {
         let config = shell_config();
         let mut composer = composer();
 
-        assert_eq!(Step::ALL, [Step::Shape, Step::Name, Step::Project]);
-        assert_eq!(composer.step, Step::Shape);
+        assert_eq!(Step::ALL, [Step::Name, Step::Shape, Step::Project]);
+        assert_eq!(composer.step, Step::Name);
 
-        for expected in [Step::Name, Step::Project] {
+        for expected in [Step::Shape, Step::Project] {
             let event =
                 composer.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &config);
             assert!(
@@ -2852,27 +3190,26 @@ mod tests {
         ));
 
         // Shift+Tab walks back, and stops rather than wrapping round the end.
-        for expected in [Step::Name, Step::Shape, Step::Shape] {
+        for expected in [Step::Shape, Step::Name, Step::Name] {
             press(&mut composer, KeyCode::BackTab, &config);
             assert_eq!(composer.step, expected);
         }
 
         // The arrows belong to the step now, so they no longer move between
         // steps — which is the whole point of splitting the form up.
+        composer.step = Step::Shape;
         for code in [KeyCode::Down, KeyCode::Up] {
             press(&mut composer, code, &config);
             assert_eq!(composer.step, Step::Shape);
         }
 
         // Tab advances everywhere except Project, where it completes instead.
-        for expected in [Step::Name, Step::Project] {
-            press(&mut composer, KeyCode::Tab, &config);
-            assert_eq!(composer.step, expected);
-        }
+        press(&mut composer, KeyCode::Tab, &config);
+        assert_eq!(composer.step, Step::Project);
         press(&mut composer, KeyCode::Tab, &config);
         assert_eq!(composer.step, Step::Project);
         press(&mut composer, KeyCode::BackTab, &config);
-        assert_eq!(composer.step, Step::Name);
+        assert_eq!(composer.step, Step::Shape);
     }
 
     /// On the shape step the arrows point at what they change: down and up size
@@ -2882,6 +3219,7 @@ mod tests {
     fn arrows_size_the_grid_along_the_axis_they_point_at() {
         let config = shell_config();
         let mut composer = composer();
+        press(&mut composer, KeyCode::Tab, &config);
         assert_eq!(composer.step, Step::Shape);
 
         // A digit asks for the square most people mean by that number.
@@ -3023,6 +3361,183 @@ mod tests {
         assert!(composer.worktrees_active());
     }
 
+    /// A name that has been launched before brings its shape and its folder
+    /// back, which is the whole reason the name is asked first.
+    #[test]
+    fn typing_a_remembered_name_recalls_its_shape_and_folder() {
+        let config = shell_config();
+        let mut composer = composer_remembering(&[("api", 1, 4)]);
+        assert_eq!(composer.step, Step::Name);
+
+        for ch in "api".chars() {
+            press(&mut composer, KeyCode::Char(ch), &config);
+        }
+        // Still on the name step, so nothing has been recalled yet: a prefix of
+        // a longer name must not rewrite the shape mid-word.
+        assert_eq!(composer.grid().rows, DEFAULT_ROWS);
+
+        press(&mut composer, KeyCode::Enter, &config);
+        assert_eq!(composer.step, Step::Shape);
+        assert_eq!(composer.grid().rows, 1);
+        assert_eq!(composer.grid().columns, 4);
+        assert_eq!(
+            composer.project_dir.as_deref(),
+            Some(env::temp_dir().as_path())
+        );
+    }
+
+    /// A name nobody has launched is just a name: it leaves the shape alone.
+    #[test]
+    fn an_unknown_name_recalls_nothing() {
+        let config = shell_config();
+        let mut composer = composer_remembering(&[("api", 1, 4)]);
+
+        for ch in "brand-new".chars() {
+            press(&mut composer, KeyCode::Char(ch), &config);
+        }
+        press(&mut composer, KeyCode::Enter, &config);
+
+        assert_eq!(composer.grid().rows, DEFAULT_ROWS);
+        assert_eq!(composer.grid().columns, DEFAULT_COLUMNS);
+    }
+
+    /// Down walks the remembered grids and recalls the one it lands on, so a
+    /// name can be picked without being typed or even remembered.
+    #[test]
+    fn arrows_pick_a_remembered_grid_on_the_name_step() {
+        let config = shell_config();
+        let mut composer = composer_remembering(&[("older", 1, 1), ("newer", 3, 3)]);
+
+        press(&mut composer, KeyCode::Down, &config);
+        assert_eq!(composer.name.value, "newer", "the most recent comes first");
+        assert_eq!(composer.grid().rows, 3);
+        assert_eq!(composer.grid().columns, 3);
+
+        press(&mut composer, KeyCode::Down, &config);
+        assert_eq!(composer.name.value, "older");
+        assert_eq!(composer.grid().rows, 1);
+    }
+
+    /// Walking the list must keep working after it lands on a row. Filtering on
+    /// the name field narrowed the list to whatever was just picked, so the
+    /// second arrow press had nowhere left to go.
+    #[test]
+    fn the_remembered_list_stays_walkable_after_a_pick() {
+        let config = shell_config();
+        let mut composer =
+            composer_remembering(&[("alpha", 1, 1), ("beta", 2, 2), ("gamma", 3, 3)]);
+
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            press(&mut composer, KeyCode::Down, &config);
+            seen.push(composer.name.value.clone());
+        }
+        seen.sort();
+        assert_eq!(
+            seen,
+            ["alpha", "beta", "gamma"],
+            "the walk visited every row"
+        );
+
+        // And it wraps rather than sticking at the end.
+        press(&mut composer, KeyCode::Down, &config);
+        assert_eq!(composer.matching_presets().len(), 3);
+    }
+
+    /// A pick fills the field in but does not end the editing: the name stays
+    /// editable, and the list follows whatever the field is edited into.
+    #[test]
+    fn editing_after_a_pick_refilters_the_list() {
+        let config = shell_config();
+        let mut composer = composer_remembering(&[("alpha", 1, 1), ("beta", 2, 2)]);
+
+        press(&mut composer, KeyCode::Down, &config);
+        let picked = composer.name.value.clone();
+        assert!(picked == "alpha" || picked == "beta");
+        assert_eq!(
+            composer.matching_presets().len(),
+            2,
+            "the pick itself must not narrow the list"
+        );
+
+        // Clear the picked name and type towards the other one.
+        for _ in 0..picked.chars().count() {
+            press(&mut composer, KeyCode::Backspace, &config);
+        }
+        assert_eq!(composer.name.value, "");
+        press(&mut composer, KeyCode::Char('a'), &config);
+
+        let matches = composer.matching_presets();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "alpha");
+    }
+
+    /// A folder the user typed themselves outranks the one the name remembers:
+    /// they said where this grid goes after they said what it is called.
+    #[test]
+    fn a_hand_typed_folder_survives_a_recall() {
+        let config = shell_config();
+        let mut composer = composer_remembering(&[("api", 1, 4)]);
+        let chosen = env::current_dir().expect("cwd");
+        composer.project_touched = true;
+        composer.project = TextField::new(display_path(&chosen), None);
+        composer.project_dir = Some(chosen.clone());
+
+        for ch in "api".chars() {
+            press(&mut composer, KeyCode::Char(ch), &config);
+        }
+        press(&mut composer, KeyCode::Enter, &config);
+
+        assert_eq!(composer.grid().rows, 1, "the shape is still recalled");
+        assert_eq!(composer.project_dir.as_deref(), Some(chosen.as_path()));
+    }
+
+    /// Launching under a name is what teaches the name its meaning. A grid the
+    /// user did not name keeps the store free of generated labels.
+    #[test]
+    fn only_named_grids_are_remembered() {
+        let mut composer = composer();
+        composer.rows = 3;
+        composer.columns = 1;
+
+        assert!(
+            !composer.remember_grid(),
+            "the fallback tab name is not a name the user chose"
+        );
+        assert!(composer.presets.matching("").is_empty());
+
+        composer.name = TextField::new("reviewers", Some(MAX_NAME_CHARS));
+        assert!(composer.remember_grid());
+        let remembered = composer.presets.get("reviewers").expect("remembered grid");
+        assert_eq!((remembered.rows, remembered.columns), (3, 1));
+    }
+
+    /// The composer is a dialog: on a terminal with room it sits in the middle
+    /// with space around it, rather than filling the screen and stranding the
+    /// question in a corner.
+    #[test]
+    fn the_composer_is_centred_as_a_dialog() {
+        let screen = Rect::new(0, 0, 200, 60);
+        let dialog = dialog_rect(screen);
+
+        assert!(dialog.width <= DIALOG_MAX_WIDTH);
+        assert!(dialog.height <= DIALOG_MAX_HEIGHT);
+        let left = dialog.x;
+        let right = screen.width - (dialog.x + dialog.width);
+        assert!(left.abs_diff(right) <= 1, "not horizontally centred");
+        let top = dialog.y;
+        let bottom = screen.height - (dialog.y + dialog.height);
+        assert!(top.abs_diff(bottom) <= 1, "not vertically centred");
+    }
+
+    /// A terminal with nothing to spare gives the dialog the whole screen: a
+    /// margin costs more than it explains when the content barely fits.
+    #[test]
+    fn a_small_terminal_gives_the_dialog_everything() {
+        let screen = Rect::new(0, 0, 50, 14);
+        assert_eq!(dialog_rect(screen), screen);
+    }
+
     #[test]
     fn renders_the_full_dashboard_on_a_roomy_terminal() {
         let config = shell_config();
@@ -3031,10 +3546,12 @@ mod tests {
 
         assert!(text.contains("NEW GRID"));
         assert!(text.contains(WORDMARK[1]), "wordmark row missing");
-        assert!(text.contains("HOW BIG?"));
+        assert!(text.contains("CALL IT WHAT?"), "the name is asked first");
+        // The preview stands alongside the question, whichever step is being
+        // asked, so the grid being described is always on screen.
         assert!(text.contains("LIVE GRID"));
         assert!(text.contains("ROWS"));
-        assert!(text.contains("COLUMNS"));
+        assert!(text.contains("COLS"));
         assert!(text.contains("PANES"));
         // The step rail names every question, including the ones not being
         // asked yet, so the wizard says how long it is up front.
@@ -3047,10 +3564,12 @@ mod tests {
         }
         // Only the current step's input is on screen; the later ones are just
         // names on the rail.
-        assert!(
-            !text.contains("WHERE?"),
-            "a later step leaked onto the shape step"
-        );
+        for later in ["HOW BIG?", "WHERE?"] {
+            assert!(
+                !text.contains(later),
+                "{later} leaked onto the step before it"
+            );
+        }
         // The knobs this revamp removed must not come back.
         assert!(!text.contains("Auth"));
         assert!(!text.contains("START WORKSPACE"));
@@ -3160,7 +3679,7 @@ mod tests {
         let composer = composer();
         let text = rendered(72, 18, &composer, &config);
 
-        assert!(text.contains("HOW BIG?"));
+        assert!(text.contains("CALL IT WHAT?"));
         assert!(
             text.contains("SHAPE"),
             "the step rail survives a small screen"

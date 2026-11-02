@@ -147,7 +147,7 @@ fn chat_completion(config: &ManagerConfig, request: serde_json::Value) -> Result
         .context("failed to create manager API client")?;
     let mut response = client
         .post(config.endpoint.trim())
-        .bearer_auth(config.api_key.trim())
+        .bearer_auth(config.resolved_api_key().unwrap_or_default())
         .json(&request)
         .send()
         .context("manager API request failed")?;

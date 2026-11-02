@@ -1057,6 +1057,7 @@ mod tests {
             },
             view: SavedView::default(),
             panes: vec![named_pane(0, "codex", None), named_pane(1, "codex", None)],
+            parked_from: Vec::new(),
         }];
         let sessions = vec![SessionRecord {
             path: PathBuf::from("session.toml"),
@@ -1093,6 +1094,7 @@ mod tests {
             },
             view: SavedView::default(),
             panes: vec![named_pane(0, "codex", None)],
+            parked_from: Vec::new(),
         }];
         let sessions = vec![SessionRecord {
             path: PathBuf::from("session.toml"),

@@ -34,6 +34,11 @@ pub enum Action {
     CopyMode,
     BackgroundPanes,
     BackgroundJobs,
+    ParkPane,
+    ClosePane,
+    NextWaiting,
+    WatchParked,
+    SwapAccount,
     AuthProfiles,
     RenameTab,
     RenamePane,
@@ -62,6 +67,11 @@ const ACTIONS: &[Action] = &[
     Action::CopyMode,
     Action::BackgroundPanes,
     Action::BackgroundJobs,
+    Action::ParkPane,
+    Action::ClosePane,
+    Action::NextWaiting,
+    Action::WatchParked,
+    Action::SwapAccount,
     Action::AuthProfiles,
     Action::ZoomPane,
     Action::ResizeGrid,
@@ -112,6 +122,11 @@ impl Action {
             Self::CopyMode => "copy-mode",
             Self::BackgroundPanes => "background-panes",
             Self::BackgroundJobs => "background-jobs",
+            Self::ParkPane => "park-pane",
+            Self::ClosePane => "close-pane",
+            Self::NextWaiting => "next-waiting",
+            Self::WatchParked => "watch-parked",
+            Self::SwapAccount => "swap-account",
             Self::AuthProfiles => "auth-profiles",
             Self::RenameTab => "rename-tab",
             Self::RenamePane => "rename-pane",
@@ -150,6 +165,15 @@ impl Action {
             Self::CopyMode => "search and copy pane scrollback",
             Self::BackgroundPanes => "background selected or focused panes",
             Self::BackgroundJobs => "show background agents",
+            Self::ParkPane => {
+                "park the focused pane and say when to tell you it is done, or send a parked one back"
+            }
+            Self::ClosePane => "close the focused or selected panes (press twice)",
+            Self::NextWaiting => "focus the next pane that needs you, in any grid",
+            Self::WatchParked => "give a parked pane a new goal, or stop watching it",
+            Self::SwapAccount => {
+                "move the focused Claude pane to another account, keeping its conversation"
+            }
             Self::AuthProfiles => "manage and assign auth profiles",
             Self::RenameTab => "rename current tab",
             Self::RenamePane => "rename focused pane",
@@ -161,41 +185,23 @@ impl Action {
         ACTIONS.iter().copied().find(|action| action.name() == name)
     }
 
-    fn default_chord(self) -> &'static str {
+    fn default_chord(self) -> Option<&'static str> {
         match self {
-            Self::Quit => "alt+q",
-            Self::Help => "alt+h",
-            Self::FocusLeft => "alt+left",
-            Self::FocusRight => "alt+right",
-            Self::FocusUp => "alt+up",
-            Self::FocusDown => "alt+down",
-            Self::ToggleSelection => "alt+s",
-            Self::ToggleGridSelection => "alt+shift+s",
-            Self::SelectAll => "alt+a",
-            Self::SleepPanes => "alt+z",
-            Self::RestartPanes => "alt+shift+t",
-            Self::NextTab => "alt+t",
-            Self::NewTab => "alt+n",
-            Self::CloseGrid => "alt+w",
-            Self::ResizeGrid => "alt+l",
-            Self::SwapPanes => "alt+x",
-            Self::ZoomPane => "alt+f",
-            Self::CommandLine => "alt+c",
-            Self::CommandPalette => "alt+k",
-            Self::CaptureOutput => "alt+shift+c",
-            Self::ToggleOutputLogging => "alt+shift+l",
-            Self::VoiceInput => "alt+shift+v",
-            Self::Settings => "alt+o",
-            Self::PreviousPanes => "alt+shift+p",
-            Self::PaneActivity => "alt+p",
-            Self::Ports => "ctrl+alt+p",
-            Self::CopyMode => "alt+b",
-            Self::BackgroundPanes => "alt+shift+b",
-            Self::BackgroundJobs => "ctrl+alt+b",
-            Self::AuthProfiles => "alt+shift+a",
-            Self::RenameTab => "alt+shift+r",
-            Self::RenamePane => "alt+r",
-            Self::AdoptTerminal => "ctrl+alt+t",
+            Self::Quit => Some("alt+q"),
+            Self::NewTab => Some("alt+n"),
+            Self::RenamePane => Some("alt+r"),
+            Self::RenameTab => Some("alt+shift+r"),
+            Self::ToggleSelection => Some("alt+s"),
+            Self::SelectAll => Some("alt+a"),
+            Self::SwapPanes => Some("alt+x"),
+            Self::ResizeGrid => Some("alt+l"),
+            Self::CloseGrid => Some("alt+w"),
+            Self::ParkPane => Some("alt+p"),
+            Self::ClosePane => Some("alt+d"),
+            Self::NextWaiting => Some("alt+j"),
+            Self::WatchParked => Some("alt+g"),
+            Self::SwapAccount => Some("alt+k"),
+            _ => None,
         }
     }
 }
@@ -295,15 +301,39 @@ impl Shortcut {
         if self.shift {
             parts.push("Shift".to_string());
         }
-        parts.push(match self.key {
+        parts.push(self.key_label());
+        parts.join("+")
+    }
+
+    fn key_label(self) -> String {
+        match self.key {
             ShortcutKey::Char(ch) => ch.to_ascii_uppercase().to_string(),
             ShortcutKey::Left => "Left".into(),
             ShortcutKey::Right => "Right".into(),
             ShortcutKey::Up => "Up".into(),
             ShortcutKey::Down => "Down".into(),
             ShortcutKey::Function(number) => format!("F{number}"),
-        });
-        parts.join("+")
+        }
+    }
+
+    /// How this shortcut is pressed through the leader, which stands in for the
+    /// Alt the terminal will not send.
+    ///
+    /// A shortcut with no Alt in it is pressed as itself either way, so it has
+    /// no leader form.
+    fn leader_form(self, leader: &str) -> Option<String> {
+        if !self.alt {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if self.control {
+            parts.push("Ctrl".to_string());
+        }
+        if self.shift {
+            parts.push("Shift".to_string());
+        }
+        parts.push(self.key_label());
+        Some(format!("{leader} {}", parts.join("+")))
     }
 }
 
@@ -355,6 +385,13 @@ const LEADER_DISABLED: [&str; 4] = ["", "off", "none", "false"];
 pub struct KeyBindings {
     bindings: BTreeMap<Action, Shortcut>,
     leader: Option<Shortcut>,
+    /// Whether this terminal delivers Alt at all.
+    ///
+    /// Labelling a shortcut `Alt+N` where Option composes characters instead
+    /// names a key the user cannot press, which is how a working application
+    /// reads as a broken one. When Alt cannot arrive, the labels switch to the
+    /// leader form, which can.
+    alt_reachable: bool,
 }
 
 impl KeyBindings {
@@ -362,8 +399,9 @@ impl KeyBindings {
         let mut bindings = ACTIONS
             .iter()
             .copied()
-            .map(|action| {
-                Shortcut::parse(action.default_chord()).map(|shortcut| (action, shortcut))
+            .filter_map(|action| {
+                let chord = action.default_chord()?;
+                Some(Shortcut::parse(chord).map(|shortcut| (action, shortcut)))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
         let mut leader = DEFAULT_LEADER.map(Shortcut::parse).transpose()?;
@@ -428,7 +466,11 @@ impl KeyBindings {
             );
         }
 
-        Ok(Self { bindings, leader })
+        Ok(Self {
+            bindings,
+            leader,
+            alt_reachable: true,
+        })
     }
 
     /// Whether this event is the leader key itself.
@@ -441,6 +483,21 @@ impl KeyBindings {
         self.leader.map(Shortcut::label)
     }
 
+    /// Records whether this terminal can send Alt, which decides how every
+    /// shortcut is written down.
+    pub fn set_alt_reachable(&mut self, reachable: bool) {
+        self.alt_reachable = reachable;
+    }
+
+    /// The leader form of a shortcut, when that is the only way to press it.
+    fn unreachable_alt_form(&self, shortcut: Shortcut) -> Option<String> {
+        if self.alt_reachable {
+            return None;
+        }
+        let leader = self.leader?.label();
+        shortcut.leader_form(&leader)
+    }
+
     pub fn action_for(&self, event: &KeyEvent) -> Option<Action> {
         ACTIONS.iter().copied().find(|action| {
             self.bindings
@@ -451,36 +508,67 @@ impl KeyBindings {
 
     pub fn help_entries(&self) -> Vec<(String, &'static str)> {
         self.leader_label()
-            .map(|label| (label, "leader: press it, then a shortcut key without Alt"))
+            .map(|label| {
+                let description = if self.alt_reachable {
+                    "leader: press it, then a shortcut key without Alt"
+                } else {
+                    // The labels below are already in leader form, so the row
+                    // that matters most is how to stop needing it.
+                    "leader: press it, then the key. `gridbash doctor` enables Alt"
+                };
+                (label, description)
+            })
             .into_iter()
+            .map(Some)
             .chain(ACTIONS.iter().copied().map(|action| {
                 // `from_overrides` seeds every action, but indexing a map that
                 // is one action short would panic instead of degrading.
                 let label = match self.shortcut_for(action) {
-                    None => "unbound".to_string(),
-                    Some(shortcut) => match action {
-                        Action::Quit if shortcut != fallback_quit_shortcut() => {
-                            format!("{} / Alt+Q", shortcut.label())
+                    None if action == Action::Help => "F1".to_string(),
+                    None => return None,
+                    Some(shortcut) => {
+                        // Only the chord this terminal can actually deliver is
+                        // listed. Naming the Alt form alongside it doubled the
+                        // width of every row and pushed the descriptions into
+                        // ellipsis, to say something the reader cannot act on
+                        // until the terminal setting changes.
+                        let primary = self
+                            .unreachable_alt_form(shortcut)
+                            .unwrap_or_else(|| shortcut.label());
+                        match action {
+                            Action::Quit if shortcut != fallback_quit_shortcut() => {
+                                format!("{primary} / Alt+Q")
+                            }
+                            Action::Help => format!("{primary} / F1"),
+                            _ => primary,
                         }
-                        Action::Help => format!("{} / F1", shortcut.label()),
-                        _ => shortcut.label(),
-                    },
+                    }
                 };
-                (label, action.description())
+                Some((label, action.description()))
             }))
+            .flatten()
             .collect()
     }
 
+    pub fn bound_label(&self, action: Action) -> Option<String> {
+        self.shortcut_for(action).map(|_| self.label_for(action))
+    }
+
     pub fn label_for(&self, action: Action) -> String {
-        self.shortcut_for(action)
-            .map_or_else(|| "unbound".to_string(), Shortcut::label)
+        self.shortcut_for(action).map_or_else(
+            || "unbound".to_string(),
+            |shortcut| {
+                self.unreachable_alt_form(shortcut)
+                    .unwrap_or_else(|| shortcut.label())
+            },
+        )
     }
 
     fn shortcut_for(&self, action: Action) -> Option<Shortcut> {
         self.bindings
             .get(&action)
             .copied()
-            .or_else(|| Shortcut::parse(action.default_chord()).ok())
+            .or_else(|| Shortcut::parse(action.default_chord()?).ok())
     }
 }
 
@@ -546,14 +634,16 @@ mod tests {
         bindings.bindings.clear();
 
         assert_eq!(
-            bindings.label_for(Action::ZoomPane),
-            Shortcut::parse(Action::ZoomPane.default_chord())
-                .expect("default chord")
-                .label(),
+            bindings.label_for(Action::ParkPane),
+            Shortcut::parse(
+                Action::ParkPane
+                    .default_chord()
+                    .expect("park has a default")
+            )
+            .expect("default chord")
+            .label(),
             "a missing binding falls back to the action's default chord"
         );
-        let leader_rows = usize::from(bindings.leader_label().is_some());
-        assert_eq!(bindings.help_entries().len(), ACTIONS.len() + leader_rows);
         assert!(
             bindings
                 .action_for(&KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT))
@@ -602,12 +692,10 @@ mod tests {
     #[test]
     fn former_director_shortcuts_are_free_by_default() {
         let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
-        for key in ['d', 'g', 'u'] {
-            assert_eq!(
-                bindings.action_for(&KeyEvent::new(KeyCode::Char(key), KeyModifiers::ALT)),
-                None
-            );
-        }
+        assert_eq!(
+            bindings.action_for(&KeyEvent::new(KeyCode::Char('u'), KeyModifiers::ALT)),
+            None
+        );
     }
 
     #[test]
@@ -630,8 +718,12 @@ mod tests {
     /// reach every shortcut.
     #[test]
     fn the_leader_stands_in_for_alt() {
-        let bindings =
-            KeyBindings::from_overrides(&overrides(&[("leader", "ctrl+g")])).expect("leader");
+        let bindings = KeyBindings::from_overrides(&overrides(&[
+            ("leader", "ctrl+g"),
+            ("focus-left", "alt+left"),
+            ("ports", "ctrl+alt+p"),
+        ]))
+        .expect("leader");
 
         assert!(bindings.is_leader(&KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL)));
         assert_eq!(bindings.leader_label().as_deref(), Some("Ctrl+G"));
@@ -639,10 +731,10 @@ mod tests {
         // Plain letters reach the Alt bindings.
         assert_eq!(
             bindings.action_for(&with_leader_alt(&KeyEvent::new(
-                KeyCode::Char('c'),
+                KeyCode::Char('n'),
                 KeyModifiers::NONE
             ))),
-            Some(Action::CommandLine)
+            Some(Action::NewTab)
         );
         // Arrows too, which are the shortcuts most likely to be reached for.
         assert_eq!(
@@ -680,10 +772,10 @@ mod tests {
         for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
             assert_eq!(
                 bindings.action_for(&with_leader_alt(&KeyEvent::new(
-                    KeyCode::Char('C'),
+                    KeyCode::Char('R'),
                     modifiers
                 ))),
-                Some(Action::CaptureOutput),
+                Some(Action::RenameTab),
                 "{modifiers:?}"
             );
         }
@@ -708,6 +800,85 @@ mod tests {
         let invalid = KeyBindings::from_overrides(&overrides(&[("leader", "ctrl+shift+nope")]))
             .expect_err("invalid leader");
         assert!(invalid.to_string().contains("[keys].leader"));
+    }
+
+    /// A terminal that spends Option on characters cannot press a single Alt
+    /// chord, so naming one in the interface names a key that does nothing.
+    #[test]
+    fn labels_switch_to_the_leader_form_when_alt_cannot_arrive() {
+        let mut bindings = KeyBindings::from_overrides(&overrides(&[
+            ("leader", "ctrl+g"),
+            ("capture-output", "alt+shift+c"),
+            ("ports", "ctrl+alt+p"),
+            ("focus-left", "alt+left"),
+        ]))
+        .expect("leader");
+
+        // Reachable Alt is the ordinary case and reads as it always did.
+        for (action, label) in [
+            (Action::NewTab, "Alt+N"),
+            (Action::CaptureOutput, "Alt+Shift+C"),
+            (Action::Ports, "Ctrl+Alt+P"),
+            (Action::FocusLeft, "Alt+Left"),
+        ] {
+            assert_eq!(bindings.label_for(action), label);
+        }
+
+        bindings.set_alt_reachable(false);
+        for (action, label) in [
+            (Action::NewTab, "Ctrl+G N"),
+            (Action::CaptureOutput, "Ctrl+G Shift+C"),
+            (Action::Ports, "Ctrl+G Ctrl+P"),
+            (Action::FocusLeft, "Ctrl+G Left"),
+        ] {
+            assert_eq!(bindings.label_for(action), label);
+        }
+    }
+
+    /// Only the chords that need the leader get it. A shortcut without Alt is
+    /// pressed the same way either way, and relabelling it would be a lie.
+    #[test]
+    fn shortcuts_without_alt_are_labelled_the_same_either_way() {
+        let mut bindings = KeyBindings::from_overrides(&overrides(&[
+            ("leader", "ctrl+g"),
+            ("zoom-pane", "ctrl+shift+k"),
+            ("settings", "f8"),
+        ]))
+        .expect("custom bindings");
+
+        for reachable in [true, false] {
+            bindings.set_alt_reachable(reachable);
+            assert_eq!(bindings.label_for(Action::ZoomPane), "Ctrl+Shift+K");
+            assert_eq!(bindings.label_for(Action::Settings), "F8");
+        }
+    }
+
+    /// With no leader configured there is nothing to fall back to, so the Alt
+    /// chord is still the honest name for the binding.
+    #[test]
+    fn labels_keep_their_alt_form_when_there_is_no_leader() {
+        let mut bindings =
+            KeyBindings::from_overrides(&overrides(&[("leader", "off")])).expect("no leader");
+        bindings.set_alt_reachable(false);
+
+        assert_eq!(bindings.label_for(Action::NewTab), "Alt+N");
+    }
+
+    /// The help lists one chord per action: the one that works here.
+    #[test]
+    fn help_entries_list_only_the_chord_that_can_be_pressed() {
+        let mut bindings =
+            KeyBindings::from_overrides(&overrides(&[("leader", "ctrl+g")])).expect("leader");
+        bindings.set_alt_reachable(false);
+        let entries = bindings.help_entries();
+
+        assert!(entries.iter().any(|entry| entry.0 == "Ctrl+G N"));
+        assert!(
+            !entries.iter().any(|entry| entry.0.contains("Alt+N")),
+            "an unpressable chord is not offered as the way in"
+        );
+        // The recovery keys are reachable without Alt or a leader, so they stay.
+        assert!(entries.iter().any(|entry| entry.0.ends_with("F1")));
     }
 
     /// Whatever the platform default is, it must parse and must not collide
@@ -749,35 +920,11 @@ mod tests {
     }
 
     #[test]
-    fn grid_selection_has_a_pane_selection_companion_shortcut() {
-        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
-        assert_eq!(
-            bindings.action_for(&KeyEvent::new(
-                KeyCode::Char('S'),
-                KeyModifiers::ALT | KeyModifiers::SHIFT,
-            )),
-            Some(Action::ToggleGridSelection)
-        );
-    }
-
-    #[test]
     fn close_grid_has_a_modeless_default_shortcut() {
         let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
         assert_eq!(
             bindings.action_for(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT)),
             Some(Action::CloseGrid)
-        );
-    }
-
-    #[test]
-    fn agent_ports_has_a_modeless_default_shortcut() {
-        let bindings = KeyBindings::from_overrides(&BTreeMap::new()).expect("default bindings");
-        assert_eq!(
-            bindings.action_for(&KeyEvent::new(
-                KeyCode::Char('p'),
-                KeyModifiers::CONTROL | KeyModifiers::ALT,
-            )),
-            Some(Action::Ports)
         );
     }
 }

@@ -12,8 +12,8 @@ the rest:
 
 | Step | Question | Keys |
 | --- | --- | --- |
-| 01 | How big? 1-10 rows by 1-10 columns. | `↑↓` rows, `←→` columns, `1`-`9` for a square (`0` for the maximum) |
-| 02 | Call it what? Tab title for this grid; blank falls back to `Grid N`. | typing, `←→` to move the cursor |
+| 01 | Call it what? Tab title for this grid; blank falls back to `Grid N`. | typing, `↑↓` recalls a remembered grid, `Tab` completes one, `←→` to move the cursor |
+| 02 | How big? 1-10 rows by 1-10 columns. | `↑↓` rows, `←→` columns, `1`-`9` for a square (`0` for the maximum) |
 | 03 | Where? Folder the panes start in. | typing, `Tab` completes folders and cycles matches |
 
 `Enter` answers the current question and moves to the next; on the last step it
@@ -21,6 +21,44 @@ launches. `Shift+Tab` goes back a step, `Esc` cancels, and a rail under the pane
 shows which steps are done. Nothing moves between steps on its own, so the arrow
 keys belong to whichever question is being asked — on the size step they point at
 the axis they change rather than at another field.
+
+The screen is a dialog centred in the terminal, and every step is asked in the
+same place, with the live preview of the grid beside it.
+
+### Remembered grids
+
+The name is asked first because a name is how a grid is recalled. Launching a
+grid under a name records what that name meant — its rows, its columns, and the
+folder it started in — and typing the name again brings all three back:
+
+```
+┌ 01 CALL IT WHAT? ──────────────────────────┐
+│ ▌ NAME     reviewers                       │
+│            a grid you have launched before │
+│ ╌╌ 1 REMEMBERED GRID · ↑↓ PICKS            │
+│  ▸ reviewers  3×3  ~/src/api               │
+└────────────────────────────────────────────┘
+```
+
+`↑↓` walks the remembered grids and recalls the one it lands on; `Tab` completes
+the next match. Typing filters the list by prefix, and a name is recalled only
+when it matches exactly, so a prefix of a longer name never rewrites the shape
+mid-word. A folder typed by hand outranks the remembered one, because that
+answer came later.
+
+Only a grid the user actually named is remembered — the generated `Grid N`
+fallback is not. The 64 most recently launched names are kept in
+`grids.json`, beside the saved sessions in GridBash's data directory:
+
+| Platform | Path |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\GridBash\data\grids.json` |
+| macOS | `$HOME/Library/Application Support/GridBash/grids.json` |
+| Linux | `${XDG_DATA_HOME:-$HOME/.local/share}/gridbash/grids.json` |
+
+It is a convenience rather than session state, so deleting the file costs
+nothing but the recall, and an unreadable one is treated as empty rather than
+reported.
 
 Everything else is assumed so there is nothing else to answer:
 
@@ -99,7 +137,7 @@ the folders next to the current path so nearby projects are one keystroke away.
 `~` expands to the home directory.
 
 Managed auth is a launch boundary, not a global shell hook. GridBash sets
-`CLAUDE_CONFIG_DIR` or `CODEX_HOME` for compatible agent panes it launches. It
+`CLAUDE_SECURESTORAGE_CONFIG_DIR` or `CODEX_HOME` for compatible agent panes it launches. It
 does not replace the machine's normal `claude` or `codex` commands, and raw
 terminal panes retain their normal shell environment.
 
@@ -135,6 +173,27 @@ shutdown, GridBash relaunches that pane with `codex resume <conversation-id>`.
 This applies both to Codex profiles and to Codex launched inside a GridBash Git
 Bash pane. Unrelated shell commands are never replayed.
 
+GridBash records which conversation each pane's Claude has open by asking
+Claude Code itself: Claude Code keeps a file per running process under
+`~/.claude/sessions/` (or `$CLAUDE_CONFIG_DIR/sessions/`) naming the
+conversation that process is in, and updates it on `/clear`. Several Claude
+panes in one folder therefore never trade conversations on resume, and a Claude
+started by hand inside a shell pane is resumed like any other. A shell pane
+whose Claude has exited resumes as a shell. A pane added by growing a grid
+starts a new conversation rather than reopening the one in the pane it was
+copied from.
+
+The rest of this section applies only to Claude Code versions that do not write
+those files. For a Claude pane, GridBash normally pins the conversation ID when
+it launches the agent itself. A pane where you ran `claude` inside your own shell has no
+pinned ID, and used to come back as a bare shell with the conversation lost. Such
+a pane is now matched to its conversation by its prompts: the lines you typed are
+written verbatim into the transcript that received them, so a distinctive prompt
+names one transcript and nothing else. GridBash searches the pane's own
+directory and the worktrees under it, tries your most recent prompts first, and
+ignores any prompt that also turns up in another conversation. A pane it cannot
+match to exactly one transcript resumes as a plain shell rather than guessing.
+
 Enable **Keep terminals running** in Settings to detach live pane hosts when the
 GridBash UI closes. `gridbash resume` then reconnects to the same PTYs; output
 produced while detached is added to the restored view. If a host is no longer
@@ -160,7 +219,7 @@ session ID or unique prefix.
 A plain `gridbash` always starts an empty workspace. When a GridBash process
 dies without cleaning up, its sessions are left marked as running; pass
 `gridbash --recover` to adopt those workspaces instead of starting a new one, and
-a plain launch reports in the status bar how many are waiting. Recovery only
+a plain launch reports in the tab strip note how many are waiting. Recovery only
 applies to an otherwise plain launch: grid, profile, count, cwd, worktree,
 layout, and agent-API options describe a specific workspace and suppress it.
 Every saved snapshot also remains available through the explicit `gridbash
@@ -301,38 +360,50 @@ GridBash is modeless: ordinary terminal input continues to the active target, wh
 | Left-click grid tab | Switch directly to that grid. |
 | Right-click grid tab | Add or remove that grid from the selected set. Ctrl-click and Shift-click work too. |
 | Mouse wheel | Scroll only the pane under the pointer; selected panes use GridBash scrollback. |
-| Alt+k | Open the searchable command palette. Type to filter, use Up/Down to select, and press Enter to run an action. |
-| Alt+Left / Alt+Right | Focus the previous or next pane in the row, wrapping at the edge. |
-| Alt+Up / Alt+Down | Focus the pane above or below, wrapping at the edge. |
 | Alt+l | Resize the current grid. |
 | Alt+x | Swap two selected grids when any grids are selected; otherwise swap the two selected panes. |
 | Alt+n | Open the new-grid screen and launch another tab. |
-| Ctrl+Alt+t | Re-root the focused pane at an outside Git Bash window's folder. |
-| Alt+t | Switch to the next tab. |
 | Alt+w | Open the current-grid close confirmation. |
 | Alt+s | Toggle selection of the focused pane. |
-| Alt+Shift+s | Toggle selection of the current grid. |
 | Alt+a | Select all panes, or clear the set when all are selected. |
-| Alt+c | Open or close the current grid's BashBot Director command center. |
-| Alt+Shift+C | Save bounded recent plain-text output from the focused or selected panes. |
-| Alt+Shift+L | Start or stop continuous output logs for the focused or selected panes. |
-| Alt+f | Zoom the focused pane to the full grid area, or restore the grid. |
-| Alt+b | Open keyboard scrollback search and copy mode for the focused pane. |
-| Alt+Shift+V | Dictate one utterance, or cancel active listening. |
-| Alt+h / F1 | Open or close help. |
-| Alt+p | Open the focused-pane activity summary. |
-| Ctrl+Alt+p | Open the agent port inspector. |
-| Alt+Shift+P | Open the previous-panes list. |
-| Alt+Shift+A | Open Auth Profiles to manage accounts or assign one to the focused pane. |
-| Alt+Shift+B | Move selected panes, or the focused pane, into the background and launch fresh replacements. |
-| Alt+Ctrl+B | Open the session-wide background-agents list. |
+| Alt+p | Park selected panes, or the focused pane, asking when to tell you it is done; on the Parked tab, send the focused pane back. |
 | Alt+r | Rename the focused pane. |
 | Alt+Shift+R | Rename the current tab. |
-| Alt+Shift+T | Restart the exited focused pane, or all exited selected panes. |
-| Alt+z | Sleep the focused pane, or all selected panes. |
 | Hover sleeping pane | Wake it and reveal its terminal. |
-| Alt+o | Open settings. |
+| Alt+j | Focus the next pane that needs you, in any grid, including a parked pane whose condition was met. |
+| Alt+g | On the Parked tab, give the selected pane a new goal; an empty one stops watching it. |
+| Alt+k | Move the focused Claude pane to another account. It restarts on the same conversation. |
+| F1 | Open or close help. |
 | Alt+q | Save the workspace and open quit confirmation with its exact resume command. |
+
+These actions have no default key. Bind one under `[keys]` with the action name, for example `zoom-pane = "alt+f"`.
+
+| Action name | What it does |
+| --- | --- |
+| `help` | Open or close help. |
+| `focus-left` | Focus pane to the left. |
+| `focus-right` | Focus pane to the right. |
+| `focus-up` | Focus pane above. |
+| `focus-down` | Focus pane below. |
+| `toggle-grid-selection` | Toggle current grid selection. |
+| `sleep-panes` | Sleep or wake panes. |
+| `restart-panes` | Restart exited panes. |
+| `next-tab` | Switch to next tab. |
+| `zoom-pane` | Zoom or restore focused pane. |
+| `command-line` | Open or close BashBot Director command center. |
+| `command-palette` | Open searchable command palette. |
+| `capture-output` | Capture target pane output. |
+| `toggle-output-logging` | Start or stop target pane logging. |
+| `voice-input` | Dictate without submitting. |
+| `settings` | Open settings and profiles. |
+| `previous-panes` | Show previous panes. |
+| `pane-activity` | Show focused-pane activity. |
+| `ports` | Show ports used by coding agents. |
+| `copy-mode` | Search and copy pane scrollback. |
+| `background-panes` | Background selected or focused panes. |
+| `background-jobs` | Show background agents. |
+| `auth-profiles` | Manage and assign auth profiles. |
+| `adopt-terminal` | Open a pane where an outside Git Bash window is. |
 
 Drag selection is contained to its source pane and copies through the standard OSC 52 clipboard sequence. Use `--no-mouse` if the host terminal, serial link, or multiplexer cannot forward mouse reporting.
 
@@ -353,7 +424,7 @@ otherwise they target the focused pane. Active logs show a `rec` pane badge.
 Default collision-safe files live under GridBash's platform-local data `output`
 directory, and every operation reports its resolved path. Agent API capture and
 start-log calls may provide an explicit output directory. A write failure stops
-only the affected log and is reported in the status bar.
+only the affected log and is reported in the tab strip note.
 
 When multiple panes are selected, typing is broadcast to them. With zero or one selected pane, input goes only to the focused pane.
 
@@ -372,9 +443,9 @@ Alt+q to quit the workspace. Managed worktrees and their branches are preserved.
 
 Pane Activity provides auth, rename, refresh, sleep/wake, deactivate, and shortcuts into the BashBot Director goal flow. Navigate with Up/Down and activate with Enter or Space. Direct keys inside the view are `n` to rename, `r` to refresh, `z` to sleep or wake, `d` to deactivate, `g` to prefill `/goal`, and `u` to stop the current goal. Close it with Esc, `q`, or Alt+p; Alt+Shift+A opens Auth Profiles and Alt+o switches to overall settings.
 
-The bottom-right **Ports** control counts TCP listeners launched inside GridBash agent process trees. Click it or press Ctrl+Alt+p to see each port, process name, PID, and owning pane or tab. Use Up/Down to select a listener, `R` to refresh, and Enter or Delete followed by Enter to terminate its process. GridBash excludes unrelated system listeners and its own pane-host control sockets from this view.
+Press Ctrl+Alt+p to see each port, process name, PID, and owning pane or tab. Use Up/Down to select a listener, `R` to refresh, and Enter or Delete followed by Enter to terminate its process. GridBash excludes unrelated system listeners and its own pane-host control sockets from this view.
 
-The bottom-right **Ports** control shows the most recent count of TCP listeners launched inside GridBash agent process trees. Click it or press Ctrl+Alt+p to scan and see each port, process name, PID, and owning pane or tab. Use Up/Down to select a listener, `R` to refresh, and Enter or Delete followed by Enter to terminate its process. Scanning is paused while the inspector is closed. GridBash excludes unrelated system listeners and its own pane-host control sockets from this view.
+Press Ctrl+Alt+p to scan the TCP listeners launched inside GridBash agent process trees and see each port, process name, PID, and owning pane or tab. Use Up/Down to select a listener, `R` to refresh, and Enter or Delete followed by Enter to terminate its process. Scanning is paused while the inspector is closed. GridBash excludes unrelated system listeners and its own pane-host control sockets from this view.
 
 Deactivating a pane ends its terminal process, compacts the remaining panes, and shrinks the grid whenever a smaller dimension can still hold them. Columns are removed before rows, so deactivating two panes from a `2x3` grid compacts it to `2x2`. The final pane cannot be deactivated.
 
@@ -382,7 +453,91 @@ Alt+Shift+B backgrounds every explicitly selected pane, or the focused pane when
 
 Alt+Ctrl+B opens Background Agents. Rows show whether each job is working, quiet, exited, or offline, together with its agent, source tab, folder/worktree, and latest activity. Use Up/Down to choose a row and Enter or Space to swap it into the focused cell; the displaced visible pane goes into the pool instead of being terminated. `R` explicitly restarts an exited or offline row. Delete removes exited/offline rows immediately and requires a second press before stopping a live process.
 
+### The Parked tab
+
+The last tab is always **Parked**. It is for panes that should keep running and
+stay visible, such as a watcher, without holding a cell in a working grid.
+
+Alt+P on a grid opens a sheet at the bottom of the focused pane that asks when
+to tell you it is done, in your own words ("the PR is merged and CI is green").
+Enter parks every selected pane, or the focused pane when nothing is selected.
+Enter with nothing typed just parks it, and it stays parked until you bring it
+back; Esc cancels. Each parked pane moves to the Parked tab still running, and
+a fresh shell in the same folder takes its cell.
+
+The Parked tab is a shelf: a list on the left (name, source grid, condition,
+and the latest verdict) and the selected pane live on the right. Click a row or
+use Alt+arrows to switch. Alt+g gives the selected pane a new goal: the field
+opens with the current one, Enter sets it and briefs the agent again, and an
+empty goal stops watching it.
+
+An agent pane (one whose profile names an agent kind, such as Claude or Codex)
+parked with a condition is told so in its own pane: it is parked, it goes back
+when the condition holds, and it should run `gridbash agent done "<what it did
+and how it checked>"` when it believes it does. That command sends the claim to
+`claude -p --model sonnet`, run in the pane's folder with read-only tools (Read,
+Grep, Glob, and `git status`, `diff`, `log` and `show`). The reviewer checks the
+claim against the repository and its answer is typed into the pane: an
+acceptance marks the condition met, a rejection says what is missing so the
+agent can fix it and run `done` again. Agent panes are judged only on these
+claims, never on their screen, and nothing nudges a parked agent that has not
+claimed anything.
+
+Any other pane with a condition is checked by `claude -p --model haiku` on your own
+Claude login (the API key is removed from its environment), with no tools, MCP
+servers, settings or saved session. GridBash sends it the condition and the
+last 60 lines of the pane's screen each time the screen has stayed still for 5
+seconds after changing, and every 5 minutes for a pane whose screen never stops
+changing. A check costs about 4.5k tokens, almost all of it Claude's cached
+system prompt. When a condition is met, the Parked tab label gains a ✓, a toast
+names the pane and the reason over the bottom right of the grid, and Alt+J (or
+a click on the toast) opens it. The shelf shows a Done strip above it and the
+running count of checks and tokens. Conditions and verdicts are saved with the
+session.
+
+Alt+P on the Parked tab sends the focused pane back to the grid and cell it
+came from. If nothing was ever typed into the pane in that cell, it is closed.
+Otherwise it is parked in its place, so returning a pane never ends one you
+used. A pane whose grid was closed goes to the grid you last had open.
+
+Alt+D, pressed twice within three seconds, closes the focused pane, or every
+selected pane, on any tab including Parked. The process is ended and the grid
+closes the gap: a grid keeps its shape until a whole row or column is empty,
+and a short last row stretches across the full width, so five panes sit three
+over two.
+
+The Parked tab cannot be closed, renamed, resized, or swapped with another
+grid. It sizes itself to the panes it holds and always stays last. Parked panes
+are saved with the session and come back on `gridbash resume`, matched to their
+grid by name.
+
 When an agent launched by GridBash exits normally, including through `/exit`, GridBash replaces it with the preferred interactive terminal in the pane's current directory. If another focused pane exits, Enter, `r`, or `t` restarts it, while `z` sleeps it. Alt+Shift+T performs the same restart directly for exited target panes.
+
+### The Keeper tab
+
+Add a `[keeper]` section to the config and GridBash opens a Keeper tab just
+left of Parked. Its pane runs `command` in `cwd` and starts fresh on every
+launch; it is not saved with the session.
+
+```toml
+[keeper]
+command = "/Users/you/.local/bin/pr-keeper"
+cwd = "/Users/you/code/repo"
+board = "/Users/you/pr-keeper/board.json"
+```
+
+Beside the pane is a table of your open pull requests in `cwd`'s GitHub repo,
+read with `gh` every minute: how far each is behind its base, its checks,
+unresolved review threads, and what the keeper says about it. The keeper
+writes that last part to `board`:
+
+```json
+{"prs": {"2211": {"doing": "rebasing onto main", "needs_you": "Close it?", "tested": "pass"}}}
+```
+
+A PR with `needs_you` sorts first and the tab reads `Keeper ! N`. Click a row
+to type its number into the keeper pane, or click the number to open the PR in
+the browser. Alt+J skips the keeper pane.
 
 ### The leader key
 
@@ -395,7 +550,7 @@ shortcut key on its own.
 `Ctrl+G` then `c` opens the command center, `Ctrl+G` then an arrow moves focus,
 `Ctrl+G` then `Shift+C` captures output, and `Ctrl+G` then `Ctrl+P` opens Ports.
 `Ctrl+G` then `q` quits. Esc backs out, and pressing the leader twice sends it
-to the focused pane, so no pane loses the key. The status bar names the leader
+to the focused pane, so no pane loses the key. The tab strip note names the leader
 while it is waiting.
 
 GridBash enables the leader on macOS and leaves it off elsewhere, where Alt
@@ -407,7 +562,48 @@ leader = "ctrl+g"   # "off" disables it
 ```
 
 Enabling the terminal's own Option-as-Meta setting is the alternative and makes
-the Alt shortcuts work directly; the two can be used together.
+the Alt shortcuts work directly; the two can be used together. `gridbash doctor`
+reports which of the two is in force and can turn on the terminal setting for
+you.
+
+Shortcut labels follow whichever one works. When Option composes characters, the
+tab strip, the help overlay, and the command palette all name the leader form —
+`Ctrl+G N` rather than `Alt+N` — so the interface never advertises a chord this
+terminal cannot deliver. Once Option sends Alt they go back to reading `Alt+N`.
+
+### gridbash doctor
+
+`gridbash doctor` checks whether this terminal can deliver the Alt shortcuts and
+prints what it found: the terminal it detected, the shell profile it would
+launch, whether Option arrives as Alt, and how to press the shortcuts either
+way.
+
+```
+$ gridbash doctor
+Terminal    Apple Terminal
+Shell       zsh (available)
+Option key  sends Alt — every shortcut works
+Shortcuts   Alt+N opens a tab. Ctrl+G then N does the same.
+```
+
+When Option composes characters instead, the doctor names the setting that
+changes it and offers to apply it. It always describes the change before making
+it, and asks first unless `--fix` is passed:
+
+| Terminal | What the fix changes |
+| --- | --- |
+| Apple Terminal | ticks **Use Option as Meta Key** for the profile new windows use |
+| iTerm2 | sets **Left Option key** to **Esc+** for its first profile |
+| Ghostty | adds `macos-option-as-alt = true` to the Ghostty config |
+| kitty | adds `macos_option_as_alt yes` to `kitty.conf` |
+| Alacritty | adds `option_as_alt = "Both"` to `alacritty.toml` |
+| WezTerm | adds `send_composed_key_when_left_alt_is_pressed = false` |
+
+Each change needs the terminal restarted, or its config reloaded, before it
+takes effect — Apple Terminal in particular rewrites its preferences when it
+quits, so it has to be quit and reopened rather than changed underneath itself.
+A terminal the doctor does not recognise is reported with the general
+instruction to look for an "Option as Meta", "Option as Alt", or "Esc+" setting.
 
 ### Configurable shortcuts
 
@@ -451,7 +647,7 @@ Folders are read from the window title, which is where MSYS shells publish them:
 
 The tab strip draws each grid as a separate capped shape rather than one continuous highlight: the current grid is filled with the accent colour, a grid whose agent is waiting on you is filled amber and marked `•`, an exited grid is marked `!`, and grids selected by hand are underlined. When the grids outrun the terminal width the strip scrolls to keep the current one visible and marks the hidden ends with `‹` and `›`. Remaining width goes to the keyboard hints, which drop from the end as it runs out.
 
-The status bar centres the focused pane's number, name, and AI activity summary, followed by how long that summary stays cached and a `⟳` control that refreshes it now. The countdown reads `due` once the cache is stale and `···` while a request is in flight, and the whole clock is the click target. It is shown only for panes that can actually be summarized — never for a sleeping or exited pane, one with summaries switched off, or while a manager goal has suspended them. When summaries are off or unconfigured, the centre says so instead of guessing from the shape of the output; a transient status message takes the centre for as long as it lasts, and a narrow terminal drops the pane name before the summary. Left of centre are the clickable Panes, Summary, and background-jobs chips, plus the input mode and scope only when they are not the ordinary ones; the ports chip stays anchored to the right edge.
+There is no tab strip note. The grey note at the right of the tab strip carries the latest status message for six seconds; otherwise it shows ZOOM or MIC when on, the selection count, how many agents run in the background, and how many panes need you. The focused pane's AI activity summary is in its header. Previous panes (Alt+Shift+p), pane activity (Alt+p), background agents (Ctrl+Alt+b) and ports (Ctrl+Alt+p) open from their shortcuts or the command palette.
 
 The state on the right is whichever one matters most: `exited`, `asleep`, `needs you`, or `idle`. `needs you` marks an agent pane that has stopped producing output for roughly three seconds, which is how an agent asks for input — it indicates output followed by inactivity, not completion or process exit. A non-agent pane that goes quiet reads `idle` instead. As a pane narrows, its header drops its usage figure first, then its activity summary; the number, name, and state are kept. Focused and selected panes are marked by a filled number chip and a coloured border, which outrank a pane's own state.
 
@@ -477,7 +673,13 @@ Set `GRIDBASH_VOICE_MODEL` to use another local Whisper model or `GRIDBASH_SPEEC
 
 GridBash targets modern UTF-8, ANSI/xterm-compatible terminals, including Windows Terminal, Apple Terminal, iTerm2, GNOME Terminal, Konsole, Kitty, WezTerm, and Alacritty.
 
-SSH and tmux work when the remote session advertises a color-capable `TERM`. `TERM=dumb` and Linux kernel consoles are unsupported. On macOS the shortcuts are reachable out of the box through the [leader key](#the-leader-key); configuring Option as Meta/Alt in Apple Terminal, iTerm2, or Ghostty makes the Alt chords work directly as well.
+SSH and tmux work when the remote session advertises a color-capable `TERM`. `TERM=dumb` and Linux kernel consoles are unsupported. On macOS the shortcuts are reachable out of the box through the [leader key](#the-leader-key); configuring Option as Meta/Alt in Apple Terminal, iTerm2, or Ghostty — by hand or with [`gridbash doctor`](#gridbash-doctor) — makes the Alt chords work directly as well.
+
+A terminal set to send Option as Meta writes an Alt chord as a leading Esc, so
+Alt+Left arrives as `ESC ESC [ D`. GridBash reassembles those into the single
+keypress they stand for. Anything that does not resolve to a key is passed to
+the focused pane exactly as it arrived, so a real Esc, and an Esc followed by
+typing, both reach the agent unchanged.
 
 ## Launch profiles
 
@@ -556,12 +758,15 @@ confirm_quit = true
 keep_terminals_running = false
 scrollback_rows = 10000
 refresh_ms = 16
+# Sent once to each agent `gridbash resume` reopens into a conversation, after
+# it has loaded. Set to "" to send nothing.
+resume_prompt = "GridBash was restarted. Continue your work, and restart any watchers or subagents you still need."
 
 [manager]
 activity_summaries = false # opt in before pane output is sent
 endpoint = "https://api.openai.com/v1/chat/completions"
 model = "gpt-4o-mini"
-api_key = "sk-..."
+api_key = "sk-..." # optional; OPENAI_API_KEY is used when this is blank
 
 [todos]
 idle_seconds = 90
@@ -584,9 +789,9 @@ Settings persist compact titles, activity badges, quit confirmation, background-
 
 ### BashBot Director
 
-The BashBot Director and AI activity summaries use the OpenAI-compatible chat-completions endpoint, model, and API key under `[manager]`. These values can also be edited in Settings > Manager. The UI masks the API key, but the key is stored in the local TOML file.
+The BashBot Director and AI activity summaries use the OpenAI-compatible chat-completions endpoint, model, and API key under `[manager]`. These values can also be edited in Settings > Manager. The UI masks the API key, but the key is stored in the local TOML file. Leaving `api_key` blank falls back to the `OPENAI_API_KEY` environment variable, so a machine that already exports one needs no GridBash setting at all; Settings then reads `from OPENAI_API_KEY` rather than `not set`. A key entered in Settings wins over the environment.
 
-AI activity summaries are disabled by default. Enable them separately in Settings > Manager only when you want bounded recent output from eligible panes in the active tab sent to the configured endpoint. GridBash batches panes after roughly three seconds of quiet output, pauses them while a manager goal is present, and preserves the last successful headline across temporary API failures. Each pane then caches its summary for three minutes before another request may be spent on it, so a nine-pane grid costs at most twenty batched calls an hour; failures back off separately, doubling from thirty seconds up to five minutes. The status bar's `⟳` control and the Pane Activity refresh control both skip the cache and request an immediate update for one pane; pending input is never used as a displayed summary.
+AI activity summaries are disabled by default. Enable them separately in Settings > Manager only when you want bounded recent output from eligible panes in the active tab sent to the configured endpoint. GridBash batches panes after roughly three seconds of quiet output, pauses them while a manager goal is present, and preserves the last successful headline across temporary API failures. Each pane then caches its summary for three minutes before another request may be spent on it, so a nine-pane grid costs at most twenty batched calls an hour; failures back off separately, doubling from thirty seconds up to five minutes. The Pane Activity refresh control skips the cache and requests an immediate update for one pane; pending input is never used as a displayed summary.
 
 `/goal` in Alt+C Chat creates a goal for the current grid. Each review sends pane role and folder metadata plus bounded recent output from that grid to the configured API. Sleeping and exited panes are never command targets. Reviews label output by pane, report changed statuses in the transcript, and keep validated follow-ups bound to their intended PTYs if panes are reordered. Goals keep running when another grid is active; `/stop` ends only the current grid's goal.
 
@@ -604,13 +809,23 @@ GridBash can isolate Claude and Codex accounts in named directories. The auth ho
 GRIDBASH_AUTH_HOME > [auth].home > CLAUDE_PROFILES_HOME (legacy) > ~/.gridbash-auth
 ```
 
-Claude panes receive `CLAUDE_CONFIG_DIR=<profile-dir>` and Codex panes receive `CODEX_HOME=<profile-dir>`.
+Claude panes receive `CLAUDE_SECURESTORAGE_CONFIG_DIR=<profile-dir>`, which picks the Keychain entry (or `.credentials.json` off macOS) that holds the account's login. Settings, skills, hooks and conversations stay shared in `~/.claude`, so a pane can move to another account and resume the same conversation. A profile that is a link to `~/.claude` is the regular `claude` login. Codex panes receive `CODEX_HOME=<profile-dir>`.
+
+To add a Claude account, create its folder and sign in once:
+
+```sh
+mkdir -p ~/.gridbash-auth/work
+CLAUDE_SECURESTORAGE_CONFIG_DIR=~/.gridbash-auth/work claude auth login --email you@work.com
+ln -s ~/.claude ~/.gridbash-auth/personal   # name the login you already have
+```
+
+The tab bar shows every Claude account with five dots for its weekly usage, each about a fifth of the limit, amber once 85% is used, and the soonest weekly reset after a `↻`. GridBash refreshes it every two minutes. Claude only renews an account's access token while that account runs, so an idle account shows the last usage GridBash read, kept in `.usage-cache.json` in the auth home; a week whose reset has passed shows as empty. Alt+k lists the accounts on the focused Claude pane and moves it to the one you pick.
 
 The old default was `~/.claude-profiles`; profiles are not moved automatically. Move them to `~/.gridbash-auth`, point `[auth].home` at the old location, or keep the legacy `CLAUDE_PROFILES_HOME` override.
 
 Assignment is manual by default: a new pane uses the configured default for its agent kind, while an explicit per-pane selection is retained. With `auto_cycle = true`, new compatible panes are assigned round-robin across ready profiles of the same kind. Changing the policy does not restart panes already running.
 
-Press Alt+Shift+A to open the dedicated Auth Profiles view. A managed profile is an isolated Claude or Codex home: it keeps that account's login, agent settings, sessions, and usage separate from the normal agent home and from other profiles. The view keeps two actions distinct:
+Press Alt+Shift+A to open the dedicated Auth Profiles view. A Claude profile keeps only that account's login separate; a Codex profile is an isolated Codex home with its own login, settings, sessions, and usage. The view keeps two actions distinct:
 
 - **Focused pane:** highlighting a compatible profile and pressing Enter assigns it immediately, which restarts that pane.
 - **New pane policy:** per-agent defaults or round-robin assignment apply only when compatible panes start. They do not change panes already running.
@@ -631,7 +846,7 @@ Press Alt+Shift+A to open the dedicated Auth Profiles view. A managed profile is
 
 The focused pane can also be switched from Pane Activity: press Alt+p, select the auth control with Up/Down, choose a compatible profile with Left/Right, and press Enter. Applying a different account restarts only that pane. Press `r` in Pane Activity to refresh its snapshot.
 
-Usage reporting is best-effort. GridBash reads local auth metadata, masks account email addresses, and makes short-timeout requests with `curl.exe` on Windows or `curl` on macOS only when the Auth view is refreshed. Disable it with `usage_status = false`.
+Usage reporting is best-effort. GridBash reads local auth metadata, masks account email addresses, and makes short-timeout requests with `curl.exe` on Windows or `curl` on macOS every two minutes and when the Auth view is refreshed. Disable it with `usage_status = false`.
 
 ### Codex SQLite isolation
 

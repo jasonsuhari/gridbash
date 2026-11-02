@@ -1,5 +1,6 @@
 mod actions;
 mod adopt;
+mod agent_turn;
 mod app;
 mod auth;
 mod cli;
@@ -10,12 +11,17 @@ mod control;
 mod control_discovery;
 mod copy_mode;
 mod diagnostics;
+mod doctor;
+mod grid_presets;
 mod image_preview;
+mod input_trace;
+mod keeper;
 mod keybindings;
 mod layout;
 mod manager;
 mod output_capture;
 mod pane_host;
+mod park_watch;
 mod ports;
 mod process_priority;
 mod profiles;
@@ -23,6 +29,7 @@ mod pty;
 mod resume_picker;
 mod session;
 mod setup;
+mod shutdown;
 mod ui;
 mod usage;
 mod voice;
@@ -69,6 +76,7 @@ fn diagnostics_role(cli: &Cli) -> &'static str {
     match cli.command {
         Some(Command::Agent(_)) => "agent",
         Some(Command::Ctl(_)) => "ctl",
+        Some(Command::Doctor(_)) => "doctor",
         _ => "tui",
     }
 }
@@ -83,7 +91,7 @@ fn diagnostics_role(cli: &Cli) -> &'static str {
 /// reports. A panic in the same command is still recorded, because that is a
 /// defect wherever it happens.
 fn records_error_exits(role: &str) -> bool {
-    !matches!(role, "agent" | "ctl")
+    !matches!(role, "agent" | "ctl" | "doctor")
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -104,6 +112,10 @@ fn run(cli: Cli) -> Result<()> {
     }
 
     let mut config = Config::load(cli.config.as_deref())?;
+
+    if let Some(Command::Doctor(args)) = &cli.command {
+        return doctor::run(&config, args.fix, args.keys);
+    }
 
     if let Some(profile) = cli.set_default_profile.as_deref() {
         find_profile(&config, profile)?;

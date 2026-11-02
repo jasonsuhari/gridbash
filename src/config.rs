@@ -46,6 +46,19 @@ pub struct Config {
     pub keys: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub profiles: BTreeMap<String, Profile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keeper: Option<KeeperConfig>,
+}
+
+/// A pane that looks after open pull requests, shown on its own Keeper tab.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeeperConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +89,13 @@ pub struct UiConfig {
     pub refresh_ms: u64,
     #[serde(default, skip_serializing_if = "UiPalette::is_default")]
     pub palette: UiPalette,
+    /// Sent once to every agent `gridbash resume` reopens into a conversation,
+    /// after it has loaded. Empty sends nothing.
+    #[serde(
+        default = "UiConfig::default_resume_prompt",
+        skip_serializing_if = "UiConfig::is_default_resume_prompt"
+    )]
+    pub resume_prompt: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,6 +123,7 @@ pub enum PaletteColor {
     Yellow,
     Amber,
     Orange,
+    Oxblood,
     Red,
     Magenta,
     DarkGray,
@@ -120,6 +141,7 @@ impl Default for UiConfig {
             scrollback_rows: Self::default_scrollback_rows(),
             refresh_ms: Self::default_refresh_ms(),
             palette: UiPalette::default(),
+            resume_prompt: Self::default_resume_prompt(),
         }
     }
 }
@@ -166,6 +188,14 @@ impl UiConfig {
     fn is_default_refresh_ms(value: &u64) -> bool {
         *value == Self::default_refresh_ms()
     }
+
+    pub fn default_resume_prompt() -> String {
+        "GridBash was restarted. Continue your work, and restart any watchers or subagents you still need.".into()
+    }
+
+    fn is_default_resume_prompt(value: &String) -> bool {
+        *value == Self::default_resume_prompt()
+    }
 }
 
 impl Default for UiPalette {
@@ -182,11 +212,11 @@ impl Default for UiPalette {
 
 impl UiPalette {
     fn default_accent() -> PaletteColor {
-        PaletteColor::Cyan
+        PaletteColor::Oxblood
     }
 
     fn default_focus() -> PaletteColor {
-        PaletteColor::Yellow
+        PaletteColor::Oxblood
     }
 
     fn default_selected() -> PaletteColor {
@@ -239,10 +269,30 @@ impl ManagerConfig {
         if self.model.trim().is_empty() {
             return Err(anyhow!("set the manager model in Settings > Manager"));
         }
-        if self.api_key.trim().is_empty() {
-            return Err(anyhow!("set the manager API key in Settings > Manager"));
+        if self.resolved_api_key().is_none() {
+            return Err(anyhow!(
+                "set the manager API key in Settings > Manager, or export OPENAI_API_KEY"
+            ));
         }
         Ok(())
+    }
+
+    /// Key to authenticate the manager API with.
+    ///
+    /// Settings win, so a key typed into GridBash keeps working on a machine
+    /// that also exports one. `OPENAI_API_KEY` is the fallback because the
+    /// default endpoint is OpenAI's and that variable is already set wherever
+    /// its own tooling runs; requiring the key to be re-typed into Settings is
+    /// what left summaries silently off.
+    pub fn resolved_api_key(&self) -> Option<String> {
+        let configured = self.api_key.trim();
+        if !configured.is_empty() {
+            return Some(configured.to_string());
+        }
+        std::env::var("OPENAI_API_KEY")
+            .ok()
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
     }
 
     pub fn is_configured(&self) -> bool {
@@ -625,6 +675,41 @@ mod tests {
         let serialized = toml::to_string(&config).expect("serialize config");
         assert!(serialized.contains("[manager]"));
         assert!(serialized.contains("api_key = \"secret\""));
+    }
+
+    #[test]
+    fn a_configured_api_key_beats_the_environment() {
+        let configured = ManagerConfig {
+            api_key: "  from-settings  ".into(),
+            ..ManagerConfig::default()
+        };
+        // Settings win so a key typed into GridBash keeps working on a machine
+        // that also exports one, and the value is trimmed because a key pasted
+        // with a stray space authenticates as garbage.
+        assert_eq!(
+            configured.resolved_api_key().as_deref(),
+            Some("from-settings")
+        );
+
+        let blank = ManagerConfig {
+            api_key: "   ".into(),
+            ..ManagerConfig::default()
+        };
+        // Whitespace is not a key, so it falls through to the environment
+        // rather than being sent as a bearer token.
+        assert_eq!(
+            blank.resolved_api_key(),
+            std::env::var("OPENAI_API_KEY")
+                .ok()
+                .map(|key| key.trim().to_string())
+                .filter(|key| !key.is_empty())
+        );
+        // A default config is only usable when the environment supplies the
+        // key; that is the whole point of the fallback.
+        assert_eq!(
+            ManagerConfig::default().validate().is_ok(),
+            ManagerConfig::default().resolved_api_key().is_some()
+        );
     }
 
     #[test]

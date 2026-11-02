@@ -11,7 +11,10 @@ use std::{
 
 use serde::Deserialize;
 
-use crate::{auth::AgentKind, diagnostics};
+use crate::{
+    auth::{self, AgentKind},
+    diagnostics,
+};
 
 const CLAUDE_USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/usage";
@@ -217,7 +220,7 @@ fn available_percent(used_percent: f64) -> u8 {
 }
 
 fn fetch_claude_usage(dir: &Path) -> Option<UsageWindows> {
-    let token = read_claude_access_token(dir)?;
+    let token = auth::claude_access_token(dir)?;
     let output = run_curl(&[
         "-s",
         "-m",
@@ -289,24 +292,6 @@ fn run_curl(args: &[&str]) -> Option<String> {
         return None;
     }
     Some(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-fn read_claude_access_token(dir: &Path) -> Option<String> {
-    let raw = fs::read_to_string(dir.join(".credentials.json")).ok()?;
-    let creds: ClaudeCredentials = serde_json::from_str(&raw).ok()?;
-    creds.claude_ai_oauth?.access_token
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeCredentials {
-    #[serde(rename = "claudeAiOauth")]
-    claude_ai_oauth: Option<ClaudeOauth>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ClaudeOauth {
-    #[serde(rename = "accessToken")]
-    access_token: Option<String>,
 }
 
 fn read_codex_auth(dir: &Path) -> Option<CodexAuth> {

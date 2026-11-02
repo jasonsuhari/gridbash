@@ -250,6 +250,10 @@ pub enum ControlCommand {
         /// New pane name, or `None` to clear it back to the pane number.
         name: Option<String>,
     },
+    /// The calling parked pane says its condition holds; a reviewer checks.
+    ReportDone {
+        claim: String,
+    },
 }
 
 impl ControlCommand {
@@ -519,6 +523,12 @@ pub fn run_agent(args: &AgentArgs) -> Result<()> {
             ControlCommand::RenamePane {
                 pane: pane.as_deref().map(PaneTarget::parse).transpose()?,
                 name: rename_pane_name(name.as_deref(), *clear)?,
+            },
+            Some(agent_token(args)?),
+        ),
+        AgentAction::Done { claim } => (
+            ControlCommand::ReportDone {
+                claim: read_agent_prompt(claim.as_deref())?,
             },
             Some(agent_token(args)?),
         ),

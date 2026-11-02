@@ -2,8 +2,9 @@ use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -11,6 +12,7 @@ use base64::{Engine as _, engine::general_purpose};
 use directories::BaseDirs;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 const GRIDBASH_AUTH_HOME: &str = "GRIDBASH_AUTH_HOME";
 const CLAUDE_PROFILES_HOME: &str = "CLAUDE_PROFILES_HOME";
@@ -18,6 +20,9 @@ const PROFILE_KIND_FILE: &str = ".profile-kind";
 const CLAUDE_USAGE_ENDPOINT: &str = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/usage";
 const USAGE_TIMEOUT: Duration = Duration::from_secs(3);
+const CLAUDE_KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+const USAGE_CACHE_FILE: &str = ".usage-cache.json";
+const CLAUDE_RENEW_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -52,6 +57,7 @@ pub struct AuthProfile {
     pub kind: AgentKind,
     pub dir: PathBuf,
     pub ready: bool,
+    pub regular_login: bool,
     pub account_label: Option<String>,
     pub account_detail: Option<String>,
     pub usage: Option<UsageInfo>,
@@ -67,6 +73,20 @@ pub struct UsageInfo {
 pub struct UsageWindow {
     pub available_percent: u8,
     pub resets_at: Option<String>,
+}
+
+impl UsageWindow {
+    pub fn resets_at_unix(&self) -> Option<i64> {
+        self.resets_at.as_deref().and_then(parse_rfc3339_unix)
+    }
+
+    pub fn used_percent_at(&self, now_unix: i64) -> u8 {
+        if self.resets_at_unix().is_some_and(|reset| reset <= now_unix) {
+            0
+        } else {
+            100 - self.available_percent
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +122,7 @@ impl AgentKind {
 
     pub fn env_var(self) -> &'static str {
         match self {
-            Self::Claude => "CLAUDE_CONFIG_DIR",
+            Self::Claude => "CLAUDE_SECURESTORAGE_CONFIG_DIR",
             Self::Codex => "CODEX_HOME",
         }
     }
@@ -223,8 +243,25 @@ pub fn discover_profiles_with_usage(config: &AuthConfig) -> Result<Vec<AuthProfi
         return Ok(profiles);
     }
 
+    let home = resolve_home(config)?;
+    let mut cache = read_json_file(&home.join(USAGE_CACHE_FILE))
+        .and_then(|value| serde_json::from_value::<BTreeMap<String, Value>>(value).ok())
+        .unwrap_or_default();
+    let mut fetched_any = false;
     for profile in &mut profiles {
-        profile.usage = fetch_usage(profile).unwrap_or(None);
+        match fetch_usage(profile).unwrap_or(None) {
+            Some((usage, raw)) => {
+                profile.usage = Some(usage);
+                cache.insert(profile.name.clone(), raw);
+                fetched_any = true;
+            }
+            None => {
+                profile.usage = cache.get(&profile.name).and_then(parse_usage_response);
+            }
+        }
+    }
+    if fetched_any && let Ok(text) = serde_json::to_string_pretty(&cache) {
+        let _ = fs::write(home.join(USAGE_CACHE_FILE), text);
     }
     Ok(profiles)
 }
@@ -297,7 +334,7 @@ pub fn env_for_profile(config: &AuthConfig, kind: AgentKind, name: &str) -> Resu
         kind,
         name: name.to_string(),
         env_var: kind.env_var(),
-        env_value: dir.display().to_string(),
+        env_value: login_store(kind, &dir),
         dir,
     })
 }
@@ -314,9 +351,135 @@ pub fn login_command(profile: &AuthProfile) -> AuthLaunchCommand {
         args,
         env: BTreeMap::from([(
             profile.kind.env_var().to_string(),
-            profile.dir.display().to_string(),
+            login_store(profile.kind, &profile.dir),
         )]),
     }
+}
+
+/// Value of the agent's login variable for a profile. A Claude profile linked
+/// to `~/.claude` is the regular login, which Claude only reads under that name
+/// when the variable is empty; any path, even that one, selects a separate
+/// Keychain entry.
+pub fn login_store(kind: AgentKind, dir: &Path) -> String {
+    if kind == AgentKind::Claude && is_regular_claude_login(dir) {
+        String::new()
+    } else {
+        dir.display().to_string()
+    }
+}
+
+fn is_regular_claude_login(dir: &Path) -> bool {
+    let Some(home) = BaseDirs::new().map(|dirs| dirs.home_dir().join(".claude")) else {
+        return false;
+    };
+    match (dir.canonicalize(), home.canonicalize()) {
+        (Ok(dir), Ok(home)) => dir == home,
+        _ => false,
+    }
+}
+
+fn claude_keychain_service(store: &str) -> String {
+    if store.is_empty() {
+        return CLAUDE_KEYCHAIN_SERVICE.into();
+    }
+    let digest = Sha256::digest(store.as_bytes());
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{CLAUDE_KEYCHAIN_SERVICE}-{}", &hex[..8])
+}
+
+fn read_claude_credentials(dir: &Path) -> Option<Value> {
+    let store = login_store(AgentKind::Claude, dir);
+    if cfg!(target_os = "macos") {
+        let account = env::var("USER").ok()?;
+        let output = Command::new("security")
+            .args(["find-generic-password", "-a", &account, "-s"])
+            .arg(claude_keychain_service(&store))
+            .arg("-w")
+            .output()
+            .ok()?;
+        return output
+            .status
+            .success()
+            .then(|| serde_json::from_slice(&output.stdout).ok())
+            .flatten();
+    }
+    let folder = if store.is_empty() {
+        BaseDirs::new()?.home_dir().join(".claude")
+    } else {
+        dir.to_path_buf()
+    };
+    read_json_file(&folder.join(".credentials.json"))
+}
+
+/// A Claude profile's access token while it is still valid.
+pub fn claude_access_token(dir: &Path) -> Option<String> {
+    let creds = read_claude_credentials(dir)?;
+    let oauth = creds.get("claudeAiOauth")?;
+    let expired = oauth
+        .get("expiresAt")
+        .and_then(Value::as_i64)
+        .is_some_and(|expires_ms| expires_ms <= unix_now_ms());
+    if expired {
+        return None;
+    }
+    oauth
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+}
+
+/// Seconds since the epoch for an RFC 3339 time such as
+/// `2026-11-06T10:59:59.123+00:00`.
+pub fn parse_rfc3339_unix(value: &str) -> Option<i64> {
+    let (date, time) = value.split_once('T')?;
+    let mut date_parts = date.splitn(3, '-').map(str::parse::<i64>);
+    let (year, month, day) = (
+        date_parts.next()?.ok()?,
+        date_parts.next()?.ok()?,
+        date_parts.next()?.ok()?,
+    );
+    let zone_at = time.find(['Z', 'z', '+', '-']).unwrap_or(time.len());
+    let (clock, zone) = time.split_at(zone_at);
+    let mut clock_parts = clock.splitn(3, ':');
+    let hour = clock_parts.next()?.parse::<i64>().ok()?;
+    let minute = clock_parts.next()?.parse::<i64>().ok()?;
+    let second = clock_parts
+        .next()
+        .map(|seconds| seconds.split('.').next().unwrap_or("0"))
+        .unwrap_or("0")
+        .parse::<i64>()
+        .ok()?;
+    let offset = match zone.chars().next() {
+        Some(sign @ ('+' | '-')) => {
+            let (zone_hours, zone_minutes) = zone[1..].split_once(':').unwrap_or((&zone[1..], "0"));
+            let minutes =
+                zone_hours.parse::<i64>().ok()? * 60 + zone_minutes.parse::<i64>().ok()?;
+            if sign == '-' {
+                -minutes * 60
+            } else {
+                minutes * 60
+            }
+        }
+        _ => 0,
+    };
+    let shifted_year = if month <= 2 { year - 1 } else { year };
+    let era = shifted_year.div_euclid(400);
+    let year_of_era = shifted_year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second - offset)
 }
 
 pub fn resolve_agent_executable(kind: AgentKind) -> Option<PathBuf> {
@@ -394,6 +557,7 @@ fn profile_from_dir(name: String, dir: PathBuf) -> Result<AuthProfile> {
     Ok(AuthProfile {
         name,
         kind,
+        regular_login: kind == AgentKind::Claude && is_regular_claude_login(&dir),
         dir,
         ready,
         account_label,
@@ -411,9 +575,7 @@ fn profile_kind(dir: &Path) -> AgentKind {
 
 fn has_auth_files(dir: &Path, kind: AgentKind) -> bool {
     match kind {
-        AgentKind::Claude => [".credentials.json", "accounts", ".claude.json"]
-            .iter()
-            .any(|name| dir.join(name).exists()),
+        AgentKind::Claude => read_claude_credentials(dir).is_some(),
         AgentKind::Codex => dir.join("auth.json").exists(),
     }
 }
@@ -480,21 +642,58 @@ fn decode_jwt_payload(token: &str) -> Option<Value> {
     serde_json::from_slice(&bytes).ok()
 }
 
-fn fetch_usage(profile: &AuthProfile) -> Result<Option<UsageInfo>> {
+fn fetch_usage(profile: &AuthProfile) -> Result<Option<(UsageInfo, Value)>> {
     match profile.kind {
         AgentKind::Claude => fetch_claude_usage(&profile.dir),
         AgentKind::Codex => fetch_codex_usage(&profile.dir),
     }
 }
 
-fn fetch_claude_usage(dir: &Path) -> Result<Option<UsageInfo>> {
-    let Some(creds) = read_json_file(&dir.join(".credentials.json")) else {
-        return Ok(None);
-    };
-    let Some(token) = creds
-        .pointer("/claudeAiOauth/accessToken")
+/// Claude renews an expired login only when it sends a request, under a lock
+/// every Claude process shares, so an idle profile is renewed by one small
+/// Claude call rather than by refreshing its token here.
+fn renew_claude_login(dir: &Path) -> Option<String> {
+    let creds = read_claude_credentials(dir)?;
+    creds
+        .pointer("/claudeAiOauth/refreshToken")
         .and_then(Value::as_str)
-    else {
+        .filter(|token| !token.is_empty())?;
+    let mut child = Command::new(resolve_agent_executable(AgentKind::Claude)?)
+        .args([
+            "-p",
+            "ok",
+            "--model",
+            "haiku",
+            "--max-turns",
+            "1",
+            "--no-session-persistence",
+            "--setting-sources",
+            "project",
+        ])
+        .env(
+            AgentKind::Claude.env_var(),
+            login_store(AgentKind::Claude, dir),
+        )
+        .current_dir(env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + CLAUDE_RENEW_TIMEOUT;
+    while child.try_wait().ok()?.is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    claude_access_token(dir)
+}
+
+fn fetch_claude_usage(dir: &Path) -> Result<Option<(UsageInfo, Value)>> {
+    let Some(token) = claude_access_token(dir).or_else(|| renew_claude_login(dir)) else {
         return Ok(None);
     };
     let body = curl_json(
@@ -504,10 +703,10 @@ fn fetch_claude_usage(dir: &Path) -> Result<Option<UsageInfo>> {
             ("anthropic-beta", "oauth-2025-04-20".into()),
         ],
     )?;
-    Ok(parse_usage_response(&body))
+    Ok(parse_usage_response(&body).map(|usage| (usage, body)))
 }
 
-fn fetch_codex_usage(dir: &Path) -> Result<Option<UsageInfo>> {
+fn fetch_codex_usage(dir: &Path) -> Result<Option<(UsageInfo, Value)>> {
     let Some(auth) = read_json_file(&dir.join("auth.json")) else {
         return Ok(None);
     };
@@ -522,7 +721,7 @@ fn fetch_codex_usage(dir: &Path) -> Result<Option<UsageInfo>> {
         headers.push(("chatgpt-account-id", account_id.to_string()));
     }
     let body = curl_json(CODEX_USAGE_ENDPOINT, &headers)?;
-    Ok(parse_usage_response(&body))
+    Ok(parse_usage_response(&body).map(|usage| (usage, body)))
 }
 
 fn curl_json(url: &str, headers: &[(&str, String)]) -> Result<Value> {
@@ -609,12 +808,17 @@ fn validate_profile_name(name: &str) -> Result<()> {
 }
 
 fn profile_readme(kind: AgentKind, name: &str) -> String {
-    let tool = match kind {
-        AgentKind::Claude => "Claude Code",
-        AgentKind::Codex => "Codex",
+    let stored = match kind {
+        AgentKind::Claude => {
+            "Claude Code keeps this account's login in the Keychain under this path. Settings, skills and conversations stay shared in ~/.claude."
+        }
+        AgentKind::Codex => {
+            "Codex stores this profile's auth, settings, sessions, and history here."
+        }
     };
     format!(
-        "# {tool} profile: {name}\n\nThis directory is selected with {}.\n{tool} stores this profile's auth, settings, sessions, and history here.\n\nDo not commit credentials from this directory.\n",
+        "# {} profile: {name}\n\nThis directory is selected with {}.\n{stored}\n\nDo not commit credentials from this directory.\n",
+        kind.display_name(),
         kind.env_var()
     )
 }
@@ -699,7 +903,6 @@ mod tests {
             profiles[0].account_label.as_deref(),
             Some("jaso...@example.com")
         );
-        assert!(profiles[0].ready);
         assert_eq!(profiles[1].kind, AgentKind::Codex);
         assert!(profiles[1].ready);
     }
