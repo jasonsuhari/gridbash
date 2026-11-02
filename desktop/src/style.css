@@ -1,0 +1,180 @@
+@import "@xterm/xterm/css/xterm.css";
+
+:root {
+  --ink: rgb(7, 10, 14);
+  --app-bg: rgb(11, 15, 20);
+  --surface: rgb(16, 22, 29);
+  --surface-hi: rgb(26, 35, 45);
+  --line: rgb(42, 53, 66);
+  --text: rgb(230, 237, 243);
+  --text-dim: rgb(150, 165, 180);
+  --text-faint: rgb(98, 113, 129);
+  --oxblood: rgb(122, 30, 38);
+  --oxblood-bright: rgb(196, 58, 70);
+  --waiting: rgb(255, 196, 61);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  color: var(--text);
+  background: var(--ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+#titlebar {
+  height: 38px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding-left: 84px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--oxblood-bright);
+}
+
+#hint {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+#grid {
+  flex: 1;
+  display: grid;
+  gap: 6px;
+  padding: 6px;
+  min-height: 0;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--app-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.pane.focused {
+  border-color: var(--oxblood-bright);
+  box-shadow: 0 0 0 1px var(--oxblood);
+}
+
+.pane-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.pane.focused .pane-header {
+  background: linear-gradient(90deg, rgba(122, 30, 38, 0.55), var(--surface) 70%);
+}
+
+.pane-number {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-dim);
+  background: var(--surface-hi);
+}
+
+.pane.focused .pane-number {
+  color: var(--text);
+  background: var(--oxblood);
+}
+
+.pane-name {
+  font-size: 15px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pane-name[contenteditable="true"] {
+  outline: 1px solid var(--oxblood-bright);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.pane-program {
+  flex: none;
+  font: 600 11px "SF Mono", Menlo, monospace;
+  color: var(--text-dim);
+  background: var(--surface-hi);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.pane-folder {
+  margin-left: auto;
+  min-width: 0;
+  font: 12px "SF Mono", Menlo, monospace;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.pane-activity {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--line);
+  transition: background 300ms;
+}
+
+.pane.busy .pane-activity {
+  background: var(--oxblood-bright);
+}
+
+.pane.exited .pane-activity {
+  background: var(--text-faint);
+}
+
+.pane-body {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 4px 4px 8px;
+}
+
+.pane-body .xterm {
+  height: 100%;
+}

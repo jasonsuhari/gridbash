@@ -1,0 +1,283 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+@font-face { font-family: "Geist"; src: url("../node_modules/@fontsource-variable/geist/files/geist-latin-wght-normal.woff2") format("woff2"); font-weight: 100 900; }
+@font-face { font-family: "Geist Mono"; src: url("../node_modules/@fontsource-variable/geist-mono/files/geist-mono-latin-wght-normal.woff2") format("woff2"); font-weight: 100 900; }
+
+:root {
+  --bg-0: #07080a;
+  --bg-1: #0c0d10;
+  --bg-2: #121318;
+  --bg-3: #1a1b21;
+  --hair: rgba(255, 255, 255, 0.06);
+  --hair-2: rgba(255, 255, 255, 0.1);
+  --text: #eceef2;
+  --text-2: #a4a8b3;
+  --text-3: #6a6f7b;
+  --ox: #7a1e26;
+  --ox-2: #b8303d;
+  --ox-3: #ff5a67;
+  --ox-glow: rgba(214, 52, 68, 0.35);
+  --amber: #ffc43d;
+  --green: #4ade80;
+  --claude: #e07a55;
+  --mono: "Geist Mono", "SF Mono", Menlo, monospace;
+  --sans: "Geist", -apple-system, sans-serif;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1512px; height: 946px; overflow: hidden; background: var(--bg-0); color: var(--text); font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+.window { position: relative; width: 100%; height: 100%; overflow: hidden; }
+.lights { position: absolute; top: 18px; left: 18px; display: flex; gap: 8px; z-index: 10; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; background: #ff5f57; }
+.lights i:nth-child(2) { background: #febc2e; }
+.lights i:nth-child(3) { background: #28c840; }
+
+/* terminal text */
+.term { font-family: var(--mono); font-size: 12px; line-height: 1.55; color: #c9ccd4; white-space: pre; overflow: hidden; }
+.term .d { color: var(--text-3); }
+.term .c { color: var(--claude); }
+.term .g { color: var(--green); }
+.term .r { color: var(--ox-3); }
+.term .b { color: #fff; font-weight: 600; }
+.term .a { color: var(--amber); }
+.term .add { color: #86efac; background: rgba(74, 222, 128, 0.08); }
+.term .box { color: #3a3d47; }
+.term .vbar { display: inline-block; width: 1ch; height: 1.55em; vertical-align: top; color: transparent; background: linear-gradient(#3a3d47, #3a3d47) center / 1px 100% no-repeat; }
+.term .sel { color: #fff; background: rgba(184, 48, 61, 0.25); }
+.term .cur { background: #e8e8e8; color: #000; }
+
+/* status pills */
+.pill { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 9px; border-radius: 999px; font-size: 11.5px; font-weight: 550; letter-spacing: 0.01em; white-space: nowrap; }
+.pill .dot { width: 6px; height: 6px; border-radius: 50%; }
+.pill.working { color: #ffd0d4; background: rgba(184, 48, 61, 0.16); box-shadow: inset 0 0 0 1px rgba(255, 90, 103, 0.22); }
+.pill.working .dot { background: var(--ox-3); box-shadow: 0 0 10px var(--ox-3); }
+.pill.waiting { color: #ffe2a0; background: rgba(255, 196, 61, 0.12); box-shadow: inset 0 0 0 1px rgba(255, 196, 61, 0.3); }
+.pill.waiting .dot { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
+.pill.idle { color: var(--text-2); background: rgba(255, 255, 255, 0.04); box-shadow: inset 0 0 0 1px var(--hair); }
+.pill.idle .dot { background: var(--text-3); }
+.pill.done { color: #bbf7d0; background: rgba(74, 222, 128, 0.08); box-shadow: inset 0 0 0 1px rgba(74, 222, 128, 0.2); }
+.pill.done .dot { background: var(--green); }
+
+.glyph { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; flex: none; font-size: 14px; }
+.glyph.claude { background: linear-gradient(145deg, #3a2018, #241410); color: var(--claude); box-shadow: inset 0 0 0 1px rgba(224, 122, 85, 0.25); }
+.glyph.shell { background: linear-gradient(145deg, #1f2128, #15161b); color: var(--text-2); box-shadow: inset 0 0 0 1px var(--hair-2); font-family: var(--mono); font-size: 12px; font-weight: 700; }
+.kbd { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); border: 1px solid var(--hair-2); border-radius: 5px; padding: 1px 5px; }
+
+/* ===================== A: Atelier ===================== */
+.A .window { background: radial-gradient(1200px 600px at 20% -10%, rgba(122, 30, 38, 0.32), transparent 60%), radial-gradient(900px 500px at 110% 110%, rgba(122, 30, 38, 0.14), transparent 60%), var(--bg-0); display: grid; grid-template-columns: 236px 1fr; }
+.A .side { padding: 56px 12px 16px; background: rgba(255, 255, 255, 0.015); border-right: 1px solid var(--hair); backdrop-filter: blur(30px); display: flex; flex-direction: column; gap: 4px; }
+.A .side h6 { font-size: 10.5px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-3); padding: 14px 10px 6px; }
+.A .grid-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 9px; color: var(--text-2); font-size: 13.5px; font-weight: 500; }
+.A .grid-item.on { background: linear-gradient(90deg, rgba(184, 48, 61, 0.22), rgba(184, 48, 61, 0.05)); color: var(--text); box-shadow: inset 0 0 0 1px rgba(255, 90, 103, 0.18); }
+.A .grid-item .n { margin-left: auto; font-size: 11px; color: var(--text-3); font-family: var(--mono); }
+.A .grid-item .dots { display: flex; gap: 3px; }
+.A .grid-item .dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--text-3); }
+.A .grid-item .dots i.w { background: var(--ox-3); box-shadow: 0 0 6px var(--ox-3); }
+.A .grid-item .dots i.y { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+.A .brand { position: absolute; top: 15px; left: 92px; font-weight: 700; font-size: 14px; letter-spacing: -0.01em; display: flex; align-items: center; gap: 7px; }
+.A .brand b { width: 16px; height: 16px; border-radius: 4px; background: linear-gradient(135deg, var(--ox-3), var(--ox)); box-shadow: 0 0 14px var(--ox-glow); }
+.A .main { display: flex; flex-direction: column; min-width: 0; }
+.A .top { height: 52px; display: flex; align-items: center; gap: 12px; padding: 0 20px; }
+.A .top h1 { font-size: 17px; font-weight: 650; letter-spacing: -0.015em; }
+.A .top .meta { font-size: 12.5px; color: var(--text-3); }
+.A .top .right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+.A .btn { height: 28px; padding: 0 11px; border-radius: 8px; font-size: 12.5px; font-weight: 550; color: var(--text-2); background: rgba(255, 255, 255, 0.04); box-shadow: inset 0 0 0 1px var(--hair-2); display: inline-flex; align-items: center; gap: 7px; }
+.A .btn.primary { color: #fff; background: linear-gradient(180deg, #c4384a, #8e2230); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 6px 18px rgba(184, 48, 61, 0.35); }
+.A .panes { flex: 1; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 12px; padding: 0 16px 12px; min-height: 0; }
+.A .card { position: relative; display: flex; flex-direction: column; min-height: 0; border-radius: 14px; background: linear-gradient(180deg, rgba(20, 21, 26, 0.92), rgba(12, 13, 16, 0.96)); box-shadow: inset 0 0 0 1px var(--hair), 0 20px 40px rgba(0, 0, 0, 0.35); overflow: hidden; }
+.A .card.focus { box-shadow: inset 0 0 0 1px rgba(255, 90, 103, 0.55), 0 0 0 4px rgba(184, 48, 61, 0.12), 0 24px 60px rgba(122, 30, 38, 0.35); }
+.A .card.focus::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 90px; background: linear-gradient(180deg, rgba(184, 48, 61, 0.16), transparent); pointer-events: none; }
+.A .card-head { position: relative; display: flex; align-items: center; gap: 11px; padding: 13px 14px 11px; }
+.A .titles { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.A .titles b { font-size: 14.5px; font-weight: 650; letter-spacing: -0.01em; }
+.A .titles span { font-size: 12px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.A .titles span em { font-style: normal; color: var(--text-2); }
+.A .card-head .pill { margin-left: auto; }
+.A .card .term { flex: 1; padding: 4px 16px 12px; }
+.A .card:not(.focus) .term { opacity: 0.72; }
+.A .num { position: absolute; right: 12px; bottom: 10px; }
+.A .composer { margin: 0 16px 16px; height: 46px; border-radius: 12px; display: flex; align-items: center; gap: 12px; padding: 0 14px; background: rgba(255, 255, 255, 0.035); box-shadow: inset 0 0 0 1px var(--hair-2); color: var(--text-3); font-size: 13.5px; }
+.A .composer .spark { color: var(--ox-3); font-size: 15px; }
+.A .composer .right { margin-left: auto; display: flex; gap: 6px; }
+
+/* ===================== B: Spotlight ===================== */
+.B .window { background: radial-gradient(900px 700px at 35% 30%, rgba(122, 30, 38, 0.22), transparent 65%), var(--bg-0); display: flex; flex-direction: column; }
+.B .bar { height: 52px; display: flex; align-items: center; padding: 0 16px 0 96px; gap: 6px; }
+.B .tab { height: 30px; padding: 0 13px; border-radius: 9px; display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 550; color: var(--text-3); }
+.B .tab.on { color: var(--text); background: rgba(255, 255, 255, 0.06); box-shadow: inset 0 0 0 1px var(--hair-2); }
+.B .tab i { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
+.B .tab i.w { background: var(--ox-3); box-shadow: 0 0 8px var(--ox-3); }
+.B .tab i.y { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+.B .bar .right { margin-left: auto; display: flex; gap: 10px; align-items: center; color: var(--text-3); font-size: 12px; }
+.B .stage { flex: 1; display: grid; grid-template-columns: 1fr 340px; gap: 14px; padding: 2px 16px 16px; min-height: 0; }
+.B .hero { position: relative; display: flex; flex-direction: column; border-radius: 16px; overflow: hidden; background: linear-gradient(180deg, #121318, #0b0c0f); box-shadow: inset 0 0 0 1px rgba(255, 90, 103, 0.4), 0 0 0 5px rgba(184, 48, 61, 0.08), 0 30px 80px rgba(122, 30, 38, 0.32); }
+.B .hero-head { display: flex; align-items: center; gap: 14px; padding: 18px 20px 14px; background: linear-gradient(180deg, rgba(184, 48, 61, 0.14), transparent); }
+.B .hero-head .glyph { width: 38px; height: 38px; border-radius: 11px; font-size: 19px; }
+.B .hero-head b { font-size: 20px; font-weight: 680; letter-spacing: -0.02em; }
+.B .hero-head .sub { font-size: 13px; color: var(--text-3); margin-top: 3px; }
+.B .hero-head .sub em { font-style: normal; color: var(--text-2); }
+.B .hero-head .pill { margin-left: auto; height: 26px; font-size: 12.5px; padding: 0 12px; }
+.B .hero .term { flex: 1; padding: 6px 22px 16px; font-size: 13px; }
+.B .rail { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+.B .mini { flex: 1; display: flex; flex-direction: column; border-radius: 14px; overflow: hidden; background: linear-gradient(180deg, #111216, #0b0c0f); box-shadow: inset 0 0 0 1px var(--hair); min-height: 0; position: relative; }
+.B .mini.wait { box-shadow: inset 0 0 0 1px rgba(255, 196, 61, 0.45), 0 0 30px rgba(255, 196, 61, 0.08); }
+.B .mini-head { display: flex; align-items: center; gap: 10px; padding: 11px 12px 8px; }
+.B .mini-head b { font-size: 13.5px; font-weight: 650; }
+.B .mini-head .pill { margin-left: auto; height: 20px; font-size: 10.5px; }
+.B .mini .term { flex: 1; font-size: 9.5px; line-height: 1.45; padding: 0 12px; opacity: 0.75; -webkit-mask-image: linear-gradient(180deg, #000 55%, transparent); }
+.B .mini .kbd { position: absolute; right: 10px; bottom: 9px; }
+
+/* ===================== C: Mosaic ===================== */
+.C .window { background: var(--bg-0); display: flex; flex-direction: column; }
+.C .bar { height: 46px; display: flex; align-items: center; gap: 18px; padding: 0 18px 0 96px; border-bottom: 1px solid var(--hair); background: linear-gradient(180deg, #0e0f12, #0a0b0d); }
+.C .bar .crumb { font-size: 13px; color: var(--text-3); }
+.C .bar .crumb b { color: var(--text); font-weight: 600; }
+.C .bar .summary { display: flex; gap: 8px; margin-left: auto; }
+.C .tiles { flex: 1; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; gap: 1px; background: var(--hair); min-height: 0; }
+.C .tile { position: relative; background: var(--bg-1); display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.C .tile .wash { position: absolute; inset: 0 0 auto 0; height: 3px; background: var(--hair-2); }
+.C .tile.focus .wash { height: 3px; background: linear-gradient(90deg, var(--ox-3), var(--ox) 70%, transparent); box-shadow: 0 0 24px var(--ox-glow); }
+.C .tile.wait .wash { background: linear-gradient(90deg, var(--amber), transparent 80%); }
+.C .tile.focus { background: radial-gradient(700px 240px at 0% 0%, rgba(184, 48, 61, 0.13), transparent 70%), var(--bg-1); }
+.C .tile-head { display: flex; align-items: baseline; gap: 12px; padding: 18px 20px 6px; }
+.C .tile-head .idx { font-family: var(--mono); font-size: 12px; color: var(--text-3); }
+.C .tile.focus .tile-head .idx { color: var(--ox-3); }
+.C .tile-head b { font-size: 22px; font-weight: 700; letter-spacing: -0.025em; }
+.C .tile-head .pill { margin-left: auto; align-self: center; }
+.C .tile-sub { padding: 0 20px 10px 44px; font-size: 12.5px; color: var(--text-3); display: flex; gap: 14px; }
+.C .tile-sub em { font-style: normal; color: var(--text-2); }
+.C .tile .term { flex: 1; padding: 4px 20px 14px 44px; }
+.C .tile:not(.focus) .term { opacity: 0.66; }
+
+.label { position: fixed; bottom: 14px; right: 18px; font: 600 12px var(--sans); color: rgba(255,255,255,0.35); letter-spacing: 0.08em; text-transform: uppercase; z-index: 99; }
+</style>
+</head>
+<body>
+<div class="window" id="root"><div class="lights"><i></i><i></i><i></i></div></div>
+<script>
+const variant = new URLSearchParams(location.search).get("v") || "A";
+document.body.className = variant;
+
+const strip = (html) => html.replace(/<[^>]+>/g, "").replace(/&gt;/g, ">").replace(/&lt;/g, "<").replace(/&amp;/g, "&");
+const box = (width, rows) => [
+  `<span class="box">╭${"─".repeat(width)}╮</span>`,
+  ...rows.map((row) => `<span class="vbar">│</span> ${row}${" ".repeat(Math.max(0, width - 1 - [...strip(row)].length))}<span class="vbar">│</span>`),
+  `<span class="box">╰${"─".repeat(width)}╯</span>`,
+].join("\n");
+
+const T = {
+  open: `<span class="c">⏺</span> <span class="b">Read</span><span class="d">(apps/api/src/payments/webhooks.ts)</span>
+  <span class="d">⎿  Read 214 lines</span>
+
+<span class="c">⏺</span> <span class="b">Update</span><span class="d">(apps/api/src/payments/webhooks.ts)</span>
+  <span class="d">⎿  Updated with 12 additions and 3 removals</span>
+     <span class="d">41</span> <span class="add">+  const retry = backoff({ base: 500, max: 8 });</span>
+     <span class="d">42</span> <span class="add">+  await retry(() => settle(event.id));</span>
+
+<span class="c">⏺</span> <span class="b">Bash</span><span class="d">(pnpm test payments)</span>
+  <span class="d">⎿</span>  <span class="g">✓</span> 48 passed <span class="d">(2.1s)</span>
+
+<span class="c">✻ Wiring retries…</span> <span class="d">(3m 12s · ↓ 4.1k tokens · esc to interrupt)</span>
+${box(54, [`<span class="d">&gt;</span> <span class="cur"> </span>`])}`,
+  doc: `<span class="c">⏺</span> I traced the missing receipts to the PDF worker.
+  The queue drops jobs over 8 MB. Merging the fix:
+
+${box(54, ['<span class="b">Bash command</span>', '  gh pr merge 2298 --squash', '', 'Do you want to proceed?', '<span class="sel">❯ 1. Yes</span>', "  2. Yes, and don't ask again for gh pr merge", '  3. No, and tell Claude what to do differently'])}`,
+  task: `<span class="d">~/Documents/GitHub/persona_v2</span> <span class="r">❯</span> pnpm --filter tasks test
+
+ <span class="g">✓</span> connect/oauth.test.ts <span class="d">(14)</span>
+ <span class="g">✓</span> connect/sync.test.ts <span class="d">(22)</span>
+ <span class="g">✓</span> connect/webhooks.test.ts <span class="d">(9)</span>
+
+ <span class="b">Test Files</span>  <span class="g">3 passed</span> <span class="d">(3)</span>
+      <span class="b">Tests</span>  <span class="g">45 passed</span> <span class="d">(45)</span>
+   <span class="b">Duration</span>  1.84s
+
+<span class="d">~/Documents/GitHub/persona_v2</span> <span class="r">❯</span> <span class="cur"> </span>`,
+  ff: `<span class="c">⏺</span> <span class="b">Search</span><span class="d">(pattern: "referral", path: "apps/web")</span>
+  <span class="d">⎿  Found 23 files</span>
+
+<span class="c">⏺</span> <span class="b">Read</span><span class="d">(apps/web/src/flags/referral.ts)</span>
+  <span class="d">⎿  Read 88 lines</span>
+
+<span class="c">⏺</span> The referral flag is checked in three places, but the
+  invite screen reads it before the flags have loaded.
+
+<span class="c">✻ Planning…</span> <span class="d">(48s · ↓ 1.2k tokens)</span>`,
+};
+
+const panes = [
+  { name: "OpenCommerce", glyph: "claude", task: "Wiring Stripe webhook retries", repo: "persona_v2", branch: "jason/webhook-retries", status: ["working", "Working · 3m"], term: T.open, focus: true },
+  { name: "DocInvestigator", glyph: "claude", task: "Missing receipts in the PDF worker", repo: "persona_v2", branch: "fix/pdf-queue", status: ["waiting", "Needs you"], term: T.doc, wait: true },
+  { name: "TaskConnect", glyph: "shell", task: "pnpm --filter tasks test", repo: "persona_v2", branch: "main", status: ["done", "Passed"], term: T.task },
+  { name: "Referral flag", glyph: "claude", task: "Flag read before load on invite screen", repo: "persona_v2", branch: "ff/referral", status: ["working", "Planning · 48s"], term: T.ff },
+];
+const glyph = (p, cls = "") => `<span class="glyph ${p.glyph} ${cls}">${p.glyph === "claude" ? "✻" : "$"}</span>`;
+const pill = (p) => `<span class="pill ${p.status[0]}"><span class="dot"></span>${p.status[1]}</span>`;
+const root = document.getElementById("root");
+
+if (variant === "A") {
+  root.insertAdjacentHTML("beforeend", `
+  <div class="brand"><b></b>GridBash</div>
+  <aside class="side">
+    <h6>Grids</h6>
+    <div class="grid-item on">Persona<span class="dots"><i class="w"></i><i class="y"></i><i></i><i class="w"></i></span></div>
+    <div class="grid-item">PersonaOnboarding<span class="dots"><i class="w"></i><i></i></span></div>
+    <div class="grid-item">Gridbash<span class="dots"><i class="w"></i></span></div>
+    <h6>Parked</h6>
+    <div class="grid-item">Subagent<span class="n">watching</span></div>
+    <div class="grid-item">ZachFastUber<span class="n">watching</span></div>
+  </aside>
+  <section class="main">
+    <div class="top"><h1>Persona</h1><span class="meta">4 agents · 1 needs you</span>
+      <div class="right"><span class="btn">Park</span><span class="btn primary">＋ New pane <span class="kbd" style="color:#ffd0d4;border-color:rgba(255,255,255,.25)">⌘T</span></span></div></div>
+    <div class="panes">${panes.map((p, i) => `
+      <article class="card ${p.focus ? "focus" : ""}">
+        <div class="card-head">${glyph(p)}<div class="titles"><b>${p.name}</b><span>${p.task} · <em>${p.repo}</em> ⎇ ${p.branch}</span></div>${pill(p)}</div>
+        <div class="term">${p.term}</div>
+        <span class="kbd num">⌘${i + 1}</span>
+      </article>`).join("")}
+    </div>
+    <div class="composer"><span class="spark">✻</span>Message OpenCommerce, or type / for commands<span class="right"><span class="kbd">⌘K</span></span></div>
+  </section>`);
+}
+
+if (variant === "B") {
+  const [hero, ...rest] = panes;
+  root.insertAdjacentHTML("beforeend", `
+  <div class="bar">
+    <span class="tab on"><i class="w"></i>Persona</span><span class="tab"><i class="w"></i>PersonaOnboarding</span><span class="tab"><i></i>Gridbash</span><span class="tab"><i class="y"></i>Parked · 2</span>
+    <span class="right"><span class="kbd">⌘K</span> command</span>
+  </div>
+  <div class="stage">
+    <section class="hero">
+      <div class="hero-head">${glyph(hero)}<div><b>${hero.name}</b><div class="sub">${hero.task} · <em>${hero.repo}</em> ⎇ ${hero.branch}</div></div>${pill(hero)}</div>
+      <div class="term">${hero.term}</div>
+    </section>
+    <aside class="rail">${rest.map((p, i) => `
+      <article class="mini ${p.wait ? "wait" : ""}">
+        <div class="mini-head">${glyph(p)}<b>${p.name}</b>${pill(p)}</div>
+        <div class="term">${p.term}</div>
+        <span class="kbd">⌘${i + 2}</span>
+      </article>`).join("")}
+    </aside>
+  </div>`);
+}
+
+if (variant === "C") {
+  root.insertAdjacentHTML("beforeend", `
+  <div class="bar"><span class="crumb">GridBash / <b>Persona</b></span>
+    <span class="summary"><span class="pill working"><span class="dot"></span>2 working</span><span class="pill waiting"><span class="dot"></span>1 needs you</span><span class="pill done"><span class="dot"></span>1 done</span></span></div>
+  <div class="tiles">${panes.map((p, i) => `
+    <article class="tile ${p.focus ? "focus" : ""} ${p.wait ? "wait" : ""}"><span class="wash"></span>
+      <div class="tile-head"><span class="idx">0${i + 1}</span><b>${p.name}</b>${pill(p)}</div>
+      <div class="tile-sub"><span>${p.task}</span><span><em>${p.repo}</em> ⎇ ${p.branch}</span></div>
+      <div class="term">${p.term}</div>
+    </article>`).join("")}
+  </div>`);
+}
+</script>
+</body>
+</html>
