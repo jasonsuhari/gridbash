@@ -6,14 +6,11 @@ use std::{
     io::{self, BufWriter, Stdout, Write},
     mem,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::mpsc as std_mpsc,
     thread,
     time::{Duration, Instant, SystemTime},
 };
-
-#[cfg(target_os = "macos")]
-use std::process::Stdio;
 
 use anyhow::{Context, Result, anyhow};
 use crossterm::{
