@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="480" viewBox="0 0 960 480" role="img" aria-labelledby="chart-title chart-description">
   <title id="chart-title">jasonsuhari/gridbash GitHub star history</title>
-  <desc id="chart-description">Cumulative GitHub stars from Jul 5, 2026 through Nov 16, 2026. Current total: 131 stars.</desc>
+  <desc id="chart-description">Cumulative GitHub stars from Jul 5, 2026 through Nov 17, 2026. Current total: 131 stars.</desc>
   <defs>
     <linearGradient id="area-gradient" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.38" />
@@ -33,7 +33,7 @@
   </style>
   <rect class="background" width="960" height="480" rx="18" />
   <text class="title" x="72" y="38">Star history</text>
-  <text class="subtitle" x="72" y="61">jasonsuhari/gridbash · updated 2026-11-16</text>
+  <text class="subtitle" x="72" y="61">jasonsuhari/gridbash · updated 2026-11-17</text>
   <line class="grid" x1="72" y1="412.00" x2="918" y2="412.00" />
 <text class="axis-label" x="58" y="417.00" text-anchor="end">0</text>
 <line class="grid" x1="72" y1="345.20" x2="918" y2="345.20" />
@@ -53,11 +53,11 @@
 <line class="grid vertical" x1="495.00" y1="78" x2="495.00" y2="412" />
 <text class="axis-label" x="495.00" y="442" text-anchor="middle">Sep 10, 2026</text>
 <line class="grid vertical" x1="706.50" y1="78" x2="706.50" y2="412" />
-<text class="axis-label" x="706.50" y="442" text-anchor="middle">Oct 13, 2026</text>
+<text class="axis-label" x="706.50" y="442" text-anchor="middle">Oct 14, 2026</text>
 <line class="grid vertical" x1="918.00" y1="78" x2="918.00" y2="412" />
-<text class="axis-label" x="918.00" y="442" text-anchor="middle">Nov 16, 2026</text>
-  <path d="M 72.00,412.00 L 90.94,389.73 L 97.25,376.37 L 103.57,360.79 L 109.88,347.43 L 116.19,338.52 L 122.51,309.57 L 128.82,273.95 L 135.13,216.05 L 141.45,175.97 L 147.76,164.84 L 154.07,140.35 L 166.70,135.89 L 280.34,133.67 L 349.79,131.44 L 362.42,129.21 L 469.75,126.99 L 501.31,122.53 L 728.60,120.31 L 918.00,120.31 L 918.00,412.00 L 72,412.00 Z" fill="url(#area-gradient)" />
-  <path class="line" d="M 72.00,412.00 L 90.94,389.73 L 97.25,376.37 L 103.57,360.79 L 109.88,347.43 L 116.19,338.52 L 122.51,309.57 L 128.82,273.95 L 135.13,216.05 L 141.45,175.97 L 147.76,164.84 L 154.07,140.35 L 166.70,135.89 L 280.34,133.67 L 349.79,131.44 L 362.42,129.21 L 469.75,126.99 L 501.31,122.53 L 728.60,120.31 L 918.00,120.31" />
+<text class="axis-label" x="918.00" y="442" text-anchor="middle">Nov 17, 2026</text>
+  <path d="M 72.00,412.00 L 90.80,389.73 L 97.07,376.37 L 103.33,360.79 L 109.60,347.43 L 115.87,338.52 L 122.13,309.57 L 128.40,273.95 L 134.67,216.05 L 140.93,175.97 L 147.20,164.84 L 153.47,140.35 L 166.00,135.89 L 278.80,133.67 L 347.73,131.44 L 360.27,129.21 L 466.80,126.99 L 498.13,122.53 L 723.73,120.31 L 918.00,120.31 L 918.00,412.00 L 72,412.00 Z" fill="url(#area-gradient)" />
+  <path class="line" d="M 72.00,412.00 L 90.80,389.73 L 97.07,376.37 L 103.33,360.79 L 109.60,347.43 L 115.87,338.52 L 122.13,309.57 L 128.40,273.95 L 134.67,216.05 L 140.93,175.97 L 147.20,164.84 L 153.47,140.35 L 166.00,135.89 L 278.80,133.67 L 347.73,131.44 L 360.27,129.21 L 466.80,126.99 L 498.13,122.53 L 723.73,120.31 L 918.00,120.31" />
   <circle class="point" cx="918.00" cy="120.31" r="6" filter="url(#glow)" />
   <text class="count" x="906.00" y="106.31" text-anchor="end">131 ★</text>
 </svg>
